@@ -1,18 +1,53 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { BarlowCondensed_600SemiBold } from '@expo-google-fonts/barlow-condensed/600SemiBold';
+import { useFonts } from 'expo-font';
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import { useEffect, useState } from 'react';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { Colors } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
+import { createDefaultSession } from '@/treadmill/default-session';
+import { TreadmillProvider } from '@/treadmill/treadmill-context';
 
+// A splash fica até a fonte dos números carregar (ou falhar).
 SplashScreen.preventAutoHideAsync();
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+// Temas de navegação com o fundo do app, para não piscar branco entre telas.
+const lightTheme = {
+  ...DefaultTheme,
+  colors: { ...DefaultTheme.colors, background: Colors.light.background, text: Colors.light.text },
+};
+const darkTheme = {
+  ...DarkTheme,
+  colors: { ...DarkTheme.colors, background: Colors.dark.background, text: Colors.dark.text },
+};
+
+export default function RootLayout() {
+  const scheme = useColorScheme();
+  // Uma sessão só durante toda a vida do app.
+  const [store] = useState(createDefaultSession);
+  // Importa só o peso usado, não a família inteira.
+  const [fontsLoaded, fontError] = useFonts({ BarlowCondensed_600SemiBold });
+  const ready = fontsLoaded || fontError !== null;
+
+  useEffect(() => {
+    if (ready) {
+      // Sem a fonte, os números caem na fonte do sistema; o app não trava por isso.
+      SplashScreen.hideAsync();
+    }
+  }, [ready]);
+
+  if (!ready) {
+    return null;
+  }
+
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <TreadmillProvider store={store}>
+      <ThemeProvider value={scheme === 'dark' ? darkTheme : lightTheme}>
+        <StatusBar style="auto" />
+        <Stack screenOptions={{ headerShown: false }} />
+      </ThemeProvider>
+    </TreadmillProvider>
   );
 }
