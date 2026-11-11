@@ -1,6 +1,7 @@
 export * from './advertisement';
 export * from './bytes';
 export * from './control-point';
+export * from './device-information';
 export * from './feature';
 export * from './machine-status';
 export * from './ranges';

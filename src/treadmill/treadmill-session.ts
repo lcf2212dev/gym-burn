@@ -8,10 +8,13 @@ import type {
 import {
   ControlPointOp,
   ControlPointResult,
+  DEVICE_INFORMATION_FIELDS,
+  DEVICE_INFORMATION_SERVICE,
   FTMS,
   bytesToHex,
   controlPointOpName,
   controlPointResultName,
+  decodeDeviceInformationText,
   encodePause,
   encodeRequestControl,
   encodeSetTargetInclination,
@@ -48,6 +51,38 @@ import type {
   TreadmillMetrics,
   TreadmillSnapshot,
 } from './types';
+
+/**
+ * Quanto esperar por uma característica do Device Information antes de desistir
+ * das demais. Elas só alimentam o registro. Vale para o JavaScript; a fila do
+ * rádio no Android segue presa até o aparelho responder (veja `logDeviceInformation`).
+ */
+const DEVICE_INFORMATION_READ_TIMEOUT_MS = 2000;
+
+class ReadTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`sem resposta em ${ms} ms`);
+    this.name = 'ReadTimeoutError';
+  }
+}
+
+/** `connection.read` com prazo; a leitura que perde a corrida é ignorada. */
+async function readWithTimeout(
+  connection: BleConnection,
+  serviceUuid: string,
+  characteristicUuid: string,
+  ms: number,
+): Promise<Uint8Array> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ReadTimeoutError(ms)), ms);
+  });
+  try {
+    return await Promise.race([connection.read(serviceUuid, characteristicUuid), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface TreadmillSessionOptions {
   /** O rádio de verdade. */
@@ -611,6 +646,12 @@ export class TreadmillSession implements TreadmillStore {
       this.update({ device: { id: deviceId, name: connection.name ?? known?.name ?? null } });
 
       await this.logGatt(connection);
+      await this.logDeviceInformation(connection, epoch);
+      if (epoch !== this.linkEpoch) {
+        // O link acabou durante as leituras: quem o encerrou já cuidou de tudo, e seguir
+        // com `setUpTreadmill` falaria (por deviceId) com uma conexão que já não é esta.
+        return;
+      }
       const capabilities = await this.setUpTreadmill(connection, epoch);
       if (epoch !== this.linkEpoch) {
         return;
@@ -756,6 +797,58 @@ export class TreadmillSession implements TreadmillStore {
       }
     } catch (error) {
       this.log('error', `Não foi possível listar os serviços: ${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * Lê o Device Information (modelo, fabricante, série, versões) e registra: é a
+   * única fonte do modelo exato, que o anúncio não traz. Uma leitura que falha
+   * vira linha de erro e as outras seguem; uma que não responde no prazo encerra
+   * as demais, porque se a fila do rádio travou, as próximas também travariam.
+   *
+   * O prazo só faz o JavaScript parar de esperar. No Android o rádio atende uma
+   * operação por vez, então uma leitura que o aparelho nunca responde também
+   * prende o `setUpTreadmill` seguinte, até o timeout do próprio Bluetooth
+   * (cerca de 30 s), e a conexão cai. Por isso o modelo é lido primeiro e o
+   * resto é bônus.
+   */
+  private async logDeviceInformation(connection: BleConnection, epoch: number): Promise<void> {
+    let available: CharacteristicInfo[];
+    try {
+      available = await connection.getCharacteristics(DEVICE_INFORMATION_SERVICE);
+    } catch (error) {
+      this.log('error', `Device Information indisponível: ${errorMessage(error)}`);
+      return;
+    }
+    for (const field of DEVICE_INFORMATION_FIELDS) {
+      const readable = available.some(
+        (characteristic) => characteristic.canRead && sameUuid(characteristic.uuid, field.uuid),
+      );
+      if (!readable) {
+        continue;
+      }
+      const label = `Device Information, ${field.name}`;
+      try {
+        const bytes = await readWithTimeout(
+          connection,
+          DEVICE_INFORMATION_SERVICE,
+          field.uuid,
+          DEVICE_INFORMATION_READ_TIMEOUT_MS,
+        );
+        if (epoch !== this.linkEpoch) {
+          return;
+        }
+        const text = field.text ? `${label}: "${decodeDeviceInformationText(bytes)}"` : label;
+        this.log('rx', text, bytes);
+      } catch (error) {
+        if (epoch !== this.linkEpoch) {
+          return;
+        }
+        this.log('error', `${label}: ${errorMessage(error)}`);
+        if (error instanceof ReadTimeoutError) {
+          return;
+        }
+      }
     }
   }
 

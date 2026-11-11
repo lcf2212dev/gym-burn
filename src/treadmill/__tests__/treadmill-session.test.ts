@@ -9,6 +9,7 @@ import {
 import {
   ControlPointOp,
   ControlPointResult,
+  DEVICE_INFORMATION_SERVICE,
   FTMS,
   bytesToHex,
   encodePause,
@@ -18,6 +19,7 @@ import {
   encodeStartOrResume,
   encodeStop,
   sameUuid,
+  uuid16,
 } from '@/ftms';
 import {
   SIMULATED_DEVICE_ID,
@@ -61,7 +63,10 @@ const isInclinationWrite = (hex: string) =>
 interface Hooks {
   prepare?: () => Promise<void>;
   connect?: (open: () => Promise<BleConnection>) => Promise<BleConnection>;
-  getCharacteristics?: (open: () => Promise<CharacteristicInfo[]>) => Promise<CharacteristicInfo[]>;
+  getCharacteristics?: (
+    open: () => Promise<CharacteristicInfo[]>,
+    service: string,
+  ) => Promise<CharacteristicInfo[]>;
   /** Intercepta a escrita no Control Point; `forward` entrega ao simulador. */
   write?: (data: Uint8Array, forward: () => Promise<void>) => Promise<void>;
   /** Não assina o Fitness Machine Status: a esteira "não avisa" nada. */
@@ -70,6 +75,23 @@ interface Hooks {
   indication?: (data: Uint8Array) => Uint8Array | null;
   /** Troca ou engole (`null`) cada notificação de Treadmill Data. */
   treadmillData?: (data: Uint8Array) => Uint8Array | null;
+  /**
+   * Faz o aparelho expor o Device Information Service (0x180A) com estas
+   * características (UUID → valor). Um `Error` faz a leitura falhar; uma função
+   * dá o resultado da leitura (pode nunca resolver); `null` expõe a
+   * característica sem a propriedade Read. Sem isso o aparelho não tem o
+   * serviço, como o simulador.
+   *
+   * Como no transporte real, listar as características vem do cache e funciona
+   * com o link fechado, mas ler com o link fechado falha.
+   */
+  deviceInformation?: Record<string, Uint8Array | Error | null | (() => Promise<Uint8Array>)>;
+  /**
+   * `getCharacteristics` do FTMS responde do cache feito na conexão, mesmo com o
+   * link fechado, como o transporte real (`info.characteristics`). O simulador
+   * lança nesse caso, o que esconde o que a sessão faria depois de a conexão acabar.
+   */
+  cacheCharacteristics?: boolean;
 }
 
 interface Rig {
@@ -78,6 +100,8 @@ interface Rig {
   hooks: Hooks;
   /** Tudo o que a sessão tentou escrever no Control Point, em hexadecimal. */
   writes: string[];
+  /** Os UUIDs que a sessão tentou ler no Device Information, na ordem. */
+  deviceInformationReads: string[];
   /** Quantas vezes a sessão chamou `disconnect()` na conexão. */
   disconnects: { count: number };
   /** Entrega uma indication ao ouvinte da sessão, sem passar pelo simulador. */
@@ -91,19 +115,51 @@ function createRig(
   const sim = new SimulatedTreadmillTransport(options);
   const hooks: Hooks = {};
   const writes: string[] = [];
+  const deviceInformationReads: string[] = [];
   const disconnects = { count: 0 };
   let sink: ((data: Uint8Array) => void) | null = null;
 
-  const tap = (inner: BleConnection): BleConnection => {
+  const tap = (inner: BleConnection, cachedFtms: CharacteristicInfo[] | null): BleConnection => {
     const base: BleConnection = {
       getServices: () => inner.getServices(),
       deviceId: inner.deviceId,
       name: inner.name,
-      getCharacteristics: (service) => {
-        const open = () => inner.getCharacteristics(service);
-        return hooks.getCharacteristics ? hooks.getCharacteristics(open) : open();
+      getCharacteristics: async (service) => {
+        const open = () =>
+          cachedFtms && sameUuid(service, FTMS.service)
+            ? Promise.resolve(cachedFtms)
+            : inner.getCharacteristics(service);
+        if (hooks.getCharacteristics) {
+          return hooks.getCharacteristics(open, service);
+        }
+        if (hooks.deviceInformation && sameUuid(service, DEVICE_INFORMATION_SERVICE)) {
+          return Object.entries(hooks.deviceInformation).map(([uuid, value]) => ({
+            uuid,
+            canRead: value !== null,
+            canWrite: false,
+            canNotify: false,
+            canIndicate: false,
+          }));
+        }
+        return open();
       },
-      read: (service, uuid) => inner.read(service, uuid),
+      read: async (service, uuid) => {
+        if (hooks.deviceInformation && sameUuid(service, DEVICE_INFORMATION_SERVICE)) {
+          deviceInformationReads.push(uuid);
+          // Link fechado: o simulador recusa, como o BleManager faria.
+          await inner.getCharacteristics(FTMS.service);
+          const entry = Object.entries(hooks.deviceInformation).find(([key]) =>
+            sameUuid(key, uuid),
+          );
+          const value = entry?.[1];
+          if (value === undefined || value === null) {
+            throw new Error(`Característica ${uuid} não existe ou não permite leitura`);
+          }
+          if (value instanceof Error) throw value;
+          return typeof value === 'function' ? value() : value;
+        }
+        return inner.read(service, uuid);
+      },
       write: async (service, uuid, data) => {
         writes.push(bytesToHex(data));
         const forward = () => inner.write(service, uuid, data);
@@ -147,7 +203,10 @@ function createRig(
     connect: async (deviceId) => {
       const open = () => sim.connect(deviceId);
       const inner = hooks.connect ? await hooks.connect(open) : await open();
-      return tap(inner);
+      const cachedFtms = hooks.cacheCharacteristics
+        ? await inner.getCharacteristics(FTMS.service)
+        : null;
+      return tap(inner, cachedFtms);
     },
   };
 
@@ -166,6 +225,7 @@ function createRig(
     session,
     hooks,
     writes,
+    deviceInformationReads,
     disconnects,
     deliverIndication: (data) => sink?.(data),
   };
@@ -798,6 +858,226 @@ describe('conexão', () => {
       expect(snap(rig).belt).toBe('running');
       expect(snap(rig).control).toBe('granted');
       expect(snap(rig).busy).toBe(false);
+    });
+  });
+});
+
+describe('Device Information ao conectar', () => {
+  const ascii = (text: string) => Uint8Array.from(text, (char) => char.charCodeAt(0));
+  const MODEL = uuid16(0x2a24);
+  const MANUFACTURER = uuid16(0x2a29);
+  const SERIAL = uuid16(0x2a25);
+  const SYSTEM_ID = uuid16(0x2a23);
+
+  /** As linhas do registro que vieram do Device Information, só com o que importa. */
+  const infoLines = (rig: Rig) =>
+    snap(rig)
+      .log.filter((entry) => entry.label.startsWith('Device Information'))
+      .map(({ kind, label, hex }) => ({ kind, label, hex }));
+
+  /** Tudo o que o registro ganhou depois de "Desconectando". */
+  const afterDisconnecting = (rig: Rig) => {
+    const labels = snap(rig).log.map((entry) => entry.label);
+    const at = labels.indexOf('Desconectando');
+    expect(at).toBeGreaterThan(-1);
+    return labels.slice(at + 1);
+  };
+
+  it('lê e registra modelo, fabricante e série, na ordem da sessão e antes de a esteira ficar pronta', async () => {
+    const rig = createRig();
+    // Fora da ordem de propósito: o registro segue a ordem da sessão, não a do aparelho.
+    rig.hooks.deviceInformation = {
+      [SERIAL]: ascii('TM781B2307C00018'),
+      [MANUFACTURER]: ascii('Matrix'),
+      [MODEL]: ascii('T600X'),
+    };
+    await connect(rig);
+
+    expect(infoLines(rig)).toEqual([
+      {
+        kind: 'rx',
+        label: 'Device Information, Model Number: "T600X"',
+        hex: bytesToHex(ascii('T600X')),
+      },
+      {
+        kind: 'rx',
+        label: 'Device Information, Manufacturer Name: "Matrix"',
+        hex: bytesToHex(ascii('Matrix')),
+      },
+      {
+        kind: 'rx',
+        label: 'Device Information, Serial Number: "TM781B2307C00018"',
+        hex: bytesToHex(ascii('TM781B2307C00018')),
+      },
+    ]);
+    expect(rig.deviceInformationReads).toEqual([MODEL, MANUFACTURER, SERIAL]);
+    const labels = snap(rig).log.map((entry) => entry.label);
+    expect(labels.indexOf('Device Information, Serial Number: "TM781B2307C00018"')).toBeLessThan(
+      labels.indexOf('Esteira pronta'),
+    );
+  });
+
+  it('o System ID, que é binário, vai só em hexadecimal', async () => {
+    const rig = createRig();
+    const systemId = Uint8Array.of(0xa0, 0xbb, 0x3e, 0xff, 0xfe, 0x40, 0x19, 0x31);
+    rig.hooks.deviceInformation = { [SYSTEM_ID]: systemId };
+    await connect(rig);
+
+    expect(infoLines(rig)).toEqual([
+      { kind: 'rx', label: 'Device Information, System ID', hex: bytesToHex(systemId) },
+    ]);
+  });
+
+  it('uma leitura que falha vira uma linha de erro e as outras seguem, sem aviso ao usuário', async () => {
+    const rig = createRig();
+    rig.hooks.deviceInformation = {
+      [MODEL]: new Error('Insufficient authentication'),
+      [MANUFACTURER]: ascii('Matrix'),
+      [SERIAL]: ascii('TM781B2307C00018'),
+    };
+    await connect(rig);
+
+    expect(infoLines(rig)).toEqual([
+      {
+        kind: 'error',
+        label: 'Device Information, Model Number: Insufficient authentication',
+        hex: null,
+      },
+      expect.objectContaining({
+        kind: 'rx',
+        label: 'Device Information, Manufacturer Name: "Matrix"',
+      }),
+      expect.objectContaining({
+        kind: 'rx',
+        label: 'Device Information, Serial Number: "TM781B2307C00018"',
+      }),
+    ]);
+    expect(snap(rig).phase).toBe('connected');
+    expect(snap(rig).notice).toBeNull();
+  });
+
+  it('uma leitura que nunca responde não segura a conexão e as seguintes são abandonadas', async () => {
+    const rig = createRig();
+    rig.hooks.deviceInformation = {
+      [MODEL]: ascii('T600X'),
+      [MANUFACTURER]: () => new Promise<Uint8Array>(() => undefined),
+      [SERIAL]: ascii('TM781B2307C00018'),
+    };
+
+    rig.session.actions.connect(SIMULATED_DEVICE_ID);
+    await advance(200);
+    expect(snap(rig).phase).toBe('connecting'); // esperando o Manufacturer Name
+    await advance(2000);
+
+    expect(snap(rig).phase).toBe('connected');
+    expect(snap(rig).notice).toBeNull();
+    expect(infoLines(rig)).toEqual([
+      expect.objectContaining({ kind: 'rx', label: 'Device Information, Model Number: "T600X"' }),
+      {
+        kind: 'error',
+        label: 'Device Information, Manufacturer Name: sem resposta em 2000 ms',
+        hex: null,
+      },
+    ]);
+    expect(rig.deviceInformationReads).toEqual([MODEL, MANUFACTURER]);
+  });
+
+  it('um aparelho sem o serviço não ganha linha nenhuma', async () => {
+    const rig = createRig();
+    await connect(rig);
+
+    expect(infoLines(rig)).toEqual([]);
+    expect(rig.deviceInformationReads).toEqual([]);
+    expect(snap(rig).phase).toBe('connected');
+  });
+
+  it('pula a característica que não tem a propriedade Read, sem tentar lê-la', async () => {
+    const rig = createRig();
+    rig.hooks.deviceInformation = { [MODEL]: null, [MANUFACTURER]: ascii('Matrix') };
+    await connect(rig);
+
+    expect(rig.deviceInformationReads).toEqual([MANUFACTURER]);
+    expect(infoLines(rig)).toEqual([
+      expect.objectContaining({
+        kind: 'rx',
+        label: 'Device Information, Manufacturer Name: "Matrix"',
+      }),
+    ]);
+  });
+
+  it('se não dá nem para listar as características, registra o erro e conecta mesmo assim', async () => {
+    const rig = createRig();
+    rig.hooks.getCharacteristics = (open, service) =>
+      sameUuid(service, DEVICE_INFORMATION_SERVICE) ? Promise.reject(new Error('GATT falhou')) : open();
+    await connect(rig);
+
+    expect(infoLines(rig)).toEqual([
+      { kind: 'error', label: 'Device Information indisponível: GATT falhou', hex: null },
+    ]);
+    expect(snap(rig).phase).toBe('connected');
+    expect(snap(rig).notice).toBeNull();
+  });
+
+  it('caracteres de controle do aparelho não quebram o registro em duas linhas', async () => {
+    const rig = createRig();
+    rig.hooks.deviceInformation = { [MODEL]: Uint8Array.of(0x54, 0x0a, 0x36) };
+    await connect(rig);
+
+    const [line] = infoLines(rig);
+    expect(line.label).toBe('Device Information, Model Number: "T\\x0A6"');
+    expect(line.label).not.toContain('\n');
+  });
+
+  it('aspas e "hex=" no valor não imitam a coluna do hexadecimal', async () => {
+    const rig = createRig();
+    rig.hooks.deviceInformation = { [MODEL]: ascii('T600X"  hex=AA') };
+    await connect(rig);
+
+    const [line] = infoLines(rig);
+    expect(line.label).toBe('Device Information, Model Number: "T600X\\x22  hex\\x3DAA"');
+    expect(line.hex).toBe(bytesToHex(ascii('T600X"  hex=AA')));
+  });
+
+  describe('o usuário desconecta no meio das leituras', () => {
+    it('a leitura que responde depois não é registrada e nada mais é lido nem configurado', async () => {
+      const rig = createRig();
+      rig.hooks.cacheCharacteristics = true;
+      rig.hooks.deviceInformation = {
+        [MODEL]: async () => {
+          rig.session.actions.disconnect();
+          return ascii('T600X');
+        },
+        [MANUFACTURER]: ascii('Matrix'),
+      };
+
+      rig.session.actions.connect(SIMULATED_DEVICE_ID);
+      await advance(500);
+
+      expect(snap(rig).phase).toBe('idle');
+      expect(infoLines(rig)).toEqual([]);
+      expect(rig.deviceInformationReads).toEqual([MODEL]);
+      // Sem erros falsos de "Fitness Machine Feature: Conexão encerrada" e companhia.
+      expect(afterDisconnecting(rig)).toEqual([]);
+    });
+
+    it('a leitura que falha depois também não vira linha de erro', async () => {
+      const rig = createRig();
+      rig.hooks.cacheCharacteristics = true;
+      rig.hooks.deviceInformation = {
+        [MODEL]: async () => {
+          rig.session.actions.disconnect();
+          throw new Error('Conexão encerrada');
+        },
+        [MANUFACTURER]: ascii('Matrix'),
+      };
+
+      rig.session.actions.connect(SIMULATED_DEVICE_ID);
+      await advance(500);
+
+      expect(snap(rig).phase).toBe('idle');
+      expect(infoLines(rig)).toEqual([]);
+      expect(rig.deviceInformationReads).toEqual([MODEL]);
+      expect(afterDisconnecting(rig)).toEqual([]);
     });
   });
 });
