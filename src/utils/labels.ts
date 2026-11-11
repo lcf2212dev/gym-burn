@@ -23,7 +23,7 @@ export const BELT_STATE_LABELS: Record<BeltState, string> = {
   running: 'Em movimento',
   paused: 'Pausada',
   stopped: 'Parada',
-  safetyKey: 'Parada pela chave de segurança',
+  safetyKey: 'Parada pelo Emergency Stop ou pela chave de segurança',
 };
 
 export const MODE_LABELS: Record<SessionMode, string> = {

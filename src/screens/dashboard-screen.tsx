@@ -6,6 +6,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { ActionButton } from '@/components/action-button';
 import { BeltControls } from '@/components/belt-controls';
 import { ControlColumn } from '@/components/control-column';
+import { GuideStrip } from '@/components/guide-strip';
 import { IdentityCheck } from '@/components/identity-check';
 import { MetricGrid } from '@/components/metric-grid';
 import { NoticeBanner } from '@/components/notice-banner';
@@ -58,6 +59,8 @@ export function DashboardScreen() {
       // A borda de baixo é do rodapé fixo.
       edges={['top', 'left', 'right']}
       style={[styles.safe, { backgroundColor: theme.background }]}>
+      {/* Fora da rolagem, como o rodapé: a rolagem encolhe, Parar continua à vista. */}
+      <GuideStrip />
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.content}>
           <View style={styles.header}>
@@ -109,7 +112,8 @@ export function DashboardScreen() {
             <Text
               accessibilityRole="alert"
               style={[styles.safetyKey, { color: theme.noticeError, borderColor: theme.noticeError }]}>
-              Lona parada pela chave de segurança. Recoloque a chave e inicie pelo painel da esteira.
+              Lona parada pelo Emergency Stop ou pela chave de segurança. Libere o botão, recoloque
+              a chave e inicie pelo painel da esteira.
             </Text>
           ) : null}
           <NoticeBanner />

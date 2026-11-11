@@ -1,11 +1,14 @@
+import { router } from 'expo-router';
 import { useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
 import { DeviceRow } from '@/components/device-row';
+import { GuideStrip } from '@/components/guide-strip';
 import { NoticeBanner } from '@/components/notice-banner';
 import { MaxContentWidth, MinTouchTarget, Spacing } from '@/constants/theme';
+import { useGuide, useGuideActions } from '@/guide/guide-context';
 import { useTheme } from '@/hooks/use-theme';
 import { DiagnosticsModal } from '@/screens/diagnostics-modal';
 import { looksLikeMatrixConsole } from '@/treadmill/t600x';
@@ -25,8 +28,17 @@ export function ConnectScreen() {
   const connectingId = useTreadmill((s) => s.device?.id ?? null);
   const hasLog = useTreadmill((s) => s.log.length > 0);
   const actions = useTreadmillActions();
+  const guideActive = useGuide((s) => s.active);
+  const guide = useGuideActions();
   const [showAll, setShowAll] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+
+  const openGuide = () => {
+    if (!guideActive) {
+      guide.start();
+    }
+    router.push('/roteiro');
+  };
 
   const scanning = scan !== 'idle';
   const connecting = phase === 'connecting';
@@ -38,19 +50,27 @@ export function ConnectScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
+      <GuideStrip />
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.content}>
           <View>
             <View style={styles.topLine}>
               <Text style={[styles.appName, { color: theme.textSecondary }]}>Gym Burn</Text>
-              {/* Uma conexão que falhou também deixa registro: é daqui que se chega a ele. */}
-              {hasLog ? (
+              <View style={styles.topActions}>
                 <ActionButton
                   variant="text"
-                  label="Diagnóstico"
-                  onPress={() => setDiagnosticsOpen(true)}
+                  label="Registros"
+                  onPress={() => router.push('/registros')}
                 />
-              ) : null}
+                {/* Uma conexão que falhou também deixa registro: é daqui que se chega a ele. */}
+                {hasLog ? (
+                  <ActionButton
+                    variant="text"
+                    label="Diagnóstico"
+                    onPress={() => setDiagnosticsOpen(true)}
+                  />
+                ) : null}
+              </View>
             </View>
             <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
               Conecte sua esteira
@@ -65,6 +85,12 @@ export function ConnectScreen() {
               </View>
             ))}
           </View>
+
+          <ActionButton
+            variant="outline"
+            label="Primeiro teste na esteira"
+            onPress={openGuide}
+          />
 
           <NoticeBanner />
 
@@ -161,6 +187,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  topActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   appName: {
     fontSize: 16,

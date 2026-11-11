@@ -8,7 +8,9 @@ O que faz:
 - ajusta velocidade e inclinação;
 - inicia, pausa e para a lona;
 - modo demonstração, com uma esteira simulada, sem usar o rádio;
-- tela de diagnóstico, com o registro dos pacotes enviados e recebidos, que pode ser compartilhado como texto.
+- tela de diagnóstico, com o registro dos pacotes enviados e recebidos, que pode ser compartilhado como texto;
+- roteiro do primeiro teste na esteira real, que acompanha cada passo, marca o que a esteira aceitou e pergunta o que só quem está na frente dela vê;
+- gravação contínua de tudo o que acontece em arquivos de texto no celular, para depurar depois.
 
 ## Estado atual: leia antes de usar
 
@@ -68,6 +70,30 @@ A lista do app mostra os aparelhos que anunciam o serviço FTMS e os que têm no
 
 Sem esteira por perto, **Abrir modo demonstração** conecta na esteira simulada.
 
+### Roteiro do primeiro teste
+
+Na tela de conexão, **Primeiro teste na esteira** abre um roteiro de seis passos para o primeiro contato com a esteira real: segurança, modo APP, conectar, confirmar a esteira, comandos (Iniciar, +0,1, Parar e o Emergency Stop com o app conectado) e envio do registro. Com o roteiro em andamento, uma faixa no topo das telas diz o que fazer agora e abre o roteiro ao toque. O registro pode ser enviado de qualquer passo: se algo travar (a esteira não aparece na busca, por exemplo), é ele que explica o motivo.
+
+Os passos de conexão e de comandos são marcados sozinhos, pelo que a esteira responde. Cada comando termina de um destes jeitos:
+
+- **concluída**: a esteira aceitou o comando e a velocidade medida mostrou o efeito em até 15 segundos: a lona andou depois do Iniciar, ou ficou em zero depois do Parar. No Parar isso ainda não basta, porque o app vê a lona parar, mas não quem a parou. O roteiro pergunta se ela parou sozinha, sem você tocar no painel nem no Emergency Stop, e é a sua resposta que conclui a verificação;
+- **sem confirmação**: a esteira não respondeu ao comando; o detalhe diz se a lona andou ou parou mesmo assim;
+- **falhou**: a esteira recusou o comando, ou aceitou e o efeito não apareceu no prazo, ou, no Parar, você respondeu que parou a lona pelo painel ou pelo Emergency Stop, ou que ela não parou.
+
+Uma tentativa que dá certo não apaga as que falharam antes: se um Parar foi aceito e a lona não parou, isso continua na verificação e no resumo, como tentativa anterior sem sucesso, mesmo que o Parar seguinte funcione.
+
+Um comando só é posto à prova se pedido na condição certa: Iniciar com a lona parada, Parar com ela girando livre. Um Parar com a lona já parada, com a esteira avisando outra parada ou logo depois de um Pausar do app não prova nada: a verificação continua pendente e pede para repetir. O mesmo vale se a esteira avisar parada de emergência antes de a lona parar.
+
+O Emergency Stop também depende de quem está na frente da esteira. O roteiro o dá por concluído sozinho num caso só: a lona girava livre (sem Parar ou Pausar pedido pelo app, sem aviso de parada da esteira, sem a velocidade já caindo), a esteira avisou a parada de emergência (Fitness Machine Status 0x03) e, sem mais nada no meio, a velocidade medida ficou em zero. Lona que para sem esse aviso (o Stop do painel faz isso), conexão que termina com a lona girando e aviso que chega com a lona já freando viram uma pergunta, e a resposta é sua: **A lona parou** ou **A lona não parou**. O botão acionado com a lona já parada não testa nada: o roteiro pede para repetir com ela girando. O resumo diz de onde veio o resultado (resposta sua ou aviso da esteira).
+
+As perguntas do Parar e do Emergency Stop aparecem em qualquer passo do roteiro, porque o Emergency Stop pode derrubar a conexão e devolver o roteiro ao passo 3.
+
+O roteiro só vê o que a esteira informa: as leituras de velocidade (em geral uma por segundo) e os avisos que ela mandar. No Iniciar não há pergunta, e fica um limite: se a lona for iniciada pelo painel nos 15 segundos depois de um Iniciar aceito, a verificação sai como concluída. Enquanto uma verificação espera a lona, não toque no painel (a tela avisa); e, se o que você viu não bate com o resumo, anote nas observações do passo 6.
+
+O roteiro também pergunta o código que o painel mostrou ao entrar no modo APP e se o indicador Bluetooth acendeu. Tudo isso vai para o registro.
+
+Dá para ensaiar em casa, no modo demonstração ou com `tools/esteira-ble.py` (veja abaixo).
+
 ### Qual é a minha esteira?
 
 Numa academia com várias T600X lado a lado, todas ao alcance podem aparecer na busca, e conectar na errada significaria comandar a lona de outra pessoa. Por isso:
@@ -75,6 +101,20 @@ Numa academia com várias T600X lado a lado, todas ao alcance podem aparecer na 
 - A lista vem ordenada por força de sinal. Com o celular apoiado no painel da sua esteira, ela tende a ser a primeira, mas a vizinha fica a um metro: o sinal sozinho não garante.
 - Se o código que o painel mostra ao entrar no modo APP fizer parte do nome (hipótese ainda não confirmada), é ele que identifica a esteira na lista.
 - Depois de conectar, o app **não aceita nenhum comando** até você confirmar que a esteira é a sua. Confira no painel dela: o indicador Bluetooth acendeu e os números (tempo, velocidade, inclinação) são os mesmos do app. Se não forem, toque em **Não é, desconectar** e escolha outra.
+
+## Registros
+
+O app grava em arquivo de texto tudo o que acontece: cada pacote enviado e recebido (em hexadecimal), cada mudança de estado, cada toque nos botões, cada aviso mostrado, os aparelhos encontrados na busca com o que anunciaram, e os passos e respostas do roteiro. É um arquivo por execução do app, que começa com a linha `App aberto` e é gravado aos poucos: a cada 2 segundos, a cada 100 linhas, na hora quando há uma linha de erro e quando o app vai para segundo plano. Num erro fatal de JavaScript, a linha do erro é gravada de forma síncrona antes de o app encerrar. Um fechamento abrupto do processo (o sistema matando o app, uma falha nativa, o celular desligando) ainda pode perder as últimas linhas, até 2 segundos de registro. Se a gravação falhar no meio (disco cheio), um trecho pode aparecer repetido, com uma linha de erro avisando.
+
+- **Onde ficam**: no armazenamento interno do app. A tela **Registros** (no topo da tela de conexão, ou em Diagnóstico → Registros salvos) lista os arquivos, com **Compartilhar** (abre a folha de compartilhamento do sistema com o arquivo) e **Apagar**. Ficam guardados os 30 arquivos mais recentes, até 30 MB.
+- **Cópia fora do app**: em Registros, **Escolher pasta para a cópia** abre o seletor de pastas do sistema. A partir daí cada trecho gravado vai também para um arquivo de mesmo nome nessa pasta, que o aplicativo Arquivos e um computador ligado por USB conseguem ler. Com a pasta `Documents/GymBurn`, por exemplo:
+
+  ```bash
+  adb pull /sdcard/Documents/GymBurn/
+  ```
+
+- **Formato**: uma linha por evento, `HH:mm:ss.SSS TIPO texto [hex=BYTES]`, com um cabeçalho que identifica o app, o aparelho e o sistema. Os tipos são `rx` e `tx` (pacotes), `state` (estado da sessão), `action` (toque do usuário), `guide` (roteiro), `info` e `error`. `docs/protocolo-ftms.md` explica como ler os pacotes.
+- **O que eles contêm de terceiros**: o nome e o endereço Bluetooth dos aparelhos que estavam por perto durante a busca. Vale lembrar disso antes de mandar um registro para alguém.
 
 ## Segurança
 
@@ -87,7 +127,7 @@ O app comanda uma máquina com uma pessoa em cima. Por desenho (`src/treadmill/t
 - Enquanto houver um Parar a executar, nenhum outro comando é escrito nem aceito. Ele esvazia a fila, não espera o comando que estava em andamento e insiste por cerca de 10 s, contados do toque, se a esteira recusar a escrita; se ainda assim não for aceito, o app avisa para parar pela esteira.
 - Depois de Pausar ou Parar, Iniciar/Retomar fica bloqueado (botão desabilitado) até a lona parar de girar, no mínimo 1,5 s e no máximo 15 s: um segundo toque no mesmo lugar não a recoloca em movimento.
 - O alvo de velocidade só é mantido enquanto a lona o segue. Se ela se afasta dele ou para longe dele (alguém mexeu no console e a esteira não avisou), o alvo é descartado e o próximo ajuste parte da velocidade medida. A checagem é feita a cada leitura da esteira, uma por segundo, e fica suspensa por 3 s depois de cada ajuste do app ou aviso de alvo da esteira (o tempo de a lona começar a reagir); nesses intervalos o app ainda pode usar o alvo antigo.
-- O botão Parar fica sempre na tela, inclusive com o Diagnóstico aberto.
+- Com uma esteira confirmada que aceita comandos, o botão Parar fica à vista em todas as telas do app: no painel e também no Diagnóstico, no roteiro do primeiro teste e nos Registros, que o cobrem. O que é do sistema fica por cima dele enquanto está aberto: a folha de compartilhamento, o seletor de pastas e o teclado. Compartilhe registros e escolha a pasta de cópia com a lona parada.
 - Se a conexão cai, a lona continua como estava.
 
 Responsabilidade do usuário:
@@ -118,11 +158,13 @@ esteira  (codec FTMS em src/ftms usado pela sessão e pelo simulador)
 | `src/ble` | Contrato `BleTransport`, implementação com `react-native-ble-manager` e permissões do Android. |
 | `src/simulator` | Esteira simulada que fala FTMS em bytes; usada no modo demonstração e nos testes. |
 | `src/treadmill` | Sessão (estado, fila de comandos, regras de segurança), tipos, faixas da T600X e contexto React. |
+| `src/guide` | Roteiro do primeiro teste: deriva os passos do estado da sessão e das respostas do usuário. |
+| `src/logging` | Gravador dos registros em arquivo: formato das linhas, buffer, retenção e cópia para uma pasta do celular. |
 | `src/screens`, `src/components` | Telas (conexão, painel, diagnóstico) e componentes de interface. |
 | `src/utils` | Formatação, textos e geração do relatório de diagnóstico. |
 | `tools` | `esteira-ble.py`: periférico BLE que imita uma esteira FTMS, para testar com um celular de verdade. |
 
-As rotas ficam em `src/app` (Expo Router).
+As rotas ficam em `src/app` (Expo Router): a tela principal, `roteiro` e `registros`. `src/app-services.ts` cria o gravador, a sessão e o roteiro, que vivem durante toda a execução do app.
 
 ## Testes e verificação
 
@@ -140,6 +182,7 @@ npm run lint
 python3 tools/esteira-ble.py                # esteira que aceita comandos
 python3 tools/esteira-ble.py --countdown 3  # o Start só conclui depois de 3 s (para testar o Parar no meio)
 python3 tools/esteira-ble.py --read-only    # sem Control Point: só transmite dados
+kill -USR1 <pid do script>                  # "aperta" o Emergency Stop do painel
 ```
 
 É uma terceira implementação do protocolo, independente do codec do app e da esteira simulada. Não substitui o teste na T600X: ela pode se comportar de outro jeito.

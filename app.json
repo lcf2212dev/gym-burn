@@ -38,7 +38,8 @@
           "isBleRequired": true,
           "bluetoothAlwaysPermission": "O Gym Burn usa o Bluetooth para ler os dados da esteira e ajustar velocidade e inclinação."
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true,

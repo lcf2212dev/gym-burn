@@ -65,6 +65,46 @@ export interface TreadmillMetrics {
   updatedAt: number | null;
 }
 
+/** Os comandos que o app envia à esteira. */
+export type CommandKind = 'start' | 'pause' | 'stop' | 'speed' | 'inclination';
+
+/** Pedidos e desfechos dos comandos de um tipo, desde que a conexão atual começou. */
+export interface CommandTally {
+  /**
+   * Toques que o app aceitou para enviar. Sobe na hora do toque, antes de qualquer resposta, e
+   * pode passar da soma dos desfechos: toques repetidos viram um comando só, e um Parar cancela
+   * o que estava na fila.
+   */
+  requested: number;
+  /** A esteira respondeu Success. */
+  accepted: number;
+  /** A esteira recusou, a escrita falhou ou o app não conseguiu o controle. */
+  refused: number;
+  /** A esteira não respondeu a tempo: não se sabe se obedeceu. */
+  unconfirmed: number;
+}
+
+/**
+ * Uma linha do registro completo da sessão. Ao contrário de `LogEntry`, que é
+ * um resumo limitado para a tela de diagnóstico, estas linhas incluem todos os
+ * pacotes, as mudanças de estado e os toques do usuário, e são gravadas em
+ * arquivo.
+ */
+export interface TraceLine {
+  /** `Date.now()` do evento. */
+  at: number;
+  /**
+   * `rx`/`tx`: pacote recebido/enviado. `state`: mudança de estado da sessão.
+   * `action`: ação pedida pela interface. `guide`: roteiro do primeiro teste.
+   */
+  kind: 'rx' | 'tx' | 'info' | 'error' | 'state' | 'action' | 'guide';
+  text: string;
+  /** Bytes em hexadecimal, quando a linha é um pacote. */
+  hex: string | null;
+}
+
+export type TraceSink = (line: TraceLine) => void;
+
 export interface Notice {
   id: number;
   kind: 'info' | 'success' | 'warning' | 'error';
@@ -117,6 +157,8 @@ export interface TreadmillSnapshot {
    * recoloque em movimento.
    */
   startBlocked: boolean;
+  /** Quantos comandos de cada tipo a esteira aceitou, recusou ou deixou sem resposta nesta conexão. */
+  commands: Record<CommandKind, CommandTally>;
   /** Há comando na fila ou aguardando resposta da esteira. */
   busy: boolean;
   /** Aviso mais recente para o usuário; some com `dismissNotice()`. */

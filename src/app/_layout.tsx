@@ -5,9 +5,11 @@ import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 
+import { createAppServices } from '@/app-services';
 import { Colors } from '@/constants/theme';
+import { GuideProvider } from '@/guide/guide-context';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { createDefaultSession } from '@/treadmill/default-session';
+import { RecorderProvider } from '@/logging/recorder-context';
 import { TreadmillProvider } from '@/treadmill/treadmill-context';
 
 // A splash fica até a fonte dos números carregar (ou falhar).
@@ -25,8 +27,8 @@ const darkTheme = {
 
 export default function RootLayout() {
   const scheme = useColorScheme();
-  // Uma sessão só durante toda a vida do app.
-  const [store] = useState(createDefaultSession);
+  // Um gravador, uma sessão e um roteiro durante toda a vida do app.
+  const [services] = useState(createAppServices);
   // Importa só o peso usado, não a família inteira.
   const [fontsLoaded, fontError] = useFonts({ BarlowCondensed_600SemiBold });
   const ready = fontsLoaded || fontError !== null;
@@ -43,11 +45,15 @@ export default function RootLayout() {
   }
 
   return (
-    <TreadmillProvider store={store}>
-      <ThemeProvider value={scheme === 'dark' ? darkTheme : lightTheme}>
-        <StatusBar style="auto" />
-        <Stack screenOptions={{ headerShown: false }} />
-      </ThemeProvider>
-    </TreadmillProvider>
+    <RecorderProvider store={services.recorder}>
+      <TreadmillProvider store={services.session}>
+        <GuideProvider store={services.guide}>
+          <ThemeProvider value={scheme === 'dark' ? darkTheme : lightTheme}>
+            <StatusBar style="auto" />
+            <Stack screenOptions={{ headerShown: false }} />
+          </ThemeProvider>
+        </GuideProvider>
+      </TreadmillProvider>
+    </RecorderProvider>
   );
 }

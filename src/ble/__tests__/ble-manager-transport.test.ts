@@ -255,7 +255,34 @@ describe('scan', () => {
       rssi: -61,
       advertisesFtms: true,
       ftms: null,
+      advertisement: 'serviços=[0x1826]',
     });
+  });
+
+  it('resume em texto o que o aparelho anuncia, para o registro', () => {
+    const { onDevice } = startScan();
+
+    ble.__emit('discover', {
+      id: DEVICE_ID,
+      name: 'CTM781',
+      rssi: -50,
+      advertising: {
+        isConnectable: false,
+        serviceUUIDs: ['1826', 'fff0'],
+        serviceData: { '1826': { bytes: [0x01, 0x01, 0x00] } },
+        manufacturerData: { '004c': { bytes: [0x02, 0x15] } },
+      },
+    });
+
+    expect(onDevice.mock.calls[0][0].advertisement).toBe(
+      'serviços=[0x1826, 0xFFF0] serviceData[0x1826]=01 01 00 fabricante[004c]=02 15 não conectável',
+    );
+  });
+
+  it('sem nada anunciado, o resumo fica vazio', () => {
+    const { onDevice } = startScan();
+    ble.__emit('discover', { id: DEVICE_ID, rssi: -80, advertising: {} });
+    expect(onDevice.mock.calls[0][0].advertisement).toBeNull();
   });
 
   it.each([

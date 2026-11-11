@@ -35,11 +35,15 @@ import { T600X_INCLINATION_RANGE, T600X_SPEED_RANGE } from './t600x';
 import type { TreadmillStore } from './treadmill-context';
 import type {
   BeltState,
+  CommandKind,
+  CommandTally,
   LogEntry,
   Notice,
   RangeInfo,
   SessionMode,
   TreadmillActions,
+  TraceLine,
+  TraceSink,
   TreadmillCapabilities,
   TreadmillMetrics,
   TreadmillSnapshot,
@@ -83,6 +87,11 @@ export interface TreadmillSessionOptions {
    */
   stopPreemptDelayMs?: number;
   maxLogEntries?: number;
+  /**
+   * Recebe o registro completo da sessão (todos os pacotes, mudanças de estado
+   * e ações), para gravar em arquivo. Uma falha aqui nunca interrompe a sessão.
+   */
+  trace?: TraceSink;
   now?: () => number;
 }
 
@@ -111,6 +120,15 @@ type ControlOutcome =
   | { status: 'linkLost' }
   | { status: 'writeFailed'; error: Error }
   | { status: 'refused'; resultCode: number };
+
+const NO_TALLY: CommandTally = { requested: 0, accepted: 0, refused: 0, unconfirmed: 0 };
+const NO_COMMANDS: Record<CommandKind, CommandTally> = {
+  start: NO_TALLY,
+  pause: NO_TALLY,
+  stop: NO_TALLY,
+  speed: NO_TALLY,
+  inclination: NO_TALLY,
+};
 
 const EMPTY_METRICS: TreadmillMetrics = {
   speedKmh: null,
@@ -141,8 +159,24 @@ const SETTLED_INCLINATION_SAMPLES = 10;
 // Uma tentativa cortada pelo prazo vira "não foi possível parar" mesmo que a
 // escrita ainda chegue à esteira.
 const STOP_MIN_ATTEMPT_MS = 500;
+// Campos do snapshot cuja mudança entra no registro completo.
+const TRACED_STATE = [
+  'mode',
+  'scan',
+  'phase',
+  'control',
+  'identityConfirmed',
+  'belt',
+  'targetSpeedKmh',
+  'targetInclinationPercent',
+  'startBlocked',
+  'busy',
+] as const satisfies readonly (keyof TreadmillSnapshot)[];
 // Variação de RSSI abaixo da qual a lista de aparelhos não é redesenhada.
 const RSSI_NOISE_DB = 6;
+// Anúncios diferentes do mesmo aparelho que entram no registro numa busca. O teto segura o
+// aparelho que muda o anúncio a cada pacote (um contador nos dados do fabricante, por exemplo).
+const MAX_TRACED_ADVERTISEMENTS = 6;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -174,6 +208,10 @@ function formatNumber(value: number, digits: number): string {
   return value.toFixed(digits).replace('.', ',');
 }
 
+function formatSignedNumber(value: number, digits: number): string {
+  return `${value < 0 ? '−' : '+'}${formatNumber(Math.abs(value), digits)}`;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -188,6 +226,19 @@ function commandVerb(command: Command): string {
       return command.action === 'start' ? 'iniciar a lona' : 'pausar a lona';
     case 'stop':
       return 'parar a lona';
+  }
+}
+
+function commandKind(command: Command): CommandKind {
+  switch (command.kind) {
+    case 'speed':
+      return 'speed';
+    case 'inclination':
+      return 'inclination';
+    case 'belt':
+      return command.action;
+    case 'stop':
+      return 'stop';
   }
 }
 
@@ -251,6 +302,8 @@ export class TreadmillSession implements TreadmillStore {
   // Incrementados a cada busca / conexão: continuações assíncronas de uma
   // operação anterior comparam o valor e desistem.
   private scanEpoch = 0;
+  /** Anúncios de cada aparelho que já entraram no registro nesta busca. */
+  private readonly tracedAdvertisements = new Map<string, Set<string>>();
   private linkEpoch = 0;
 
   private connection: BleConnection | null = null;
@@ -315,6 +368,7 @@ export class TreadmillSession implements TreadmillStore {
       targetTrustMs: 3_000,
       stopPreemptDelayMs: 250,
       maxLogEntries: 300,
+      trace: () => undefined,
       now: Date.now,
       ...options,
     };
@@ -333,22 +387,40 @@ export class TreadmillSession implements TreadmillStore {
       targetSpeedKmh: null,
       targetInclinationPercent: null,
       startBlocked: false,
+      commands: NO_COMMANDS,
       busy: false,
       notice: null,
       log: [],
     };
+    // Cada toque entra no registro completo, antes de qualquer efeito: é o que
+    // permite depois comparar o que o usuário pediu com o que a esteira fez.
+    const traced = (name: string, run: () => void) => () => {
+      this.trace('action', name);
+      run();
+    };
     this.actions = {
-      startScan: () => void this.startScan(),
-      stopScan: () => this.stopScan(),
-      connect: (deviceId) => void this.connect(deviceId, 'ble'),
-      openDemo: () => void this.connect(this.options.demo.deviceId, 'demo'),
-      disconnect: () => void this.disconnect(),
-      confirmIdentity: () => this.confirmIdentity(),
-      changeSpeed: (deltaKmh) => this.changeSpeed(deltaKmh),
-      changeInclination: (deltaPercent) => this.changeInclination(deltaPercent),
-      start: () => this.requestBelt('start'),
-      pause: () => this.requestBelt('pause'),
-      stop: () => this.requestBelt('stop'),
+      startScan: traced('Procurar esteiras', () => void this.startScan()),
+      stopScan: traced('Parar busca', () => this.stopScan()),
+      connect: (deviceId) => {
+        this.trace('action', `Conectar em ${deviceId}`);
+        void this.connect(deviceId, 'ble');
+      },
+      openDemo: traced('Abrir modo demonstração', () =>
+        void this.connect(this.options.demo.deviceId, 'demo'),
+      ),
+      disconnect: traced('Desconectar', () => void this.disconnect()),
+      confirmIdentity: traced('É esta esteira', () => this.confirmIdentity()),
+      changeSpeed: (deltaKmh) => {
+        this.trace('action', `Velocidade ${formatSignedNumber(deltaKmh, 2)} km/h`);
+        this.changeSpeed(deltaKmh);
+      },
+      changeInclination: (deltaPercent) => {
+        this.trace('action', `Inclinação ${formatSignedNumber(deltaPercent, 1)} %`);
+        this.changeInclination(deltaPercent);
+      },
+      start: traced('Iniciar', () => this.requestBelt('start')),
+      pause: traced('Pausar', () => this.requestBelt('pause')),
+      stop: traced('Parar', () => this.requestBelt('stop')),
       dismissNotice: () => this.update({ notice: null }),
       clearLog: () => this.update({ log: [] }),
     };
@@ -371,6 +443,7 @@ export class TreadmillSession implements TreadmillStore {
       return;
     }
     const epoch = ++this.scanEpoch;
+    this.tracedAdvertisements.clear();
     this.update({ mode: 'ble', scan: 'starting', devices: [], notice: null });
     try {
       await this.options.ble.prepare();
@@ -432,7 +505,13 @@ export class TreadmillSession implements TreadmillStore {
     const index = devices.findIndex((device) => device.id === found.id);
     if (index === -1) {
       this.update({ devices: sortDevices([...devices, found]) });
-      if (found.advertisesFtms) this.logFtmsDeviceFound(found);
+      if (found.advertisesFtms) {
+        this.logFtmsDeviceFound(found);
+      }
+      // Todo aparelho novo entra no registro completo, com o que anunciou: se
+      // a esteira não for reconhecida, é por estas linhas que se descobre com
+      // que nome (ou sem nome) e com que serviços ela aparece.
+      this.traceScannedDevice(found, false);
       return;
     }
     // Anúncio e scan response chegam separados: um traz o nome, o outro os
@@ -444,7 +523,12 @@ export class TreadmillSession implements TreadmillStore {
       rssi: found.rssi ?? known.rssi,
       advertisesFtms: found.advertisesFtms || known.advertisesFtms,
       ftms: found.ftms ?? known.ftms,
+      advertisement: found.advertisement ?? known.advertisement,
     };
+    // O nome ou os serviços que só chegam no segundo pacote também vão para o registro.
+    if (merged.name !== known.name || this.isNewAdvertisement(found)) {
+      this.traceScannedDevice(merged, true);
+    }
     const rssiMoved =
       merged.rssi !== null &&
       (known.rssi === null || Math.abs(merged.rssi - known.rssi) >= RSSI_NOISE_DB);
@@ -461,6 +545,28 @@ export class TreadmillSession implements TreadmillStore {
     next[index] = rssiMoved ? merged : { ...merged, rssi: known.rssi };
     this.update({ devices: sortDevices(next) });
     if (merged.advertisesFtms && !known.advertisesFtms) this.logFtmsDeviceFound(merged);
+  }
+
+  /** O anúncio deste pacote ainda não entrou no registro (e o aparelho não estourou o teto). */
+  private isNewAdvertisement(found: ScannedDevice): boolean {
+    if (!found.advertisement) {
+      return false;
+    }
+    const seen = this.tracedAdvertisements.get(found.id);
+    return !seen || (!seen.has(found.advertisement) && seen.size < MAX_TRACED_ADVERTISEMENTS);
+  }
+
+  private traceScannedDevice(device: ScannedDevice, update: boolean): void {
+    if (device.advertisement) {
+      const seen = this.tracedAdvertisements.get(device.id) ?? new Set<string>();
+      seen.add(device.advertisement);
+      this.tracedAdvertisements.set(device.id, seen);
+    }
+    this.trace(
+      'info',
+      `Aparelho na busca${update ? ' (atualização)' : ''}: ${device.name ?? 'sem nome'} (${device.id}), RSSI ${device.rssi ?? '?'}` +
+        (device.advertisement ? `, anúncio: ${device.advertisement}` : ''),
+    );
   }
 
   private logFtmsDeviceFound(device: ScannedDevice): void {
@@ -721,12 +827,12 @@ export class TreadmillSession implements TreadmillStore {
     if (connection) {
       await connection.disconnect().catch(() => undefined);
     }
-    this.resetLinkState();
+    // Num passo só: quem observa a sessão nunca vê "conectado" com o estado da conexão já zerado.
     // A lista de aparelhos fica: reconectar depois de uma queda é um toque só.
-    this.update({ phase: 'idle', device: null });
+    this.resetLinkState({ phase: 'idle', device: null });
   }
 
-  private resetLinkState(): void {
+  private resetLinkState(extra: Partial<TreadmillSnapshot> = {}): void {
     this.beltQueue = [];
     this.pendingSpeed = null;
     this.pendingInclination = null;
@@ -761,7 +867,9 @@ export class TreadmillSession implements TreadmillStore {
       targetSpeedKmh: null,
       targetInclinationPercent: null,
       startBlocked: false,
+      commands: NO_COMMANDS,
       busy: false,
+      ...extra,
     });
   }
 
@@ -792,6 +900,8 @@ export class TreadmillSession implements TreadmillStore {
         `Treadmill Data (flags 0x${data.flags.toString(16).toUpperCase().padStart(4, '0')})${anomaly}`,
         bytes,
       );
+    } else {
+      this.trace('rx', 'Treadmill Data', bytes);
     }
 
     const previous = this.snapshot.metrics;
@@ -1058,6 +1168,7 @@ export class TreadmillSession implements TreadmillStore {
     if (target === this.snapshot.targetSpeedKmh) {
       return;
     }
+    this.countRequest('speed');
     this.pendingSpeed = target;
     this.speedTargetSetAt = this.options.now();
     this.update({ targetSpeedKmh: target });
@@ -1081,6 +1192,7 @@ export class TreadmillSession implements TreadmillStore {
     if (target === this.snapshot.targetInclinationPercent) {
       return;
     }
+    this.countRequest('inclination');
     this.pendingInclination = target;
     this.update({ targetInclinationPercent: target });
     void this.pump();
@@ -1091,6 +1203,7 @@ export class TreadmillSession implements TreadmillStore {
       return;
     }
     if (action === 'stop') {
+      this.countRequest('stop');
       this.requestStop();
       return;
     }
@@ -1101,7 +1214,9 @@ export class TreadmillSession implements TreadmillStore {
       if (this.isStartBlocked()) {
         return;
       }
+      this.countRequest('start');
     } else {
+      this.countRequest('pause');
       this.markBraked();
       // Nada que acelere a lona sai depois de um Pausar.
       this.beltQueue = this.beltQueue.filter((queued) => queued !== 'start');
@@ -1369,6 +1484,7 @@ export class TreadmillSession implements TreadmillStore {
       case 'linkLost':
         return;
       case 'writeFailed':
+        this.tally(command, 'refused');
         this.dropQueuedCommands();
         this.notify(
           'error',
@@ -1378,6 +1494,7 @@ export class TreadmillSession implements TreadmillStore {
         );
         return;
       case 'refused':
+        this.tally(command, 'refused');
         this.dropQueuedCommands();
         this.notify(
           'error',
@@ -1406,6 +1523,7 @@ export class TreadmillSession implements TreadmillStore {
           return;
         }
         if (control.status === 'refused') {
+          this.tally(command, 'refused');
           this.notify(
             'error',
             `A esteira recusou o controle pelo app, e sem ele não aceita o Parar. ${STOP_FALLBACK}`,
@@ -1441,6 +1559,7 @@ export class TreadmillSession implements TreadmillStore {
               : 'o pedido de controle foi interrompido';
         }
         if (this.options.now() + this.options.stopRetryDelayMs + STOP_MIN_ATTEMPT_MS > deadline) {
+          this.tally(command, 'refused');
           this.notify('error', `Não foi possível parar a lona pelo app: ${failure}. ${STOP_FALLBACK}`);
           return;
         }
@@ -1454,6 +1573,13 @@ export class TreadmillSession implements TreadmillStore {
   private applyOutcome(command: Command, outcome: ProcedureOutcome): void {
     const verb = commandVerb(command);
     const isStop = command.kind === 'stop';
+    if (outcome.type === 'timeout') {
+      this.tally(command, 'unconfirmed');
+    } else if (outcome.type === 'writeError' || outcome.type === 'result') {
+      const accepted =
+        outcome.type === 'result' && outcome.resultCode === ControlPointResult.Success;
+      this.tally(command, accepted ? 'accepted' : 'refused');
+    }
     switch (outcome.type) {
       case 'linkLost':
         return;
@@ -1514,6 +1640,25 @@ export class TreadmillSession implements TreadmillStore {
           `A esteira respondeu com um código desconhecido (${controlPointResultName(outcome.resultCode)}) ao ${verb}.${isStop ? ` ${STOP_FALLBACK}` : ''}`,
         );
     }
+  }
+
+  private tally(command: Command, outcome: 'accepted' | 'refused' | 'unconfirmed'): void {
+    this.bumpTally(commandKind(command), outcome);
+  }
+
+  /**
+   * Conta o toque que o app aceitou para enviar, na hora do toque. Quem observa a sessão sabe
+   * assim que um Parar ou Pausar foi pedido, mesmo que a resposta demore ou nunca venha.
+   */
+  private countRequest(kind: CommandKind): void {
+    this.bumpTally(kind, 'requested');
+  }
+
+  private bumpTally(kind: CommandKind, field: keyof CommandTally): void {
+    const current = this.snapshot.commands[kind];
+    this.update({
+      commands: { ...this.snapshot.commands, [kind]: { ...current, [field]: current[field] + 1 } },
+    });
   }
 
   /** O comando valeu: fixa o alvo ou o estado da lona. */
@@ -1759,9 +1904,69 @@ export class TreadmillSession implements TreadmillStore {
     if (!changed) {
       return;
     }
+    const before = this.snapshot;
     this.snapshot = { ...this.snapshot, ...patch };
+    this.traceStateChanges(before, this.snapshot);
     for (const listener of this.listeners) {
-      listener();
+      // Um ouvinte com defeito não pode interromper quem chamou: `update` roda no meio do
+      // caminho de um Parar.
+      try {
+        listener();
+      } catch (error) {
+        this.trace('error', `Um ouvinte da sessão falhou: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  /** Manda uma linha só para o registro completo (o arquivo), sem passar pela tela de diagnóstico. */
+  private trace(kind: TraceLine['kind'], text: string, bytes?: Uint8Array): void {
+    try {
+      this.options.trace({
+        at: this.options.now(),
+        kind,
+        text,
+        hex: bytes ? bytesToHex(bytes) : null,
+      });
+    } catch {
+      // O registro é acessório: uma falha ao gravar não pode afetar a esteira.
+    }
+  }
+
+  private traceStateChanges(before: TreadmillSnapshot, after: TreadmillSnapshot): void {
+    for (const key of TRACED_STATE) {
+      if (before[key] !== after[key]) {
+        this.trace('state', `${key}: ${String(before[key])} → ${String(after[key])}`);
+      }
+    }
+    if (before.device !== after.device) {
+      this.trace(
+        'state',
+        after.device ? `device: ${after.device.name ?? 'sem nome'} (${after.device.id})` : 'device: nenhum',
+      );
+    }
+    if (before.capabilities !== after.capabilities && after.capabilities) {
+      const { hasControlPoint, speedRange, inclinationRange, feature } = after.capabilities;
+      this.trace(
+        'state',
+        `capabilities: Control Point ${hasControlPoint ? 'sim' : 'não'}; ` +
+          `velocidade ${speedRange.min}–${speedRange.max} passo ${speedRange.step} (${speedRange.source}); ` +
+          `inclinação ${inclinationRange.min}–${inclinationRange.max} passo ${inclinationRange.step} (${inclinationRange.source}); ` +
+          (feature
+            ? `features 0x${feature.machineFeaturesRaw.toString(16)} / alvos 0x${feature.targetSettingsRaw.toString(16)}`
+            : 'Feature não lida'),
+      );
+    }
+    if (before.notice !== after.notice && after.notice) {
+      this.trace('state', `aviso (${after.notice.kind}): ${after.notice.message}`);
+    }
+    if (before.commands !== after.commands) {
+      const summary = (Object.keys(after.commands) as CommandKind[])
+        .map((kind) => {
+          const tally = after.commands[kind];
+          return `${kind} ${tally.requested}/${tally.accepted}/${tally.refused}/${tally.unconfirmed}`;
+        })
+        .join(', ');
+      this.trace('state', `commands (pedidos/aceitos/recusados/sem resposta): ${summary}`);
     }
   }
 
@@ -1782,6 +1987,7 @@ export class TreadmillSession implements TreadmillStore {
       log.splice(0, log.length - this.options.maxLogEntries);
     }
     this.update({ log });
+    this.trace(kind, label, bytes);
   }
 }
 

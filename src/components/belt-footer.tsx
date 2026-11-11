@@ -1,0 +1,43 @@
+import { StyleSheet, View } from 'react-native';
+
+import { BeltControls } from '@/components/belt-controls';
+import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
+import { useTreadmill } from '@/treadmill/treadmill-context';
+
+/**
+ * Rodapé com os botões da lona para as telas que cobrem o painel (diagnóstico, roteiro,
+ * registros): Parar tem que continuar à vista em qualquer tela. Não renderiza nada sem uma
+ * esteira confirmada que aceite comandos.
+ */
+export function BeltFooter() {
+  const theme = useTheme();
+  const canCommandBelt = useTreadmill(
+    (s) => s.phase === 'connected' && s.control !== 'unavailable' && s.identityConfirmed,
+  );
+
+  if (!canCommandBelt) {
+    return null;
+  }
+
+  return (
+    <View style={[styles.footer, { borderColor: theme.border, backgroundColor: theme.background }]}>
+      <View style={styles.content}>
+        <BeltControls />
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  footer: {
+    borderTopWidth: 1,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+  },
+  content: {
+    width: '100%',
+    maxWidth: MaxContentWidth,
+    alignSelf: 'center',
+  },
+});

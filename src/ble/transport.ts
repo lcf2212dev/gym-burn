@@ -33,6 +33,12 @@ export interface ScannedDevice {
   advertisesFtms: boolean;
   /** Service Data do FTMS decodificado, quando o anúncio traz. */
   ftms: FtmsAdvertisement | null;
+  /**
+   * O anúncio em texto (serviços, Service Data, dados do fabricante), só para o
+   * registro: se a esteira não for reconhecida, é por aqui que se vê como ela
+   * se anuncia.
+   */
+  advertisement?: string | null;
 }
 
 export interface CharacteristicInfo {

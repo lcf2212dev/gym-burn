@@ -7,7 +7,15 @@ import type {
   PeripheralInfo,
 } from 'react-native-ble-manager';
 
-import { characteristicName, FTMS, normalizeUuid, parseFtmsServiceData, sameUuid } from '@/ftms';
+import {
+  bytesToHex,
+  characteristicName,
+  FTMS,
+  normalizeUuid,
+  parseFtmsServiceData,
+  sameUuid,
+  shortUuid,
+} from '@/ftms';
 
 import { requestBlePermissions } from './permissions';
 import { BleUnavailableError } from './transport';
@@ -74,6 +82,25 @@ function noop(): void {}
 // Anúncio -> ScannedDevice
 // ---------------------------------------------------------------------------
 
+/** O que o aparelho anuncia, em texto, para o registro. */
+function describeAdvertisement(advertising: AdvertisingData): string | null {
+  const parts: string[] = [];
+  const services = advertising.serviceUUIDs ?? [];
+  if (services.length > 0) {
+    parts.push(`serviços=[${services.map(shortUuid).join(', ')}]`);
+  }
+  for (const [uuid, data] of Object.entries(advertising.serviceData ?? {})) {
+    parts.push(`serviceData[${shortUuid(uuid)}]=${bytesToHex(data?.bytes ?? [])}`);
+  }
+  for (const [company, data] of Object.entries(advertising.manufacturerData ?? {})) {
+    parts.push(`fabricante[${company}]=${bytesToHex(data?.bytes ?? [])}`);
+  }
+  if (advertising.isConnectable === false) {
+    parts.push('não conectável');
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
 function toScannedDevice(peripheral: Peripheral): ScannedDevice {
   const advertising: AdvertisingData = peripheral.advertising ?? {};
   const serviceData = advertising.serviceData ?? {};
@@ -93,6 +120,7 @@ function toScannedDevice(peripheral: Peripheral): ScannedDevice {
     rssi: typeof peripheral.rssi === 'number' ? peripheral.rssi : null,
     advertisesFtms: listsFtmsService || ftmsKey !== undefined,
     ftms: ftmsBytes ? parseFtmsServiceData(Uint8Array.from(ftmsBytes)) : null,
+    advertisement: describeAdvertisement(advertising),
   };
 }
 

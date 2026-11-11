@@ -12,6 +12,8 @@ Uso:
     python3 tools/esteira-ble.py --countdown 3  # o Start só conclui depois de 3 s
     python3 tools/esteira-ble.py --read-only    # sem Control Point: só transmite
 
+    kill -USR1 <pid>    # com o script rodando: "aperta" o Emergency Stop do painel
+
 Requisitos: BlueZ rodando, adaptador com papel de periférico, python-dbus e
 python-gobject. Cada leitura, escrita e indication é impressa com o horário.
 """
@@ -369,6 +371,16 @@ class Treadmill:
             return INVALID_PARAMETER, quick, None
         return NOT_SUPPORTED, quick, None
 
+    def emergency_stop(self):
+        """Alguém apertou o Emergency Stop: a lona para e a esteira avisa pelo Machine Status."""
+        log("EMERGENCY STOP no painel")
+        self.belt = "stopped"
+        self.target_speed = 0.0
+        self.changed()
+        if self.status is not None and self.status.notifying:
+            self.status.send(bytes([0x03]))  # Fitness Machine Stopped by Safety Key
+        return True
+
     def changed(self):
         log(f"         lona: {self.belt}")
         if self.training.notifying:
@@ -503,6 +515,8 @@ def main():
         return False
 
     signal_add = getattr(GLibUnix, "signal_add", None) or GLib.unix_signal_add
+    # `kill -USR1 <pid>` faz o papel de alguém apertando o Emergency Stop no painel.
+    signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, treadmill.emergency_stop)
     signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, stop)
     signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, stop)
     try:

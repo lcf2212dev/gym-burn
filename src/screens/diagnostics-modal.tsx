@@ -1,9 +1,10 @@
+import { router } from 'expo-router';
 import type { ReactNode } from 'react';
 import { FlatList, Modal, Share, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
-import { BeltControls } from '@/components/belt-controls';
+import { BeltFooter } from '@/components/belt-footer';
 import { Fonts, MaxContentWidth, Spacing } from '@/constants/theme';
 import { characteristicName } from '@/ftms';
 import { useTheme } from '@/hooks/use-theme';
@@ -82,9 +83,6 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
   const trainingStatus = useTreadmill((s) => s.trainingStatus);
   const belt = useTreadmill((s) => s.belt);
   const log = useTreadmill((s) => s.log);
-  const canCommandBelt = useTreadmill(
-    (s) => s.phase === 'connected' && s.control !== 'unavailable' && s.identityConfirmed,
-  );
   const { clearLog } = useTreadmillActions();
 
   // Cópia invertida: o log do snapshot não pode ser mutado.
@@ -95,6 +93,12 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
     const message = buildDiagnosticsReport({ mode, device, capabilities, log });
     // Fechar a folha de compartilhamento sem escolher nada não é um erro.
     Share.share({ message, title: 'Registro do Gym Burn' }).catch(() => {});
+  };
+
+  // Os arquivos completos ficam numa tela própria, fora do modal.
+  const openLogs = () => {
+    onClose();
+    router.push('/registros');
   };
 
   const header = (
@@ -194,6 +198,7 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
           />
         </View>
         {log.length === 0 ? <Paragraph>O registro está vazio.</Paragraph> : null}
+        <ActionButton variant="outline" label="Registros salvos" onPress={openLogs} />
       </Section>
     </View>
   );
@@ -215,13 +220,7 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
         initialNumToRender={30}
       />
       {/* O modal cobre o rodapé do painel: Parar tem que continuar à vista aqui. */}
-      {canCommandBelt ? (
-        <View style={[styles.footer, { borderColor: theme.border }]}>
-          <View style={styles.footerContent}>
-            <BeltControls />
-          </View>
-        </View>
-      ) : null}
+      <BeltFooter />
     </SafeAreaView>
   );
 }
@@ -265,16 +264,6 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     paddingHorizontal: Spacing.three,
     paddingBottom: Spacing.five,
-  },
-  footer: {
-    borderTopWidth: 1,
-    paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.three,
-  },
-  footerContent: {
-    width: '100%',
-    maxWidth: MaxContentWidth,
-    alignSelf: 'center',
   },
   sections: {
     gap: Spacing.four,
