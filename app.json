@@ -6,27 +6,33 @@
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "gymburn",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#070A10",
     "ios": {
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "com.gymburn.app"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#16202B",
+        "backgroundColor": "#070A10",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.gymburn.app"
+      "package": "com.gymburn.app",
+      "userInterfaceStyle": "dark"
+    },
+    "androidStatusBar": {
+      "barStyle": "light-content",
+      "backgroundColor": "#070A10"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#16202B",
+          "backgroundColor": "#070A10",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }

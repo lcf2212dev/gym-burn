@@ -5,7 +5,9 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
 import { BeltFooter } from '@/components/belt-footer';
-import { Fonts, MaxContentWidth, Spacing } from '@/constants/theme';
+import { ScreenHeader } from '@/components/screen-header';
+import { SectionLabel } from '@/components/section-label';
+import { Fonts, MaxContentWidth, Neon, Spacing } from '@/constants/theme';
 import { characteristicName } from '@/ftms';
 import { useTheme } from '@/hooks/use-theme';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
@@ -45,12 +47,23 @@ export function DiagnosticsModal({ visible, onClose }: DiagnosticsModalProps) {
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({
+  label,
+  value,
+  last = false,
+}: {
+  label: string;
+  value: string;
+  /** Última linha do grupo: sem o fio de baixo, para o grupo fechar limpo. */
+  last?: boolean;
+}) {
   const theme = useTheme();
+  // "sim" e "não" são estados de recurso; vermelho fica só para erro de verdade.
+  const valueColor = value === 'sim' ? Neon.mint : value === 'não' ? theme.textSecondary : theme.text;
   return (
-    <View style={[styles.row, { borderColor: theme.border }]}>
+    <View style={[styles.row, { borderColor: theme.border }, last && styles.rowLast]}>
       <Text style={[styles.rowLabel, { color: theme.textSecondary }]}>{label}</Text>
-      <Text style={[styles.rowValue, { color: theme.text }]} selectable>
+      <Text style={[styles.rowValue, { color: valueColor }]} selectable>
         {value}
       </Text>
     </View>
@@ -58,13 +71,13 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
-  const theme = useTheme();
   return (
     <View style={styles.section}>
-      <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
-        {title}
-      </Text>
-      {children}
+      {/* O SectionLabel não expõe accessibilityRole; o cabeçalho agrupa o rótulo. */}
+      <View accessible accessibilityRole="header" accessibilityLabel={title}>
+        <SectionLabel label={title} style={styles.sectionLabel} />
+      </View>
+      <View style={styles.sectionBody}>{children}</View>
     </View>
   );
 }
@@ -88,6 +101,9 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
   // Cópia invertida: o log do snapshot não pode ser mutado.
   const newestFirst = [...log].reverse();
   const feature = capabilities?.feature ?? null;
+  // As chaves ficam fora do JSX para a última linha de cada grupo saber que é a última.
+  const targetKeys = Object.keys(TARGET_SETTING_LABELS) as (keyof typeof TARGET_SETTING_LABELS)[];
+  const featureKeys = Object.keys(MACHINE_FEATURE_LABELS) as (keyof typeof MACHINE_FEATURE_LABELS)[];
 
   const share = () => {
     const message = buildDiagnosticsReport({ mode, device, capabilities, log });
@@ -106,39 +122,37 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
       <Section title="Esteira">
         <Row label="Nome" value={device?.name ?? 'Sem nome'} />
         <Row label="Identificador" value={device?.id ?? 'Nenhum'} />
-        <Row label="Modo" value={MODE_LABELS[mode]} />
+        <Row label="Modo" value={MODE_LABELS[mode]} last />
       </Section>
 
       <Section title="O que ela aceita controlar">
         {feature ? (
-          (Object.keys(TARGET_SETTING_LABELS) as (keyof typeof TARGET_SETTING_LABELS)[]).map(
-            (key) => (
-              <Row
-                key={key}
-                label={TARGET_SETTING_LABELS[key]}
-                value={feature.targets[key] ? 'sim' : 'não'}
-              />
-            ),
-          )
+          targetKeys.map((key, index) => (
+            <Row
+              key={key}
+              label={TARGET_SETTING_LABELS[key]}
+              value={feature.targets[key] ? 'sim' : 'não'}
+              last={index === targetKeys.length - 1 && !capabilities}
+            />
+          ))
         ) : (
           <Paragraph>A esteira não informou seus recursos.</Paragraph>
         )}
         {capabilities ? (
-          <Row label="Control Point" value={capabilities.hasControlPoint ? 'sim' : 'não'} />
+          <Row label="Control Point" value={capabilities.hasControlPoint ? 'sim' : 'não'} last />
         ) : null}
       </Section>
 
       <Section title="O que ela mede">
         {feature ? (
-          (Object.keys(MACHINE_FEATURE_LABELS) as (keyof typeof MACHINE_FEATURE_LABELS)[]).map(
-            (key) => (
-              <Row
-                key={key}
-                label={MACHINE_FEATURE_LABELS[key]}
-                value={feature.machine[key] ? 'sim' : 'não'}
-              />
-            ),
-          )
+          featureKeys.map((key, index) => (
+            <Row
+              key={key}
+              label={MACHINE_FEATURE_LABELS[key]}
+              value={feature.machine[key] ? 'sim' : 'não'}
+              last={index === featureKeys.length - 1}
+            />
+          ))
         ) : (
           <Paragraph>A esteira não informou seus recursos.</Paragraph>
         )}
@@ -148,7 +162,11 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
         {capabilities ? (
           <>
             <Row label="Velocidade" value={describeRange(capabilities.speedRange, 'km/h')} />
-            <Row label="Inclinação" value={describeRange(capabilities.inclinationRange, '%')} />
+            <Row
+              label="Inclinação"
+              value={describeRange(capabilities.inclinationRange, '%')}
+              last
+            />
           </>
         ) : (
           <Paragraph>Sem esteira conectada.</Paragraph>
@@ -157,11 +175,13 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
 
       <Section title="Características Bluetooth encontradas">
         {capabilities && capabilities.characteristics.length > 0 ? (
-          capabilities.characteristics.map((uuid) => (
-            <Text key={uuid} style={[styles.mono, { color: theme.text }]} selectable>
-              {characteristicName(uuid)}
-            </Text>
-          ))
+          <View style={styles.characteristics}>
+            {capabilities.characteristics.map((uuid) => (
+              <Text key={uuid} style={[styles.mono, { color: theme.text }]} selectable>
+                {characteristicName(uuid)}
+              </Text>
+            ))}
+          </View>
         ) : (
           <Paragraph>Nenhuma característica encontrada.</Paragraph>
         )}
@@ -178,7 +198,7 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
               : 'Não informado'
           }
         />
-        <Row label="Lona" value={BELT_STATE_LABELS[belt]} />
+        <Row label="Lona" value={BELT_STATE_LABELS[belt]} last />
       </Section>
 
       <Section title="Coleta para engenharia reversa">
@@ -189,11 +209,13 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
         </Paragraph>
         <ActionButton
           variant="outline"
+          color={Neon.violet}
           label="Abrir coleta"
           onPress={() => {
             onClose();
             router.push('/coleta');
           }}
+          style={styles.sectionAction}
         />
       </Section>
 
@@ -204,11 +226,13 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
         </Paragraph>
         <ActionButton
           variant="outline"
+          color={Neon.violet}
           label="Abrir sonda 0xFFF0"
           onPress={() => {
             onClose();
             router.push('/sonda');
           }}
+          style={styles.sectionAction}
         />
       </Section>
 
@@ -220,28 +244,34 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
             onPress={share}
             disabled={log.length === 0}
             style={styles.logAction}
+            labelStyle={styles.logActionLabel}
           />
           <ActionButton
             variant="outline"
+            color={Neon.red}
             label="Limpar"
             onPress={clearLog}
             disabled={log.length === 0}
+            labelStyle={styles.logActionLabel}
           />
         </View>
         {log.length === 0 ? <Paragraph>O registro está vazio.</Paragraph> : null}
-        <ActionButton variant="outline" label="Registros salvos" onPress={openLogs} />
+        <ActionButton
+          variant="outline"
+          label="Registros salvos"
+          onPress={openLogs}
+          style={styles.sectionAction}
+        />
       </Section>
     </View>
   );
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
-      <View style={[styles.topBar, { borderColor: theme.border }]}>
-        <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
-          Diagnóstico
-        </Text>
-        <ActionButton variant="text" label="Fechar" onPress={onClose} />
-      </View>
+      <ScreenHeader
+        title="Diagnóstico"
+        right={<ActionButton variant="text" label="Fechar" onPress={onClose} />}
+      />
       <FlatList
         data={newestFirst}
         keyExtractor={(entry) => String(entry.id)}
@@ -277,18 +307,6 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingLeft: Spacing.three,
-    paddingRight: Spacing.two,
-    borderBottomWidth: 1,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 700,
-  },
   list: {
     width: '100%',
     maxWidth: MaxContentWidth,
@@ -297,37 +315,52 @@ const styles = StyleSheet.create({
     paddingBottom: Spacing.five,
   },
   sections: {
-    gap: Spacing.four,
-    paddingTop: Spacing.three,
+    gap: 20,
+    paddingTop: Spacing.four,
     paddingBottom: Spacing.two,
   },
   section: {
-    gap: Spacing.one,
+    gap: Spacing.two,
   },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: 700,
+  sectionLabel: {
     marginBottom: Spacing.one,
+  },
+  sectionBody: {
+    gap: 0,
   },
   row: {
     flexDirection: 'row',
+    alignItems: 'flex-start',
     gap: Spacing.three,
     paddingVertical: Spacing.two,
     borderBottomWidth: 1,
   },
+  rowLast: {
+    borderBottomWidth: 0,
+  },
   rowLabel: {
     flex: 1,
-    fontSize: 15,
+    fontSize: 14,
+    lineHeight: 20,
   },
   rowValue: {
     flex: 1,
     fontSize: 15,
+    lineHeight: 20,
     fontWeight: 600,
     textAlign: 'right',
   },
   paragraph: {
+    paddingVertical: Spacing.one,
     fontSize: 15,
     lineHeight: 21,
+  },
+  sectionAction: {
+    marginTop: Spacing.two,
+  },
+  characteristics: {
+    gap: Spacing.one,
+    paddingVertical: Spacing.one,
   },
   logActions: {
     flexDirection: 'row',
@@ -337,13 +370,17 @@ const styles = StyleSheet.create({
   logAction: {
     flex: 1,
   },
+  logActionLabel: {
+    fontSize: 18,
+    lineHeight: 22,
+  },
   logLine: {
     paddingVertical: Spacing.two,
     borderBottomWidth: 1,
   },
   mono: {
     fontFamily: Fonts.mono,
-    fontSize: 13,
+    fontSize: 12,
     lineHeight: 18,
   },
 });

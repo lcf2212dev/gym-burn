@@ -6,8 +6,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { CharacteristicInfo, ServiceInfo } from '@/ble/transport';
 import { ActionButton } from '@/components/action-button';
+import { AmbientGlow } from '@/components/ambient-glow';
 import { BeltFooter } from '@/components/belt-footer';
-import { Fonts, MaxContentWidth, Spacing } from '@/constants/theme';
+import { ScreenHeader } from '@/components/screen-header';
+import { SectionLabel } from '@/components/section-label';
+import { Surface } from '@/components/surface';
+import {
+  Fonts,
+  LabelType,
+  MaxContentWidth,
+  MinTouchTarget,
+  Neon,
+  Radius,
+  Spacing,
+  TitleType,
+} from '@/constants/theme';
 import { normalizeUuid, shortUuid, uuid16 } from '@/ftms';
 import { useTheme } from '@/hooks/use-theme';
 import { useRecorder, useRecorderActions, useTraceWriter } from '@/logging/recorder-context';
@@ -44,6 +57,9 @@ const MARK_LABELS = [
   'Chave de segurança',
   'Apertei o Emergency Stop',
 ];
+
+// Rótulos longos não cabem em meia largura: ocupam a linha inteira na grade.
+const MARK_WIDE_FROM = 23;
 
 const CHARACTERISTIC_NAMES: Record<string, string> = {};
 const NAMED_CHARACTERISTICS: readonly (readonly [number, string])[] = [
@@ -426,18 +442,20 @@ export default function ColetaScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
-      <View style={[styles.topBar, { borderColor: theme.border }]}>
-        <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
-          Coleta RE
-        </Text>
-        <ActionButton variant="text" label="Voltar" onPress={goBack} />
-      </View>
+      <AmbientGlow intensity={0.5} />
+      <ScreenHeader
+        title="Coleta RE"
+        accent={Neon.cyan}
+        right={<ActionButton variant="text" label="Voltar" onPress={goBack} />}
+      />
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           {connected && !identityConfirmed ? (
-            <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>Confirme a esteira</Text>
+            <Surface accent={Neon.amber} tone="raised" style={styles.blockCard}>
+              <Text style={[styles.blockTitle, TitleType, { color: theme.text }]}>
+                Confirme a esteira
+              </Text>
               <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                 Antes de coletar, confirme no painel que a esteira conectada é a sua (na tela
                 principal, toque em É esta esteira). Numa academia há várias iguais lado a lado.
@@ -447,10 +465,12 @@ export default function ColetaScreen() {
                 label="Ir para o painel"
                 onPress={() => router.replace('/')}
               />
-            </View>
+            </Surface>
           ) : !connected ? (
-            <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>Conecte na esteira</Text>
+            <Surface accent={Neon.amber} tone="raised" style={styles.blockCard}>
+              <Text style={[styles.blockTitle, TitleType, { color: theme.text }]}>
+                Conecte na esteira
+              </Text>
               <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                 A coleta só funciona com a esteira real conectada: ela despeja o inventário do
                 GATT, lê todas as características legíveis e assina as notificações. O modo
@@ -461,11 +481,13 @@ export default function ColetaScreen() {
                 label="Ir para a conexão"
                 onPress={() => router.replace('/')}
               />
-            </View>
+            </Surface>
           ) : (
             <>
-              <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>
+              {/* Cartão de abertura: título, descrição e avisos juntos, para a "Situação"
+                  já aparecer na primeira dobra. */}
+              <Surface tone="raised" style={styles.hero}>
+                <Text style={[styles.heroTitle, TitleType, { color: theme.text }]}>
                   {device?.name ?? 'Esteira conectada'}
                 </Text>
                 <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
@@ -477,29 +499,25 @@ export default function ColetaScreen() {
                   os contadores abaixo são das características extras assinadas aqui.
                 </Text>
                 {simulated ? (
-                  <Text
-                    style={[
-                      styles.warning,
-                      { color: theme.noticeError, borderColor: theme.noticeError },
-                    ]}>
-                    ENSAIO COM ESTEIRA SIMULADA: os dados são inventados e não servem para
-                    engenharia reversa. Use esta tela assim só para ensaiar o fluxo antes de ir à
-                    academia.
-                  </Text>
+                  <Surface accent={theme.noticeError}>
+                    <Text style={[styles.warningText, { color: theme.text }]}>
+                      ENSAIO COM ESTEIRA SIMULADA: os dados são inventados e não servem para
+                      engenharia reversa. Use esta tela assim só para ensaiar o fluxo antes de ir à
+                      academia.
+                    </Text>
+                  </Surface>
                 ) : null}
-                <Text
-                  style={[
-                    styles.warning,
-                    { color: theme.noticeWarning, borderColor: theme.noticeWarning },
-                  ]}>
-                  Nada é escrito na esteira nesta tela: é só coleta e anotação. Mantenha o app em
-                  primeiro plano e a tela ligada (ela fica acordada sozinha durante a coleta).
-                </Text>
-              </View>
+                <Surface accent={theme.noticeWarning}>
+                  <Text style={[styles.warningText, { color: theme.text }]}>
+                    Nada é escrito na esteira nesta tela: é só coleta e anotação. Mantenha o app em
+                    primeiro plano e a tela ligada (ela fica acordada sozinha durante a coleta).
+                  </Text>
+                </Surface>
+              </Surface>
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Situação</Text>
-                <View style={[styles.metrics, { borderColor: theme.border }]}>
+                <SectionLabel label="Situação" accent={Neon.cyan} />
+                <View style={styles.metrics}>
                   <Metric label="Tempo" value={formatDuration(seconds)} />
                   <Metric label="Notificações extras" value={String(snapshot.notifications)} />
                   <Metric label="Assinaturas" value={String(snapshot.subscriptions)} />
@@ -508,7 +526,7 @@ export default function ColetaScreen() {
                   <Metric label="Marcas" value={String(snapshot.marks)} />
                 </View>
                 {collecting ? (
-                  <ActionButton variant="solid" color={theme.noticeError} label="Parar coleta" onPress={stop} />
+                  <ActionButton variant="solid" color={Neon.red} label="Parar coleta" onPress={stop} />
                 ) : (
                   <ActionButton
                     variant="primary"
@@ -521,7 +539,7 @@ export default function ColetaScreen() {
               </View>
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Marcar evento</Text>
+                <SectionLabel label="Marcar evento" accent={Neon.volt} />
                 <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                   Toque no que aconteceu para alinhar o evento com os pacotes no registro. As
                   marcações só valem durante a coleta.
@@ -534,7 +552,8 @@ export default function ColetaScreen() {
                       label={label}
                       onPress={() => mark(label)}
                       disabled={!collecting}
-                      style={styles.markButton}
+                      labelStyle={styles.markLabel}
+                      style={[styles.markButton, label.length >= MARK_WIDE_FROM && styles.markButtonWide]}
                     />
                   ))}
                 </View>
@@ -544,7 +563,14 @@ export default function ColetaScreen() {
                     onChangeText={setCustomMark}
                     placeholder="Outro evento"
                     placeholderTextColor={theme.textSecondary}
-                    style={[styles.input, { borderColor: theme.border, color: theme.text }]}
+                    style={[
+                      styles.input,
+                      {
+                        backgroundColor: theme.surfaceSunken,
+                        borderColor: theme.border,
+                        color: theme.text,
+                      },
+                    ]}
                   />
                   <ActionButton
                     variant="outline"
@@ -557,43 +583,48 @@ export default function ColetaScreen() {
 
               {snapshot.channels.length > 0 ? (
                 <View style={styles.section}>
-                  <Text style={[styles.sectionTitle, { color: theme.text }]}>Canais recebidos</Text>
+                  <SectionLabel label="Canais recebidos" accent={Neon.cyan} />
                   {snapshot.channels.slice(0, 12).map((channel) => (
-                    <View key={channel.key} style={[styles.channel, { borderColor: theme.border }]}>
+                    <Surface key={channel.key} style={styles.channelCard}>
                       <Text style={[styles.channelLabel, { color: theme.text }]}>
                         {channel.label}
                       </Text>
-                      <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
+                      <Text style={[styles.channelCount, { color: theme.textSecondary }]}>
                         {channel.count} pacote(s)
                       </Text>
                       {channel.lastHex ? (
-                        <Text style={[styles.mono, { color: theme.textSecondary }]} selectable>
+                        <Text style={[styles.hex, { color: theme.textSecondary }]} selectable>
                           {truncate(channel.lastHex, 90)}
                         </Text>
                       ) : null}
-                    </View>
+                    </Surface>
                   ))}
                 </View>
               ) : null}
 
               {snapshot.lastMarks.length > 0 ? (
                 <View style={styles.section}>
-                  <Text style={[styles.sectionTitle, { color: theme.text }]}>Últimas marcas</Text>
-                  {snapshot.lastMarks.map((markSummary) => (
-                    <Text
-                      key={String(markSummary.at)}
-                      style={[styles.mono, { color: theme.textSecondary }]}>
-                      {formatClock(markSummary.at)} {markSummary.label}
-                    </Text>
-                  ))}
+                  <SectionLabel label="Últimas marcas" accent={Neon.amber} />
+                  <Surface style={styles.markList}>
+                    {snapshot.lastMarks.map((markSummary) => (
+                      <Text
+                        key={String(markSummary.at)}
+                        style={[styles.mono, { color: theme.textSecondary }]}>
+                        {formatClock(markSummary.at)}{' '}
+                        <Text style={{ color: theme.text }}>{markSummary.label}</Text>
+                      </Text>
+                    ))}
+                  </Surface>
                 </View>
               ) : null}
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Registro</Text>
-                <Text style={[styles.mono, { color: theme.text }]} selectable>
-                  {currentFileName ?? 'Sem arquivo em gravação'}
-                </Text>
+                <SectionLabel label="Registro" accent={Neon.violet} />
+                <Surface>
+                  <Text style={[styles.fileName, { color: theme.text }]} selectable>
+                    {currentFileName ?? 'Sem arquivo em gravação'}
+                  </Text>
+                </Surface>
                 <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                   O arquivo tem tudo: inventário do GATT, leituras, notificações e marcações. Ele é
                   gravado aos poucos; compartilhe quando a coleta terminar. Se houver pasta de
@@ -615,13 +646,18 @@ export default function ColetaScreen() {
   );
 }
 
+/** Contador da situação: número mono grande e rótulo micro, num cartão de grafite. */
 function Metric({ label, value }: { label: string; value: string }) {
   const theme = useTheme();
   return (
-    <View style={styles.metric}>
-      <Text style={[styles.metricValue, { color: theme.text }]}>{value}</Text>
-      <Text style={[styles.metricLabel, { color: theme.textSecondary }]}>{label}</Text>
-    </View>
+    <Surface padded={false} style={styles.metric}>
+      <Text style={[styles.metricValue, { color: theme.text }]} numberOfLines={1}>
+        {value}
+      </Text>
+      <Text style={[styles.metricLabel, { color: theme.textSecondary }]} numberOfLines={2}>
+        {label}
+      </Text>
+    </Surface>
   );
 }
 
@@ -629,22 +665,11 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingLeft: Spacing.three,
-    paddingRight: Spacing.two,
-    borderBottomWidth: 1,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 700,
-  },
   scroll: {
     flexGrow: 1,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.five,
   },
   content: {
     width: '100%',
@@ -652,41 +677,55 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     gap: Spacing.four,
   },
-  section: {
-    gap: Spacing.two,
+  blockCard: {
+    gap: Spacing.three,
   },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: 700,
+  blockTitle: {
+    fontSize: 22,
+    lineHeight: 26,
+  },
+  hero: {
+    gap: 12,
+  },
+  heroTitle: {
+    fontSize: 26,
+    lineHeight: 30,
   },
   paragraph: {
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 22,
   },
-  warning: {
+  warningText: {
     fontSize: 14,
     lineHeight: 20,
-    borderLeftWidth: 3,
-    paddingLeft: Spacing.three,
   },
+  section: {
+    gap: Spacing.two,
+  },
+  // Cartõezinhos da situação: 2 colunas no celular e 3 em telas largas, via minWidth.
   metrics: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    borderTopWidth: 1,
-    paddingTop: Spacing.two,
+    gap: Spacing.two,
   },
   metric: {
-    width: '33%',
-    paddingVertical: Spacing.one,
+    flexGrow: 1,
+    flexBasis: '30%',
+    minWidth: 140,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.two,
+    gap: Spacing.half,
   },
   metricValue: {
-    fontSize: 20,
-    fontWeight: 700,
     fontFamily: Fonts.mono,
+    fontSize: 20,
+    lineHeight: 24,
   },
   metricLabel: {
-    fontSize: 12,
-    lineHeight: 16,
+    ...LabelType,
+    fontSize: 11,
+    lineHeight: 14,
+    letterSpacing: 1.3,
   },
   markGrid: {
     flexDirection: 'row',
@@ -695,7 +734,16 @@ const styles = StyleSheet.create({
   },
   markButton: {
     flexGrow: 1,
-    flexBasis: '45%',
+    flexBasis: '46%',
+    paddingHorizontal: Spacing.two,
+  },
+  markButtonWide: {
+    flexBasis: '100%',
+  },
+  markLabel: {
+    fontSize: 14,
+    lineHeight: 18,
+    letterSpacing: 0.2,
   },
   row: {
     flexDirection: 'row',
@@ -705,20 +753,40 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     borderWidth: 1,
-    borderRadius: 6,
+    borderRadius: Radius.lg,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
-    minHeight: 48,
-    fontSize: 15,
+    minHeight: MinTouchTarget,
+    fontSize: 16,
   },
-  channel: {
-    borderBottomWidth: 1,
-    paddingVertical: Spacing.two,
+  channelCard: {
     gap: Spacing.one,
   },
   channelLabel: {
     fontSize: 14,
+    lineHeight: 19,
     fontWeight: 600,
+  },
+  channelCount: {
+    ...LabelType,
+    fontSize: 10,
+    lineHeight: 14,
+    letterSpacing: 1.3,
+  },
+  hex: {
+    fontFamily: Fonts.mono,
+    fontSize: 12,
+    lineHeight: 18,
+    flexShrink: 1,
+  },
+  markList: {
+    gap: Spacing.two,
+  },
+  fileName: {
+    fontFamily: Fonts.mono,
+    fontSize: 13,
+    lineHeight: 18,
+    flexShrink: 1,
   },
   mono: {
     fontFamily: Fonts.mono,

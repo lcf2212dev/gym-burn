@@ -1,6 +1,7 @@
 import { StyleSheet, Text, View } from 'react-native';
 
-import { Fonts, Spacing } from '@/constants/theme';
+import { Surface } from '@/components/surface';
+import { LabelType, NumeralType, Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import type { TreadmillMetrics } from '@/treadmill/types';
 import {
@@ -48,39 +49,41 @@ function buildMetrics(metrics: TreadmillMetrics): Metric[] {
 
 const COLUMNS = 3;
 
-/** Grade 3 × 2 das medidas do treino, separadas por fios. */
+/**
+ * Grade 3 × 2 das medidas do treino: cada leitura num cartão pequeno de
+ * grafite, sem fios divisores. O valor é o que se lê de longe; o rótulo fica
+ * miúdo, em caixa alta.
+ */
 export function MetricGrid({ metrics }: { metrics: TreadmillMetrics }) {
   const theme = useTheme();
   const items = buildMetrics(metrics);
   const rows = [items.slice(0, COLUMNS), items.slice(COLUMNS)];
 
   return (
-    <View style={[styles.grid, { borderColor: theme.border }]}>
+    <View style={styles.grid}>
       {rows.map((row, rowIndex) => (
-        <View
-          key={rowIndex}
-          style={[styles.row, rowIndex > 0 && styles.rowDivider, { borderColor: theme.border }]}>
-          {row.map((item, columnIndex) => (
-            <View
+        <View key={rowIndex} style={styles.row}>
+          {row.map((item) => (
+            <Surface
               key={item.label}
               accessible
               accessibilityLabel={`${item.label}: ${item.value}`}
-              style={[
-                styles.cell,
-                columnIndex > 0 && styles.cellDivider,
-                { borderColor: theme.border },
-              ]}>
+              style={styles.cell}>
               <Text
-                style={[styles.value, { color: theme.text }]}
+                style={[
+                  styles.value,
+                  NumeralType,
+                  { color: item.value === EMPTY_VALUE ? theme.textMuted : theme.text },
+                ]}
                 numberOfLines={1}
                 adjustsFontSizeToFit
                 minimumFontScale={0.6}>
                 {item.value}
               </Text>
-              <Text style={[styles.label, { color: theme.textSecondary }]} numberOfLines={1}>
+              <Text style={[styles.label, LabelType, { color: theme.textSecondary }]} numberOfLines={1}>
                 {item.label}
               </Text>
-            </View>
+            </Surface>
           ))}
         </View>
       ))}
@@ -90,30 +93,25 @@ export function MetricGrid({ metrics }: { metrics: TreadmillMetrics }) {
 
 const styles = StyleSheet.create({
   grid: {
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
+    gap: Spacing.two,
   },
   row: {
     flexDirection: 'row',
-  },
-  rowDivider: {
-    borderTopWidth: 1,
+    gap: Spacing.two,
   },
   cell: {
     flex: 1,
-    paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.three,
-  },
-  cellDivider: {
-    borderLeftWidth: 1,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.two + Spacing.half,
   },
   value: {
-    fontFamily: Fonts.numeral,
     fontSize: 32,
-    fontVariant: ['tabular-nums'],
+    lineHeight: 36,
   },
   label: {
-    fontSize: 13,
-    fontWeight: 500,
+    fontSize: 10,
+    lineHeight: 13,
+    letterSpacing: 1.3,
   },
 });

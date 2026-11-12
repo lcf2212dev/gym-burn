@@ -1,4 +1,4 @@
-import { StyleSheet, Text } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { Spacing } from '@/constants/theme';
 import { useNow } from '@/hooks/use-now';
@@ -23,16 +23,31 @@ export function StaleDataNotice() {
 
   const seconds = Math.floor((now - updatedAt) / 1000);
   return (
-    <Text accessibilityRole="alert" style={[styles.text, { color: theme.noticeWarning }]}>
-      Sem dados da esteira há {seconds} s
-    </Text>
+    <View style={styles.row}>
+      <View style={[styles.dot, { backgroundColor: theme.noticeWarning }]} />
+      <Text accessibilityRole="alert" style={[styles.text, { color: theme.noticeWarning }]}>
+        Sem dados da esteira há {seconds} s
+      </Text>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  text: {
-    fontSize: 16,
-    fontWeight: 600,
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
     paddingVertical: Spacing.two,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  text: {
+    flexShrink: 1,
+    fontSize: 14,
+    lineHeight: 19,
+    fontWeight: 600,
   },
 });

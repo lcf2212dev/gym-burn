@@ -1,58 +1,85 @@
-import { Platform } from 'react-native';
+import { Platform, type TextStyle } from 'react-native';
 
 /**
- * Cores do app nos modos claro e escuro. A base é um azul-ardósia (a cor de um
- * console de esteira), não preto: os números grandes precisam de contraste, mas
- * a tela fica ao lado do painel iluminado da máquina.
+ * Tema do Gym Burn: "carbono + neon".
+ *
+ * Um único tema, escuro. O app é usado apoiado no painel de uma esteira, com a
+ * academia mal iluminada, então a tela é um console: fundo quase preto,
+ * superfícies de grafite, contorno fino e neon reservado ao que importa —
+ * ação principal, números do treino e estados.
+ *
+ * Regras:
+ * - `text` é conteúdo, `textSecondary` é apoio, `textMuted` é só decoração.
+ *   O texto de leitura nunca usa neon puro em tamanho pequeno.
+ * - Neon pode ser fundo de botão (com texto escuro), contorno, traço ou
+ *   número grande — nunca corpo de texto.
+ * - A cor tem significado fixo: volt = agir/iniciar, ciano = inclinação,
+ *   âmbar = atenção/pausa, vermelho = parar/erro, menta = sucesso.
  */
-export const Colors = {
-  light: {
-    text: '#111A24',
-    textSecondary: '#56667A',
-    background: '#EEF2F5',
-    backgroundElement: '#FFFFFF',
-    backgroundSelected: '#DDE5EC',
-    border: '#CBD5DF',
-    /** Tudo que é inclinação: número, medidor e botões. */
-    incline: '#2563EB',
-    noticeError: '#B4232F',
-    noticeWarning: '#8A6100',
-    noticeSuccess: '#17734A',
-  },
-  dark: {
-    text: '#F4F7FA',
-    textSecondary: '#A3B3C4',
-    background: '#16202B',
-    backgroundElement: '#1F2C3A',
-    backgroundSelected: '#2A3A4C',
-    border: '#34465A',
-    incline: '#6EA8FE',
-    noticeError: '#FF8A94',
-    noticeWarning: '#F4C430',
-    noticeSuccess: '#5FD896',
-  },
+const Carbon = {
+  text: '#F4F8FF',
+  textSecondary: '#9CABC0',
+  textMuted: '#66758A',
+  background: '#070A10',
+  backgroundElement: '#0D131C',
+  backgroundSelected: '#1A2433',
+  border: '#243141',
+  surfaceRaised: '#121A25',
+  surfaceSunken: '#04060A',
+  /** Tudo que é inclinação: número, medidor e botões. */
+  incline: '#35E8FF',
+  noticeError: '#FF5B6B',
+  noticeWarning: '#FFC24B',
+  noticeSuccess: '#45F0A8',
 } as const;
 
-export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
+export const Colors = {
+  /** O app é sempre escuro; `light` existe para o tipo e nunca muda de fato. */
+  light: Carbon,
+  dark: Carbon,
+} as const;
+
+export type ThemeColor = keyof typeof Carbon;
 
 /**
- * Cores das ações da lona, iguais nos dois modos: são as cores que o usuário já
- * conhece dos botões físicos da esteira. `on*` é a cor do texto sobre cada uma.
+ * Acentos neon. Cada um tem um papel no app; não troque os papéis, troque a
+ * matiz se precisar (todos foram escolhidos para contraste sobre `background`).
+ */
+export const Neon = {
+  /** Ação principal, início da lona, velocidade. */
+  volt: '#C6FF3D',
+  /** Inclinação, dados vindos da esteira. */
+  cyan: '#35E8FF',
+  /** Destaque raro: roteiro, diagnóstico. */
+  magenta: '#FF3D9A',
+  /** Atenção, pausa. */
+  amber: '#FFC24B',
+  /** Parar, erro. */
+  red: '#FF3B4E',
+  /** Confirmação, sucesso. */
+  mint: '#45F0A8',
+  /** Apoio secundário: roteiro, tags. */
+  violet: '#9B8CFF',
+} as const;
+
+/**
+ * Cores das ações da lona: são as cores que o usuário já conhece dos botões
+ * físicos da esteira. `on*` é a cor do texto sobre cada uma.
  */
 export const ActionColors = {
-  go: '#2FBF71',
-  onGo: '#06140C',
-  pause: '#F4C430',
-  onPause: '#1A1400',
-  stop: '#D62839',
-  onStop: '#FFFFFF',
+  go: Neon.volt,
+  onGo: '#0A1004',
+  pause: Neon.amber,
+  onPause: '#1A1200',
+  stop: Neon.red,
+  onStop: '#120306',
 } as const;
 
 /**
  * Escala de esforço do medidor de velocidade, da caminhada ao tiro. A cor é
  * escolhida pela posição da velocidade dentro da faixa da esteira.
  */
-export const SpeedHeat = ['#2EC4B6', '#F4C430', '#FF8A3D', '#FF4D6D'] as const;
+export const SpeedHeat = [Neon.cyan, Neon.volt, Neon.amber, Neon.red] as const;
 
 /** Cor da escala de esforço para uma fração (0 a 1) da faixa de velocidade. */
 export function speedHeatColor(fraction: number): string {
@@ -64,7 +91,66 @@ export function speedHeatColor(fraction: number): string {
 export const Fonts = {
   /** Algarismos condensados, como os de placar e número de peito; carregada em `_layout.tsx`. */
   numeral: 'BarlowCondensed_600SemiBold',
+  /** Títulos e rótulos de ação: a voz da marca. */
+  display: 'BarlowCondensed_700Bold',
+  /** Kickers, tags e micro-rótulos em caixa alta. */
+  label: 'BarlowCondensed_500Medium',
   mono: Platform.select({ ios: 'ui-monospace', default: 'monospace' }),
+} as const;
+
+/** Rótulo miúdo em caixa alta, o "kicker" das seções. */
+export const LabelType: TextStyle = {
+  fontFamily: Fonts.label,
+  fontSize: 12,
+  lineHeight: 16,
+  letterSpacing: 1.8,
+  textTransform: 'uppercase',
+};
+
+/** Número de placar: condensado, tabular, sem peso sintético. */
+export const NumeralType: TextStyle = {
+  fontFamily: Fonts.numeral,
+  fontVariant: ['tabular-nums'],
+};
+
+/** Título de tela na fonte de display, com um respiro entre as letras. */
+export const TitleType: TextStyle = {
+  fontFamily: Fonts.display,
+  letterSpacing: 0.4,
+};
+
+/** Adiciona transparência a uma cor `#RRGGBB` (as cores do tema são todas hex). */
+export function withAlpha(color: string, alpha: number): string {
+  const hex = color.replace('#', '');
+  if (hex.length !== 6) {
+    return color;
+  }
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  const clamped = Math.min(Math.max(alpha, 0), 1);
+  return `rgba(${red}, ${green}, ${blue}, ${clamped})`;
+}
+
+/**
+ * Halo de neon para números e títulos grandes. Funciona nos dois sistemas
+ * (`textShadow*` no Android e no iOS); use com parcimônia: é o que dá o efeito
+ * de letreiro sem precisar de gradiente.
+ */
+export function neonGlow(color: string, radius = 24, opacity = 0.4): TextStyle {
+  return {
+    textShadowColor: withAlpha(color, opacity),
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: radius,
+  };
+}
+
+export const Radius = {
+  sm: 10,
+  md: 14,
+  lg: 18,
+  xl: 24,
+  pill: 999,
 } as const;
 
 export const Spacing = {
@@ -85,5 +171,5 @@ export const MaxContentWidth = 560;
 /** Altura dos botões da lona no rodapé do painel; Parar é o mais largo deles. */
 export const StopButtonHeight = 76;
 
-/** Opacidade de botões desabilitados. */
-export const DisabledOpacity = 0.35;
+/** Opacidade de botões desabilitados (o estado precisa ser lido, não sumir). */
+export const DisabledOpacity = 0.42;

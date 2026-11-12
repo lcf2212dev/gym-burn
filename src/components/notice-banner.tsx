@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text } from 'react-native';
 
-import { MinTouchTarget, Spacing } from '@/constants/theme';
+import { Surface } from '@/components/surface';
+import { MinTouchTarget, Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
 
@@ -26,27 +27,30 @@ export function NoticeBanner() {
       onPress={dismissNotice}
       accessibilityRole="alert"
       accessibilityHint="Toque para fechar o aviso"
-      style={({ pressed }) => [
-        styles.banner,
-        { borderColor: color },
-        pressed && { backgroundColor: theme.backgroundSelected },
-      ]}>
-      <Text style={[styles.message, { color }]}>{notice.message}</Text>
+      style={({ pressed }) => [styles.press, pressed && styles.pressed]}>
+      {/* O acento interno é a cor do tipo de aviso; o texto acompanha. */}
+      <Surface accent={color} tone="raised" style={styles.banner}>
+        <Text style={[styles.message, { color }]}>{notice.message}</Text>
+      </Surface>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
+  press: {
+    borderRadius: Radius.lg,
+  },
+  pressed: {
+    opacity: 0.85,
+  },
   banner: {
     minHeight: MinTouchTarget,
     justifyContent: 'center',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderLeftWidth: 4,
+    paddingVertical: Spacing.three,
   },
   message: {
-    fontSize: 16,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 21,
     fontWeight: 600,
   },
 });

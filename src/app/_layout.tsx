@@ -1,36 +1,50 @@
+import { BarlowCondensed_500Medium } from '@expo-google-fonts/barlow-condensed/500Medium';
 import { BarlowCondensed_600SemiBold } from '@expo-google-fonts/barlow-condensed/600SemiBold';
+import { BarlowCondensed_700Bold } from '@expo-google-fonts/barlow-condensed/700Bold';
 import { useFonts } from 'expo-font';
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import * as SystemUI from 'expo-system-ui';
 import { useEffect, useState } from 'react';
 
 import { createAppServices } from '@/app-services';
-import { Colors } from '@/constants/theme';
+import { Colors, Neon } from '@/constants/theme';
 import { GuideProvider } from '@/guide/guide-context';
-import { useColorScheme } from '@/hooks/use-color-scheme';
 import { RecorderProvider } from '@/logging/recorder-context';
 import { TreadmillProvider } from '@/treadmill/treadmill-context';
 
 // A splash fica até a fonte dos números carregar (ou falhar).
 SplashScreen.preventAutoHideAsync();
 
-// Temas de navegação com o fundo do app, para não piscar branco entre telas.
-const lightTheme = {
-  ...DefaultTheme,
-  colors: { ...DefaultTheme.colors, background: Colors.light.background, text: Colors.light.text },
-};
-const darkTheme = {
+// O app é escuro sempre: a janela nativa também, para não piscar branco antes
+// do primeiro quadro (o SystemUI troca a cor de fundo da raiz em runtime).
+void SystemUI.setBackgroundColorAsync(Colors.dark.background).catch(() => {});
+
+// Tema de navegação com o fundo do app, para não piscar entre telas.
+const navigationTheme = {
   ...DarkTheme,
-  colors: { ...DarkTheme.colors, background: Colors.dark.background, text: Colors.dark.text },
+  dark: true,
+  colors: {
+    ...DarkTheme.colors,
+    primary: Neon.volt,
+    background: Colors.dark.background,
+    card: Colors.dark.background,
+    text: Colors.dark.text,
+    border: Colors.dark.border,
+    notification: Neon.magenta,
+  },
 };
 
 export default function RootLayout() {
-  const scheme = useColorScheme();
   // Um gravador, uma sessão e um roteiro durante toda a vida do app.
   const [services] = useState(createAppServices);
-  // Importa só o peso usado, não a família inteira.
-  const [fontsLoaded, fontError] = useFonts({ BarlowCondensed_600SemiBold });
+  // Importa só os pesos usados, não a família inteira.
+  const [fontsLoaded, fontError] = useFonts({
+    BarlowCondensed_500Medium,
+    BarlowCondensed_600SemiBold,
+    BarlowCondensed_700Bold,
+  });
   const ready = fontsLoaded || fontError !== null;
 
   useEffect(() => {
@@ -48,8 +62,9 @@ export default function RootLayout() {
     <RecorderProvider store={services.recorder}>
       <TreadmillProvider store={services.session}>
         <GuideProvider store={services.guide}>
-          <ThemeProvider value={scheme === 'dark' ? darkTheme : lightTheme}>
-            <StatusBar style="auto" />
+          {/* O esquema é fixo no escuro (ver `use-color-scheme`). */}
+          <ThemeProvider value={navigationTheme}>
+            <StatusBar style="light" />
             <Stack screenOptions={{ headerShown: false }} />
           </ThemeProvider>
         </GuideProvider>

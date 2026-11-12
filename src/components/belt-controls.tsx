@@ -1,13 +1,16 @@
 import { StyleSheet, Text, View } from 'react-native';
 
 import { ActionButton } from '@/components/action-button';
-import { ActionColors, Spacing, StopButtonHeight } from '@/constants/theme';
+import { ActionColors, Fonts, Spacing, StopButtonHeight } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
 
 /**
  * Os botões da lona, nas cores dos botões físicos. Ficam fixos no rodapé do
  * painel: Parar tem que estar sempre à vista, sem rolar a tela.
+ *
+ * No redesign eles são placas cheias, grandes e arredondadas, com um fio claro
+ * na borda — como as teclas de um console de academia.
  *
  * Iniciar e Pausar dividem o mesmo lugar, conforme o estado da lona: com a
  * lona rodando, os dois botões visíveis a freiam. Para um segundo toque em
@@ -79,23 +82,25 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: Spacing.three,
   },
+  // Placas: raio e fio de luz vêm do `solid` do ActionButton; aqui só a proporção.
   toggle: {
     flex: 2,
     minHeight: StopButtonHeight,
-    borderWidth: 0,
   },
   // O maior alvo de toque da tela.
   stop: {
     flex: 3,
     minHeight: StopButtonHeight,
-    borderWidth: 0,
   },
   label: {
-    fontSize: 22,
+    fontFamily: Fonts.display,
+    fontSize: 24,
+    lineHeight: 28,
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
   },
   readOnly: {
-    fontSize: 16,
-    lineHeight: 22,
-    fontWeight: 600,
+    fontSize: 15,
+    lineHeight: 21,
   },
 });

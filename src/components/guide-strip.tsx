@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { MaxContentWidth, MinTouchTarget, Spacing } from '@/constants/theme';
+import { LabelType, MaxContentWidth, MinTouchTarget, Neon, Spacing } from '@/constants/theme';
 import { GUIDE_STEP_COUNT } from '@/guide/guide-logic';
 import { useGuide } from '@/guide/guide-context';
 import { useTheme } from '@/hooks/use-theme';
@@ -37,11 +37,19 @@ export function GuideStrip() {
           borderColor: theme.border,
         },
       ]}>
-      <View style={[styles.content, { borderColor: theme.text }]}>
-        <Text style={[styles.text, { color: theme.text }]} numberOfLines={2}>
-          <Text style={styles.title}>{title}: </Text>
-          {hint}
-        </Text>
+      <View style={styles.content}>
+        {/* O traço volt marca o roteiro, a ação principal do primeiro teste. */}
+        <View style={[styles.bar, { backgroundColor: Neon.volt }]} />
+        <View style={styles.textBlock}>
+          <Text style={[LabelType, { color: theme.textSecondary }]} numberOfLines={1}>
+            {title}
+          </Text>
+          {hint ? (
+            <Text style={[styles.hint, { color: theme.text }]} numberOfLines={2}>
+              {hint}
+            </Text>
+          ) : null}
+        </View>
       </View>
     </Pressable>
   );
@@ -57,16 +65,23 @@ const styles = StyleSheet.create({
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
     minHeight: MinTouchTarget,
-    justifyContent: 'center',
-    paddingLeft: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
     paddingVertical: Spacing.one,
-    borderLeftWidth: 4,
   },
-  text: {
-    fontSize: 15,
-    lineHeight: 20,
+  bar: {
+    width: 3,
+    alignSelf: 'stretch',
+    borderRadius: 2,
   },
-  title: {
-    fontWeight: 700,
+  textBlock: {
+    flex: 1,
+    flexShrink: 1,
+    gap: 2,
+  },
+  hint: {
+    fontSize: 14,
+    lineHeight: 18,
   },
 });

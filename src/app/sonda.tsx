@@ -1,11 +1,24 @@
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
+import { AmbientGlow } from '@/components/ambient-glow';
 import { BeltFooter } from '@/components/belt-footer';
-import { Fonts, MaxContentWidth, Spacing } from '@/constants/theme';
+import { ScreenHeader } from '@/components/screen-header';
+import { SectionLabel } from '@/components/section-label';
+import { Surface } from '@/components/surface';
+import {
+  Fonts,
+  LabelType,
+  MaxContentWidth,
+  MinTouchTarget,
+  Neon,
+  Radius,
+  Spacing,
+  TitleType,
+} from '@/constants/theme';
 import {
   DEVICE_INFORMATION_SERVICE,
   decodeDeviceInformationText,
@@ -37,6 +50,14 @@ const DEVICE_INFORMATION_FIELDS: readonly { uuid: string; name: string }[] = [
 ];
 
 type ResultKind = 'leitura' | 'escrita' | 'notificação' | 'erro';
+
+// Cada tipo de resultado tem uma cor fixa: erro, leitura, notificação e escrita.
+const RESULT_COLORS: Record<ResultKind, string> = {
+  erro: Neon.red,
+  leitura: Neon.cyan,
+  'notificação': Neon.volt,
+  escrita: Neon.amber,
+};
 
 interface ProbeResult {
   id: number;
@@ -156,18 +177,20 @@ export default function SondaScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
-      <View style={[styles.topBar, { borderColor: theme.border }]}>
-        <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
-          Sonda BLE
-        </Text>
-        <ActionButton variant="text" label="Voltar" onPress={goBack} />
-      </View>
+      <AmbientGlow intensity={0.5} />
+      <ScreenHeader
+        title="Sonda BLE"
+        accent={Neon.amber}
+        right={<ActionButton variant="text" label="Voltar" onPress={goBack} />}
+      />
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         <View style={styles.content}>
           {connected && !identityConfirmed ? (
-            <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>Confirme a esteira</Text>
+            <Surface accent={Neon.amber} tone="raised" style={styles.blockCard}>
+              <Text style={[styles.blockTitle, TitleType, { color: theme.text }]}>
+                Confirme a esteira
+              </Text>
               <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                 Antes de ler ou escrever qualquer característica, confirme no painel que a esteira
                 conectada é a sua (na tela principal, toque em É esta esteira). Numa academia há
@@ -178,10 +201,12 @@ export default function SondaScreen() {
                 label="Ir para o painel"
                 onPress={() => router.replace('/')}
               />
-            </View>
+            </Surface>
           ) : !connected ? (
-            <View style={styles.section}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]}>Conecte na esteira</Text>
+            <Surface accent={Neon.amber} tone="raised" style={styles.blockCard}>
+              <Text style={[styles.blockTitle, TitleType, { color: theme.text }]}>
+                Conecte na esteira
+              </Text>
               <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                 A sonda lê e escreve características do serviço proprietário 0xFFF0. Ela só
                 funciona com a esteira real conectada e confirmada; o modo demonstração não usa o
@@ -192,49 +217,54 @@ export default function SondaScreen() {
                 label="Ir para a conexão"
                 onPress={() => router.replace('/')}
               />
-            </View>
+            </Surface>
           ) : (
             <>
-              <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>
+              {/* Abertura: o serviço que a sonda ataca, e o aviso de escrita no mesmo cartão. */}
+              <Surface tone="raised" style={styles.hero}>
+                <Text style={[styles.heroTitle, TitleType, { color: theme.text }]}>
                   {device?.name ?? 'Esteira conectada'}
                 </Text>
                 <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                   Serviço proprietário 0xFFF0, descoberto no teste real de 11/11/2026. Cada leitura,
                   escrita e notificação também vai para o registro em arquivo.
                 </Text>
-                <Text
-                  style={[
-                    styles.warning,
-                    { color: theme.noticeWarning, borderColor: theme.noticeWarning },
-                  ]}>
-                  Experimento: escritas em FFF1/FFF3 podem alterar o estado do painel. Use com a
-                  lona vazia e o Emergency Stop ao alcance.
-                </Text>
-              </View>
+                <Surface accent={theme.noticeWarning}>
+                  <Text style={[styles.warningText, { color: theme.text }]}>
+                    Experimento: escritas em FFF1/FFF3 podem alterar o estado do painel. Use com a
+                    lona vazia e o Emergency Stop ao alcance.
+                  </Text>
+                </Surface>
+              </Surface>
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Leituras do 0xFFF0</Text>
+                <SectionLabel label="Leituras do 0xFFF0" accent={Neon.cyan} />
                 <View style={styles.row}>
                   <ActionButton
                     variant="outline"
                     label="Ler FFF1"
+                    color={Neon.cyan}
                     onPress={() => read(PROPRIETARY_SERVICE, FFF1, 'FFF1')}
                     disabled={busy}
+                    labelStyle={styles.rowButtonLabel}
                     style={styles.rowButton}
                   />
                   <ActionButton
                     variant="outline"
                     label="Ler FFF2"
+                    color={Neon.cyan}
                     onPress={() => read(PROPRIETARY_SERVICE, FFF2, 'FFF2')}
                     disabled={busy}
+                    labelStyle={styles.rowButtonLabel}
                     style={styles.rowButton}
                   />
                   <ActionButton
                     variant="outline"
                     label="Ler FFF5"
+                    color={Neon.cyan}
                     onPress={() => read(PROPRIETARY_SERVICE, FFF5, 'FFF5')}
                     disabled={busy}
+                    labelStyle={styles.rowButtonLabel}
                     style={styles.rowButton}
                   />
                 </View>
@@ -247,23 +277,29 @@ export default function SondaScreen() {
               </View>
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Escrita no 0xFFF0</Text>
+                <SectionLabel label="Escrita no 0xFFF0" accent={Neon.amber} />
                 <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                   Escreva bytes em hexadecimal. O alvo padrão é o FFF3 (write-only); o FFF1 também
                   aceita escrita.
                 </Text>
-                <View style={styles.row}>
+                <View
+                  style={[
+                    styles.segment,
+                    { backgroundColor: theme.surfaceSunken, borderColor: theme.border },
+                  ]}>
                   <ActionButton
                     variant={writeTo === 'fff3' ? 'primary' : 'outline'}
+                    color={theme.textSecondary}
                     label="FFF3"
                     onPress={() => setWriteTo('fff3')}
-                    style={styles.rowButton}
+                    style={styles.segmentButton}
                   />
                   <ActionButton
                     variant={writeTo === 'fff1' ? 'primary' : 'outline'}
+                    color={theme.textSecondary}
                     label="FFF1"
                     onPress={() => setWriteTo('fff1')}
-                    style={styles.rowButton}
+                    style={styles.segmentButton}
                   />
                 </View>
                 <TextInput
@@ -273,10 +309,18 @@ export default function SondaScreen() {
                   autoCorrect={false}
                   placeholder="00 01 F1"
                   placeholderTextColor={theme.textSecondary}
-                  style={[styles.input, { borderColor: theme.border, color: theme.text }]}
+                  style={[
+                    styles.input,
+                    {
+                      backgroundColor: theme.surfaceSunken,
+                      borderColor: theme.border,
+                      color: theme.text,
+                    },
+                  ]}
                 />
                 <ActionButton
                   variant="outline"
+                  color={Neon.amber}
                   label="Enviar"
                   onPress={write}
                   disabled={busy || hexInput.trim().length === 0}
@@ -284,53 +328,62 @@ export default function SondaScreen() {
               </View>
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Outras leituras</Text>
+                <SectionLabel label="Outras leituras" accent={Neon.violet} />
                 <ActionButton
                   variant="outline"
                   label="Ler CSC Feature (0x2A5C)"
+                  color={Neon.cyan}
                   onPress={() => read(CSC_SERVICE, CSC_FEATURE, 'CSC Feature')}
                   disabled={busy}
+                  labelStyle={styles.wideButtonLabel}
                 />
                 <ActionButton
                   variant="outline"
                   label="Ler característica 2B12 (custom)"
+                  color={Neon.cyan}
                   onPress={() => read(CUSTOM_SERVICE, CUSTOM_CHARACTERISTIC, '2B12')}
                   disabled={busy}
+                  labelStyle={styles.wideButtonLabel}
                 />
                 <ActionButton
                   variant="outline"
                   label="Ler Device Information (modelo, firmware, serial)"
+                  color={Neon.cyan}
                   onPress={readDeviceInformation}
                   disabled={busy}
+                  labelStyle={styles.wideButtonLabel}
                 />
               </View>
 
               {busy ? (
-                <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
-                  Aguarde a operação...
-                </Text>
+                <View style={styles.busyRow}>
+                  <ActivityIndicator size="small" color={Neon.cyan} />
+                  <Text style={[styles.busyText, { color: theme.textSecondary }]}>
+                    Aguarde a operação...
+                  </Text>
+                </View>
               ) : null}
 
               <View style={styles.section}>
-                <Text style={[styles.sectionTitle, { color: theme.text }]}>Resultados</Text>
+                <SectionLabel label="Resultados" accent={Neon.volt} />
                 {results.length === 0 ? (
                   <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                     Nada ainda. Toque em uma leitura para começar.
                   </Text>
                 ) : (
                   results.map((result) => (
-                    <View key={result.id} style={[styles.result, { borderColor: theme.border }]}>
+                    <Surface
+                      key={result.id}
+                      accent={RESULT_COLORS[result.kind]}
+                      style={styles.result}>
                       <Text
-                        style={[
-                          styles.resultLabel,
-                          { color: result.kind === 'erro' ? theme.noticeError : theme.text },
-                        ]}>
+                        style={[styles.resultLabel, { color: RESULT_COLORS[result.kind] }]}>
                         {formatClock(result.at)} {result.kind} {result.label}
                       </Text>
-                      <Text style={[styles.mono, { color: theme.textSecondary }]} selectable>
+                      <Text style={[styles.mono, { color: theme.text }]} selectable>
                         {result.value}
                       </Text>
-                    </View>
+                    </Surface>
                   ))
                 )}
               </View>
@@ -348,22 +401,11 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingLeft: Spacing.three,
-    paddingRight: Spacing.two,
-    borderBottomWidth: 1,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 700,
-  },
   scroll: {
     flexGrow: 1,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.five,
   },
   content: {
     width: '100%',
@@ -371,22 +413,30 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     gap: Spacing.four,
   },
-  section: {
-    gap: Spacing.two,
+  blockCard: {
+    gap: Spacing.three,
   },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: 700,
+  blockTitle: {
+    fontSize: 22,
+    lineHeight: 26,
+  },
+  hero: {
+    gap: 12,
+  },
+  heroTitle: {
+    fontSize: 26,
+    lineHeight: 30,
   },
   paragraph: {
     fontSize: 15,
-    lineHeight: 21,
+    lineHeight: 22,
   },
-  warning: {
+  warningText: {
     fontSize: 14,
     lineHeight: 20,
-    borderLeftWidth: 3,
-    paddingLeft: Spacing.three,
+  },
+  section: {
+    gap: Spacing.two,
   },
   row: {
     flexDirection: 'row',
@@ -395,27 +445,57 @@ const styles = StyleSheet.create({
   rowButton: {
     flex: 1,
   },
+  rowButtonLabel: {
+    fontSize: 18,
+    lineHeight: 22,
+    letterSpacing: 0.2,
+  },
+  // Alvo da escrita: um trilho escuro com o botão ativo preenchido de volt.
+  segment: {
+    flexDirection: 'row',
+    gap: Spacing.one,
+    padding: Spacing.one,
+    borderWidth: 1,
+    borderRadius: Radius.lg,
+  },
+  segmentButton: {
+    flex: 1,
+  },
   input: {
     borderWidth: 1,
-    borderRadius: 6,
+    borderRadius: Radius.lg,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
+    minHeight: MinTouchTarget,
     fontFamily: Fonts.mono,
-    fontSize: 16,
-    minHeight: 48,
+    fontSize: 18,
+    letterSpacing: 1.2,
+  },
+  wideButtonLabel: {
+    fontSize: 15,
+    lineHeight: 20,
+    letterSpacing: 0.2,
+  },
+  busyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  busyText: {
+    fontSize: 15,
+    lineHeight: 22,
   },
   result: {
-    borderBottomWidth: 1,
-    paddingVertical: Spacing.two,
     gap: Spacing.one,
   },
   resultLabel: {
-    fontSize: 14,
-    fontWeight: 600,
+    ...LabelType,
+    flexShrink: 1,
   },
   mono: {
     fontFamily: Fonts.mono,
     fontSize: 13,
-    lineHeight: 18,
+    lineHeight: 19,
+    flexShrink: 1,
   },
 });

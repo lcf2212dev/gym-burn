@@ -5,8 +5,24 @@ import { ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
+import { AmbientGlow } from '@/components/ambient-glow';
 import { BeltFooter } from '@/components/belt-footer';
-import { MaxContentWidth, MinTouchTarget, Spacing } from '@/constants/theme';
+import { Pill, type PillTone } from '@/components/pill';
+import { ScreenHeader } from '@/components/screen-header';
+import { SectionLabel } from '@/components/section-label';
+import { Surface } from '@/components/surface';
+import {
+  LabelType,
+  MaxContentWidth,
+  MinTouchTarget,
+  Neon,
+  NumeralType,
+  Radius,
+  Spacing,
+  TitleType,
+  neonGlow,
+  withAlpha,
+} from '@/constants/theme';
 import { useGuide, useGuideActions } from '@/guide/guide-context';
 import {
   ANSWER_WORDS,
@@ -14,7 +30,7 @@ import {
   STOP_ANSWER_WORDS,
   emergencyResultWords,
 } from '@/guide/guide-logic';
-import type { GuideCheck, GuideStep } from '@/guide/types';
+import type { GuideCheck, GuideCheckState, GuideStep } from '@/guide/types';
 import { useTheme } from '@/hooks/use-theme';
 import { useRecorder, useRecorderActions } from '@/logging/recorder-context';
 
@@ -30,6 +46,31 @@ function goBack() {
 /** A tela principal (busca e painel) já está na pilha: fecha o que está por cima dela. */
 function goToApp() {
   router.dismissTo('/');
+}
+
+/** Cor da pill de cada estado da verificação; o significado é o mesmo do resto do app. */
+const CHECK_TONES: Record<GuideCheckState, PillTone> = {
+  pending: 'neutral',
+  current: 'cyan',
+  done: 'mint',
+  unconfirmed: 'amber',
+  failed: 'red',
+};
+
+/** Cor do fio de destaque da verificação; `null` não acende nada. */
+function checkAccent(check: GuideCheck): string | null {
+  switch (check.state) {
+    case 'current':
+      return Neon.cyan;
+    case 'done':
+      return Neon.mint;
+    case 'unconfirmed':
+      return Neon.amber;
+    case 'failed':
+      return Neon.red;
+    case 'pending':
+      return null;
+  }
 }
 
 /**
@@ -56,50 +97,57 @@ export function GuideScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
-      <View style={[styles.topBar, { borderColor: theme.border }]}>
-        <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
-          Primeiro teste na esteira
-        </Text>
-        <ActionButton variant="text" label="Voltar" onPress={goBack} />
-      </View>
+      {/* Halo ciano único: profundidade no carbono sem uma segunda temperatura de cor. */}
+      <AmbientGlow intensity={0.5} />
+
+      <ScreenHeader
+        title="Primeiro teste na esteira"
+        right={<ActionButton variant="text" label="Voltar" onPress={goBack} />}
+        accent={Neon.violet}
+      />
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <View style={styles.content}>
           {active ? null : (
-            <View style={styles.intro}>
+            <Surface tone="raised" accent={Neon.violet} style={styles.introCard}>
               <Text style={[styles.introText, { color: theme.textSecondary }]}>
                 Seis passos para conectar, conferir os comandos e enviar o registro. Tudo o que
                 acontecer fica salvo no registro.
               </Text>
               <ActionButton variant="primary" label="Começar o roteiro" onPress={start} />
-            </View>
+            </Surface>
           )}
 
           {/* Com o passo 5 aberto, as perguntas já estão nas verificações dele. Fora dele (o
               Emergency Stop pode derrubar a conexão e devolver o roteiro ao passo 3), elas
               precisam aparecer aqui, ou não haveria onde responder. */}
           {active && stopQuestion !== null && currentStepId !== 'commands' ? (
-            <View style={[styles.questionCard, { borderColor: theme.noticeWarning }]}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
+            <Surface accent={Neon.amber} style={styles.questionCard}>
+              <Text style={[styles.questionTitle, TitleType, { color: theme.text }]} accessibilityRole="header">
                 Parar
               </Text>
-              <Text style={[styles.checkDetail, { color: theme.text }]}>{stopQuestion}</Text>
+              <Text style={[styles.questionText, { color: theme.text }]}>{stopQuestion}</Text>
               <StopAnswerButtons />
-            </View>
+            </Surface>
           ) : null}
           {active && emergencyQuestion !== null && currentStepId !== 'commands' ? (
-            <View style={[styles.questionCard, { borderColor: theme.noticeWarning }]}>
-              <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
+            <Surface accent={Neon.amber} style={styles.questionCard}>
+              <Text style={[styles.questionTitle, TitleType, { color: theme.text }]} accessibilityRole="header">
                 Emergency Stop
               </Text>
-              <Text style={[styles.checkDetail, { color: theme.text }]}>{emergencyQuestion}</Text>
+              <Text style={[styles.questionText, { color: theme.text }]}>{emergencyQuestion}</Text>
               <EmergencyStopButtons />
-            </View>
+            </Surface>
           ) : null}
 
-          <View style={[styles.steps, { borderColor: theme.border }]}>
-            {steps.map((step) => (
-              <StepItem key={step.id} step={step} active={active} />
+          <View style={styles.timeline}>
+            {steps.map((step, index) => (
+              <StepItem
+                key={step.id}
+                step={step}
+                active={active}
+                last={index === steps.length - 1}
+              />
             ))}
           </View>
 
@@ -108,16 +156,21 @@ export function GuideScreen() {
           {/* Se um passo não anda (a esteira nem aparece na busca, por exemplo), o registro é
               justamente o que explica o motivo: dá para enviá-lo de qualquer passo. */}
           {offerEarlyShare ? (
-            <View style={styles.field}>
-              <Text style={[styles.checkDetail, { color: theme.textSecondary }]}>
+            <Surface style={styles.earlyShare}>
+              <Text style={[styles.helpText, { color: theme.textSecondary }]}>
                 Travou em algum passo? Envie o registro como está.
               </Text>
               <ShareButton early />
-            </View>
+            </Surface>
           ) : null}
 
           {active ? (
-            <ActionButton variant="outline" label="Encerrar o roteiro" onPress={stop} />
+            <ActionButton
+              variant="outline"
+              label="Encerrar o roteiro"
+              onPress={stop}
+              color={Neon.amber}
+            />
           ) : null}
         </View>
       </ScrollView>
@@ -127,44 +180,79 @@ export function GuideScreen() {
   );
 }
 
-function StepItem({ step, active }: { step: GuideStep; active: boolean }) {
+function StepItem({ step, active, last }: { step: GuideStep; active: boolean; last: boolean }) {
   const theme = useTheme();
   const open = active && step.state === 'current';
+  const done = step.state === 'done';
 
-  const numberColor = step.state === 'pending' ? theme.textSecondary : theme.text;
-  const titleColor = step.state === 'pending' ? theme.textSecondary : theme.text;
+  const badgeColor = open ? Neon.volt : done ? theme.background : theme.textSecondary;
+  const badgeBorder = open ? Neon.volt : done ? Neon.mint : theme.border;
+  const badgeBackground = open ? withAlpha(Neon.volt, 0.14) : done ? Neon.mint : 'transparent';
 
   return (
-    <View style={[styles.step, { borderColor: theme.border }]}>
-      <View style={styles.stepHeader}>
-        <Text style={[styles.stepNumber, { color: numberColor }, open && styles.stepNumberOpen]}>
-          {step.number}
-        </Text>
-        <Text
-          style={[styles.stepTitle, { color: titleColor }, open && styles.stepTitleOpen]}
-          accessibilityRole="header">
-          {step.title}
-        </Text>
-        {step.state === 'done' ? (
-          <Text style={[styles.doneMark, { color: theme.noticeSuccess }]}>feito</Text>
-        ) : null}
+    <View style={[styles.stepRow, last && styles.stepRowLast]}>
+      {/* Trilho da linha do tempo: um segmento absoluto por passo, do badge deste até o
+          topo do próximo. Concluído em menta; futuro no contorno do tema. */}
+      {last ? null : (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.track,
+            { backgroundColor: done ? Neon.mint : withAlpha(theme.border, 0.8) },
+          ]}
+        />
+      )}
+
+      <View style={styles.rail}>
+        <View style={[styles.badge, { borderColor: badgeBorder, backgroundColor: badgeBackground }]}>
+          <Text
+            style={[
+              styles.badgeNumber,
+              NumeralType,
+              { color: badgeColor },
+              open && neonGlow(Neon.volt, 12, 0.6),
+            ]}>
+            {step.number}
+          </Text>
+        </View>
       </View>
 
-      {step.state === 'done' && step.detail ? (
-        <Text style={[styles.collapsedDetail, { color: theme.textSecondary }]}>{step.detail}</Text>
-      ) : null}
-
-      {open ? (
-        <View style={styles.stepBody}>
-          <Text style={[styles.stepText, { color: theme.text }]}>{step.text}</Text>
-          {step.warning ? (
-            <Text style={[styles.warning, { color: theme.noticeWarning, borderColor: theme.noticeWarning }]}>
-              {step.warning}
+      <View style={[styles.stepMain, open ? null : styles.stepMainCollapsed]}>
+        {open ? (
+          <Surface tone="raised" accent={Neon.volt} style={styles.openCard}>
+            <Text
+              style={[styles.stepTitleOpen, TitleType, { color: theme.text }]}
+              accessibilityRole="header">
+              {step.title}
             </Text>
-          ) : null}
-          <StepControls step={step} />
-        </View>
-      ) : null}
+            <Text style={[styles.stepText, { color: theme.text }]}>{step.text}</Text>
+            {step.warning ? (
+              <Surface tone="sunken" accent={Neon.amber}>
+                <Text style={[styles.warning, { color: theme.text }]}>{step.warning}</Text>
+              </Surface>
+            ) : null}
+            <View style={styles.stepControls}>
+              <StepControls step={step} />
+            </View>
+          </Surface>
+        ) : (
+          <View style={styles.collapsed}>
+            <View style={styles.collapsedHeader}>
+              <Text
+                style={[styles.stepTitle, TitleType, { color: theme.textSecondary }]}
+                accessibilityRole="header">
+                {step.title}
+              </Text>
+              {done ? <Pill label="feito" tone="mint" /> : null}
+            </View>
+            {step.state === 'done' && step.detail ? (
+              <Text style={[styles.collapsedDetail, { color: theme.textSecondary }]}>
+                {step.detail}
+              </Text>
+            ) : null}
+          </View>
+        )}
+      </View>
     </View>
   );
 }
@@ -220,7 +308,7 @@ function PanelCodeField() {
   const { setPanelCode, commitText } = useGuideActions();
   return (
     <View style={styles.field}>
-      <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
+      <Text style={[LabelType, { color: theme.textSecondary }]}>
         Código que apareceu no painel (opcional)
       </Text>
       <TextInput
@@ -230,7 +318,14 @@ function PanelCodeField() {
         keyboardType="number-pad"
         returnKeyType="done"
         accessibilityLabel="Código que apareceu no painel"
-        style={[styles.input, { color: theme.text, borderColor: theme.border }]}
+        style={[
+          styles.input,
+          {
+            color: theme.text,
+            borderColor: theme.border,
+            backgroundColor: theme.backgroundElement,
+          },
+        ]}
       />
     </View>
   );
@@ -242,14 +337,22 @@ function NotesField() {
   const { setNotes, commitText } = useGuideActions();
   return (
     <View style={styles.field}>
-      <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>Observações (opcional)</Text>
+      <Text style={[LabelType, { color: theme.textSecondary }]}>Observações (opcional)</Text>
       <TextInput
         value={notes}
         onChangeText={setNotes}
         onBlur={() => commitText('notes')}
         multiline
         accessibilityLabel="Observações"
-        style={[styles.input, styles.notes, { color: theme.text, borderColor: theme.border }]}
+        style={[
+          styles.input,
+          styles.notes,
+          {
+            color: theme.text,
+            borderColor: theme.border,
+            backgroundColor: theme.backgroundElement,
+          },
+        ]}
       />
     </View>
   );
@@ -294,45 +397,40 @@ function CheckItem({ check }: { check: GuideCheck }) {
   const stopQuestion = useGuide((s) => s.stopQuestion);
   const stopAnswer = useGuide((s) => s.stopAnswer);
   const emergencyQuestion = useGuide((s) => s.emergencyQuestion);
-  const stateColor = {
-    pending: theme.textSecondary,
-    current: theme.text,
-    done: theme.noticeSuccess,
-    unconfirmed: theme.noticeWarning,
-    failed: theme.noticeError,
-  }[check.state];
   const current = check.state === 'current';
 
   return (
-    <View
-      style={[
-        styles.check,
-        { borderColor: current ? theme.text : theme.border },
-        current && styles.checkCurrent,
-      ]}>
+    <Surface
+      tone="default"
+      accent={check.urgent ? Neon.red : checkAccent(check)}
+      style={styles.check}>
       <View style={styles.checkHeader}>
         <Text
           style={[
             styles.checkLabel,
-            { color: check.state === 'pending' ? theme.textSecondary : theme.text },
             current && styles.checkLabelCurrent,
+            { color: check.state === 'pending' ? theme.textSecondary : theme.text },
           ]}>
           {check.label}
         </Text>
-        <Text style={[styles.checkState, { color: stateColor }]}>
-          {CHECK_STATE_WORDS[check.state]}
-        </Text>
+        <Pill label={CHECK_STATE_WORDS[check.state]} tone={CHECK_TONES[check.state]} />
       </View>
       {check.detail ? (
-        <Text
-          accessibilityRole={check.urgent ? 'alert' : undefined}
-          style={
-            check.urgent
-              ? [styles.urgent, { color: theme.noticeError, borderColor: theme.noticeError }]
-              : [styles.checkDetail, { color: check.state === 'failed' ? theme.noticeError : theme.textSecondary }]
-          }>
-          {check.detail}
-        </Text>
+        check.urgent ? (
+          <Surface tone="sunken" accent={Neon.red}>
+            <Text accessibilityRole="alert" style={[styles.checkDetail, { color: theme.text }]}>
+              {check.detail}
+            </Text>
+          </Surface>
+        ) : (
+          <Text
+            style={[
+              styles.checkDetail,
+              { color: check.state === 'failed' ? theme.text : theme.textSecondary },
+            ]}>
+            {check.detail}
+          </Text>
+        )
       ) : null}
       <EarlierAttempts details={check.earlier} />
       {/* Os botões do Parar só aparecem com a pergunta feita, ou para corrigir a resposta. */}
@@ -345,7 +443,7 @@ function CheckItem({ check }: { check: GuideCheck }) {
       {check.id === 'emergencyStop' && (check.state !== 'pending' || emergencyQuestion !== null) ? (
         <EmergencyStopButtons />
       ) : null}
-    </View>
+    </Surface>
   );
 }
 
@@ -357,12 +455,12 @@ function EarlierAttempts({ details }: { details: readonly string[] }) {
   }
   return (
     <View style={styles.earlier}>
-      <Text style={[styles.checkDetail, styles.earlierTitle, { color: theme.noticeError }]}>
+      <Text style={[styles.earlierTitle, { color: theme.noticeError }]}>
         {details.length === 1 ? 'Tentativa anterior sem sucesso:' : 'Tentativas anteriores sem sucesso:'}
       </Text>
       {details.map((detail, index) => (
         // A mesma falha pode se repetir: a posição faz parte da identidade.
-        <Text key={`${index}-${detail}`} style={[styles.checkDetail, { color: theme.noticeError }]}>
+        <Text key={`${index}-${detail}`} style={[styles.earlierLine, { color: theme.textSecondary }]}>
           {details.length === 1 ? detail : `${index + 1}. ${detail}`}
         </Text>
       ))}
@@ -387,7 +485,7 @@ function StopAnswerButtons() {
       />
       <ActionButton
         variant={stopAnswer === 'helped' ? 'solid' : 'outline'}
-        color={theme.noticeError}
+        color={Neon.red}
         onColor={theme.background}
         label="Não, eu a parei"
         onPress={() => reportStop('helped')}
@@ -395,7 +493,7 @@ function StopAnswerButtons() {
       {/* A esteira pode informar velocidade zero com a lona girando. */}
       <ActionButton
         variant={stopAnswer === 'notStopped' ? 'solid' : 'outline'}
-        color={theme.noticeError}
+        color={Neon.red}
         onColor={theme.background}
         label="A lona não parou"
         onPress={() => reportStop('notStopped')}
@@ -424,7 +522,7 @@ function EmergencyStopButtons() {
       />
       <ActionButton
         variant={emergencyStop === 'notStopped' ? 'solid' : 'outline'}
-        color={theme.noticeError}
+        color={Neon.red}
         onColor={theme.background}
         label="A lona não parou"
         onPress={() => reportEmergencyStop('notStopped')}
@@ -468,11 +566,11 @@ function ShareButton({ early = false }: { early?: boolean }) {
         onPress={share}
       />
       {message ? (
-        <Text
-          accessibilityRole="alert"
-          style={[styles.urgent, { color: theme.noticeError, borderColor: theme.noticeError }]}>
-          {message}
-        </Text>
+        <Surface tone="sunken" accent={Neon.red}>
+          <Text accessibilityRole="alert" style={[styles.checkDetail, { color: theme.text }]}>
+            {message}
+          </Text>
+        </Surface>
       ) : null}
     </View>
   );
@@ -540,42 +638,45 @@ function Summary({ showShare }: { showShare: boolean }) {
 
   return (
     <View style={styles.summary}>
-      <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
-        Resumo
-      </Text>
-      {rows.map((row) => (
-        <View key={row.label} style={[styles.summaryRow, { borderColor: theme.border }]}>
-          <View style={styles.summaryLine}>
-            <Text style={[styles.summaryLabel, { color: theme.textSecondary }]}>{row.label}</Text>
-            <Text
-              style={[styles.summaryValue, { color: row.failed ? theme.noticeError : theme.text }]}>
-              {row.value}
-            </Text>
+      {/* O SectionLabel não recebe role; o wrapper mantém o cabeçalho para o leitor de tela. */}
+      <View accessible accessibilityRole="header" accessibilityLabel="Resumo">
+        <SectionLabel label="Resumo" accent={Neon.violet} />
+      </View>
+      <View>
+        {rows.map((row) => (
+          <View key={row.label} style={[styles.summaryRow, { borderColor: theme.border }]}>
+            <View style={styles.summaryLine}>
+              <Text style={[styles.summaryLabel, { color: theme.textSecondary }]}>{row.label}</Text>
+              <Text
+                style={[styles.summaryValue, { color: row.failed ? theme.noticeError : theme.text }]}>
+                {row.value}
+              </Text>
+            </View>
+            {row.detail ? (
+              <Text style={[styles.summaryDetail, { color: theme.textSecondary }]}>{row.detail}</Text>
+            ) : null}
+            {row.earlier ? <EarlierAttempts details={row.earlier} /> : null}
           </View>
-          {row.detail ? (
-            <Text style={[styles.checkDetail, { color: theme.textSecondary }]}>{row.detail}</Text>
-          ) : null}
-          {row.earlier ? <EarlierAttempts details={row.earlier} /> : null}
-        </View>
-      ))}
+        ))}
+      </View>
       {/* Com o passo 5 recolhido, é aqui que se corrige um toque errado na pergunta do Parar. */}
       {active && stopAnswer !== null ? (
-        <View style={styles.field}>
-          <Text style={[styles.checkDetail, { color: theme.textSecondary }]}>
+        <Surface accent={Neon.amber} style={styles.correctionCard}>
+          <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
             Se a resposta sobre o Parar acima estiver errada, corrija aqui: a lona parou sozinha,
             sem você tocar no painel nem no Emergency Stop?
           </Text>
           <StopAnswerButtons />
-        </View>
+        </Surface>
       ) : null}
       {/* Com o passo 5 recolhido, é aqui que se corrige o resultado do Emergency Stop. */}
       {active && hasEmergencyCheck ? (
-        <View style={styles.field}>
-          <Text style={[styles.checkDetail, { color: theme.textSecondary }]}>
+        <Surface accent={Neon.amber} style={styles.correctionCard}>
+          <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
             Se o resultado do Emergency Stop acima estiver errado, corrija aqui:
           </Text>
           <EmergencyStopButtons />
-        </View>
+        </Surface>
       ) : null}
       {showShare ? <ShareButton /> : null}
     </View>
@@ -586,117 +687,141 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: Spacing.two,
-    paddingLeft: Spacing.three,
-    paddingRight: Spacing.two,
-    borderBottomWidth: 1,
-  },
-  title: {
-    flexShrink: 1,
-    fontSize: 20,
-    fontWeight: 700,
-  },
   scroll: {
     flexGrow: 1,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
+    paddingTop: Spacing.three,
+    // O último cartão não pode encostar no BeltFooter fixo.
+    paddingBottom: Spacing.five,
   },
   content: {
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
     gap: Spacing.four,
-    paddingBottom: Spacing.five,
   },
-  intro: {
+  introCard: {
     gap: Spacing.three,
+    padding: Spacing.four,
   },
   introText: {
-    fontSize: 16,
-    lineHeight: 22,
+    fontSize: 18,
+    lineHeight: 27,
+    fontWeight: '500',
   },
-  steps: {
-    borderTopWidth: 1,
-  },
-  step: {
-    paddingVertical: Spacing.three,
-    borderBottomWidth: 1,
-    gap: Spacing.two,
-  },
-  stepHeader: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
+  questionCard: {
     gap: Spacing.three,
   },
-  stepNumber: {
-    width: 24,
-    fontSize: 17,
-    fontWeight: 700,
+  questionTitle: {
+    fontSize: 22,
+    lineHeight: 26,
   },
-  stepNumberOpen: {
-    fontSize: 24,
+  questionText: {
+    fontSize: 20,
+    lineHeight: 29,
+    fontWeight: '500',
   },
-  stepTitle: {
+  timeline: {
+    gap: 0,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    gap: Spacing.three,
+    paddingBottom: Spacing.four,
+  },
+  stepRowLast: {
+    paddingBottom: 0,
+  },
+  rail: {
+    width: 34,
+    alignItems: 'center',
+  },
+  badge: {
+    width: 34,
+    height: 34,
+    borderRadius: Radius.sm,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeNumber: {
+    fontSize: 19,
+    lineHeight: 22,
+  },
+  track: {
+    position: 'absolute',
+    left: 16,
+    top: 34,
+    bottom: 0,
+    width: 2,
+    borderRadius: 1,
+  },
+  stepMain: {
     flex: 1,
-    fontSize: 17,
-    fontWeight: 600,
+  },
+  // Recolhidos: o título alinha com o centro do badge.
+  stepMainCollapsed: {
+    paddingTop: 5,
+  },
+  openCard: {
+    gap: Spacing.three,
   },
   stepTitleOpen: {
     fontSize: 24,
-    fontWeight: 700,
-  },
-  doneMark: {
-    fontSize: 15,
-    fontWeight: 700,
-  },
-  collapsedDetail: {
-    fontSize: 15,
-    lineHeight: 21,
-    paddingLeft: 24 + Spacing.three,
-  },
-  stepBody: {
-    gap: Spacing.three,
-    paddingTop: Spacing.one,
+    lineHeight: 28,
   },
   stepText: {
-    fontSize: 22,
-    lineHeight: 31,
-    fontWeight: 500,
+    fontSize: 20,
+    lineHeight: 29,
   },
   warning: {
     fontSize: 17,
+    lineHeight: 25,
+    fontWeight: '600',
+  },
+  stepControls: {
+    gap: Spacing.three,
+  },
+  collapsed: {
+    gap: Spacing.one,
+  },
+  collapsedHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  stepTitle: {
+    flex: 1,
+    fontSize: 20,
     lineHeight: 24,
-    fontWeight: 600,
-    borderLeftWidth: 4,
-    paddingLeft: Spacing.three,
+  },
+  collapsedDetail: {
+    fontSize: 16,
+    lineHeight: 24,
   },
   field: {
     gap: Spacing.two,
   },
-  fieldLabel: {
-    fontSize: 15,
-  },
   input: {
     minHeight: MinTouchTarget,
-    borderWidth: 2,
-    borderRadius: 12,
+    borderWidth: 1,
+    borderRadius: Radius.md,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     fontSize: 20,
+    lineHeight: 26,
   },
   notes: {
     minHeight: MinTouchTarget * 2,
-    fontSize: 17,
+    fontSize: 18,
+    lineHeight: 26,
+    paddingTop: Spacing.three,
     textAlignVertical: 'top',
   },
   question: {
-    fontSize: 18,
-    lineHeight: 25,
-    fontWeight: 600,
+    fontSize: 19,
+    lineHeight: 27,
+    fontWeight: '600',
   },
   row: {
     flexDirection: 'row',
@@ -706,68 +831,43 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   checks: {
-    gap: Spacing.two,
+    gap: 12,
   },
   check: {
-    gap: Spacing.two,
-    padding: Spacing.three,
-    borderWidth: 1,
-    borderRadius: 12,
-  },
-  checkCurrent: {
-    borderWidth: 2,
+    gap: 10,
   },
   checkHeader: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: Spacing.three,
+    gap: Spacing.two,
+    alignItems: 'flex-start',
   },
   checkLabel: {
-    flex: 1,
-    fontSize: 17,
-    lineHeight: 24,
-    fontWeight: 600,
+    fontSize: 18,
+    lineHeight: 26,
+    fontWeight: '500',
   },
   checkLabelCurrent: {
     fontSize: 20,
     lineHeight: 28,
-    fontWeight: 700,
-  },
-  checkState: {
-    fontSize: 15,
-    fontWeight: 700,
+    fontWeight: '600',
   },
   checkDetail: {
-    fontSize: 15,
-    lineHeight: 21,
-  },
-  urgent: {
-    fontSize: 17,
+    fontSize: 16,
     lineHeight: 24,
-    fontWeight: 700,
-    borderWidth: 2,
-    borderRadius: 8,
-    padding: Spacing.three,
   },
   earlier: {
     gap: Spacing.one,
   },
   earlierTitle: {
-    fontWeight: 700,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: '700',
   },
-  questionCard: {
-    gap: Spacing.two,
-    padding: Spacing.three,
-    borderWidth: 2,
-    borderRadius: 12,
+  earlierLine: {
+    fontSize: 14,
+    lineHeight: 21,
   },
   summary: {
-    gap: Spacing.one,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: 700,
-    marginBottom: Spacing.one,
+    gap: Spacing.two,
   },
   summaryRow: {
     gap: Spacing.one,
@@ -776,15 +876,37 @@ const styles = StyleSheet.create({
   },
   summaryLine: {
     flexDirection: 'row',
+    alignItems: 'flex-start',
     gap: Spacing.three,
   },
   summaryLabel: {
     flex: 1,
-    fontSize: 15,
+    fontSize: 14,
+    lineHeight: 20,
   },
   summaryValue: {
+    flexShrink: 1,
     fontSize: 15,
-    fontWeight: 600,
+    lineHeight: 20,
+    fontWeight: '600',
     textAlign: 'right',
+  },
+  summaryDetail: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  correctionCard: {
+    gap: Spacing.two,
+  },
+  paragraph: {
+    fontSize: 16,
+    lineHeight: 24,
+  },
+  helpText: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  earlyShare: {
+    gap: Spacing.two,
   },
 });

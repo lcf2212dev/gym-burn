@@ -4,8 +4,13 @@ import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
+import { AmbientGlow } from '@/components/ambient-glow';
 import { BeltFooter } from '@/components/belt-footer';
-import { Fonts, MaxContentWidth, Spacing } from '@/constants/theme';
+import { Pill } from '@/components/pill';
+import { ScreenHeader } from '@/components/screen-header';
+import { SectionLabel } from '@/components/section-label';
+import { Surface } from '@/components/surface';
+import { Fonts, MaxContentWidth, Neon, Spacing, TitleType } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useRecorder, useRecorderActions } from '@/logging/recorder-context';
 import type { LogFile } from '@/logging/types';
@@ -46,30 +51,33 @@ export function LogsScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
-      <View style={[styles.topBar, { borderColor: theme.border }]}>
-        <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
-          Registros
-        </Text>
-        <ActionButton variant="text" label="Voltar" onPress={goBack} />
-      </View>
+      {/* Halo ciano único: profundidade no carbono sem uma segunda temperatura de cor. */}
+      <AmbientGlow intensity={0.45} />
+
+      <ScreenHeader
+        title="Registros"
+        right={<ActionButton variant="text" label="Voltar" onPress={goBack} />}
+        accent={Neon.cyan}
+      />
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.content}>
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
-              Gravando agora
-            </Text>
+            {/* O SectionLabel não recebe role; o wrapper mantém o cabeçalho para o leitor de tela. */}
+            <View accessible accessibilityRole="header" accessibilityLabel="Gravando agora">
+              <SectionLabel label="Gravando agora" accent={Neon.cyan} />
+            </View>
             {currentFileName ? (
-              <>
+              <Surface style={styles.fileCard}>
                 <Text style={[styles.mono, { color: theme.text }]} selectable>
                   {currentFileName}
                 </Text>
                 {currentFile ? (
-                  <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
+                  <Text style={[styles.fileSize, { color: theme.textSecondary }]}>
                     {formatFileSize(currentFile.sizeBytes)}
                   </Text>
                 ) : null}
-              </>
+              </Surface>
             ) : (
               <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                 Nenhum arquivo em gravação.
@@ -82,23 +90,25 @@ export function LogsScreen() {
           </View>
 
           {problem ? (
-            <Text
-              accessibilityRole="alert"
-              style={[styles.problem, { color: theme.noticeError, borderColor: theme.noticeError }]}>
-              {problem}
-            </Text>
+            <Surface accent={Neon.red}>
+              <Text accessibilityRole="alert" style={[styles.problem, { color: theme.text }]}>
+                {problem}
+              </Text>
+            </Surface>
           ) : null}
 
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
-              Cópia fora do app
-            </Text>
+            <View accessible accessibilityRole="header" accessibilityLabel="Cópia fora do app">
+              <SectionLabel label="Cópia fora do app" accent={Neon.cyan} />
+            </View>
             {mirror ? (
-              <>
-                <Text style={[styles.value, { color: theme.text }]} selectable>
+              <Surface style={styles.mirrorCard}>
+                <Text
+                  style={[styles.mirrorValue, TitleType, { color: theme.text }]}
+                  selectable>
                   {mirror.label}
                 </Text>
-                <View style={styles.row}>
+                <View style={[styles.row, styles.rowTight]}>
                   <ActionButton
                     variant="outline"
                     label="Trocar pasta"
@@ -109,13 +119,15 @@ export function LogsScreen() {
                     variant="outline"
                     label="Parar de copiar"
                     onPress={actions.stopMirroring}
-                    style={styles.rowButton}
+                    style={[styles.rowButton, styles.rowButtonWide]}
                   />
                 </View>
-              </>
+              </Surface>
             ) : (
-              <>
-                <Text style={[styles.value, { color: theme.text }]}>Sem cópia fora do app</Text>
+              <Surface style={styles.mirrorCard}>
+                <Text style={[styles.mirrorValue, TitleType, { color: theme.text }]}>
+                  Sem cópia fora do app
+                </Text>
                 <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                   Uma cópia dos registros numa pasta do celular pode ser lida pelo aplicativo
                   Arquivos ou por um computador ligado por USB.
@@ -125,20 +137,20 @@ export function LogsScreen() {
                   label="Escolher pasta para a cópia"
                   onPress={actions.chooseMirrorFolder}
                 />
-              </>
+              </Surface>
             )}
           </View>
 
           <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
-              Arquivos
-            </Text>
+            <View accessible accessibilityRole="header" accessibilityLabel="Arquivos">
+              <SectionLabel label="Arquivos" accent={Neon.cyan} />
+            </View>
             {files.length === 0 ? (
               <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
                 Nenhum registro guardado.
               </Text>
             ) : (
-              <View style={[styles.list, { borderColor: theme.border }]}>
+              <View style={styles.list}>
                 {files.map((file) => (
                   <FileRow key={file.name} file={file} />
                 ))}
@@ -171,16 +183,16 @@ function FileRow({ file }: { file: LogFile }) {
   };
 
   return (
-    <View style={[styles.file, { borderColor: theme.border }]}>
+    <Surface plain style={styles.file}>
       <View style={styles.fileLine}>
-        <Text style={[styles.value, { color: theme.text }]}>{logFileDate(file)}</Text>
-        <Text style={[styles.paragraph, { color: theme.textSecondary }]}>
+        <Text style={[styles.fileDate, TitleType, { color: theme.text }]} numberOfLines={1}>
+          {logFileDate(file)}
+        </Text>
+        <Text style={[styles.fileSize, { color: theme.textSecondary }]}>
           {formatFileSize(file.sizeBytes)}
         </Text>
       </View>
-      {file.current ? (
-        <Text style={[styles.currentMark, { color: theme.noticeSuccess }]}>gravando agora</Text>
-      ) : null}
+      {file.current ? <Pill label="gravando agora" tone="mint" dot /> : null}
       <View style={styles.row}>
         <ActionButton
           variant="outline"
@@ -194,12 +206,12 @@ function FileRow({ file }: { file: LogFile }) {
             variant="outline"
             label="Apagar"
             onPress={confirmRemove}
-            color={theme.noticeError}
+            color={Neon.red}
             style={styles.rowButton}
           />
         )}
       </View>
-    </View>
+    </Surface>
   );
 }
 
@@ -207,72 +219,65 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingLeft: Spacing.three,
-    paddingRight: Spacing.two,
-    borderBottomWidth: 1,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 700,
-  },
   scroll: {
     flexGrow: 1,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
+    paddingTop: Spacing.three,
+    // O último cartão não pode encostar no BeltFooter fixo.
+    paddingBottom: Spacing.five,
   },
   content: {
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
     gap: Spacing.four,
-    paddingBottom: Spacing.five,
   },
   section: {
-    gap: Spacing.two,
+    gap: 12,
   },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: 700,
-  },
-  paragraph: {
-    fontSize: 15,
-    lineHeight: 21,
-  },
-  value: {
-    fontSize: 16,
-    fontWeight: 600,
+  fileCard: {
+    gap: Spacing.one,
   },
   mono: {
     fontFamily: Fonts.mono,
     fontSize: 14,
-    lineHeight: 20,
+    lineHeight: 21,
+  },
+  paragraph: {
+    fontSize: 16,
+    lineHeight: 24,
   },
   problem: {
-    fontSize: 16,
-    lineHeight: 22,
-    fontWeight: 700,
-    borderWidth: 2,
-    borderRadius: 8,
-    padding: Spacing.three,
+    fontSize: 17,
+    lineHeight: 25,
+    fontWeight: '600',
+  },
+  mirrorCard: {
+    gap: 12,
+  },
+  mirrorValue: {
+    fontSize: 20,
+    lineHeight: 24,
   },
   row: {
     flexDirection: 'row',
     gap: Spacing.three,
   },
+  rowTight: {
+    gap: Spacing.two,
+  },
   rowButton: {
     flex: 1,
   },
+  // "Parar de copiar" é mais comprido: ganha um pouco mais de largura na linha.
+  rowButtonWide: {
+    flex: 1.2,
+  },
   list: {
-    borderTopWidth: 1,
+    gap: 12,
   },
   file: {
-    gap: Spacing.two,
-    paddingVertical: Spacing.three,
-    borderBottomWidth: 1,
+    gap: 12,
   },
   fileLine: {
     flexDirection: 'row',
@@ -280,8 +285,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: Spacing.three,
   },
-  currentMark: {
-    fontSize: 14,
-    fontWeight: 700,
+  fileDate: {
+    flexShrink: 1,
+    fontSize: 18,
+    lineHeight: 22,
+  },
+  fileSize: {
+    fontFamily: Fonts.mono,
+    fontSize: 12,
+    lineHeight: 18,
   },
 });

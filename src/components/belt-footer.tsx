@@ -9,6 +9,8 @@ import { useTreadmill } from '@/treadmill/treadmill-context';
  * Rodapé com os botões da lona para as telas que cobrem o painel (diagnóstico, roteiro,
  * registros): Parar tem que continuar à vista em qualquer tela. Não renderiza nada sem uma
  * esteira confirmada que aceite comandos.
+ *
+ * A borda fina no topo separa a "tampa" da tela sem pesar.
  */
 export function BeltFooter() {
   const theme = useTheme();
@@ -21,7 +23,14 @@ export function BeltFooter() {
   }
 
   return (
-    <View style={[styles.footer, { borderColor: theme.border, backgroundColor: theme.background }]}>
+    <View
+      style={[
+        styles.footer,
+        {
+          borderTopColor: theme.border,
+          backgroundColor: theme.background,
+        },
+      ]}>
       <View style={styles.content}>
         <BeltControls />
       </View>
@@ -32,7 +41,8 @@ export function BeltFooter() {
 const styles = StyleSheet.create({
   footer: {
     borderTopWidth: 1,
-    paddingVertical: Spacing.two,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.two,
     paddingHorizontal: Spacing.three,
   },
   content: {

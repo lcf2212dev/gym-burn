@@ -1,7 +1,7 @@
 import { Platform, StyleSheet, Text, View } from 'react-native';
 
 import { ActionButton } from '@/components/action-button';
-import { Fonts, Spacing } from '@/constants/theme';
+import { LabelType, NumeralType, Spacing, neonGlow, withAlpha } from '@/constants/theme';
 import type { SupportedRange } from '@/ftms';
 import { useTheme } from '@/hooks/use-theme';
 import { rangeFraction, showsTarget, type ControlSteps } from '@/utils/controls';
@@ -22,7 +22,7 @@ export interface ControlColumnProps {
   steps: ControlSteps;
   onChange: (delta: number) => void;
   disabled: boolean;
-  /** Cor dos botões e do número. */
+  /** Cor dos botões, do título e do número. */
   accentColor: string;
   /** Cor do preenchimento do medidor. */
   meterColor: string;
@@ -35,6 +35,10 @@ export interface ControlColumnProps {
 /**
  * Uma coluna do painel, como as teclas do console: aumentar em cima, o valor
  * medido no meio com um medidor vertical, diminuir embaixo.
+ *
+ * No redesign ela é só o conteúdo de um cartão `Surface`; o padding é do
+ * cartão. O número é o placar da tela: condensado, tabular, com halo neon na
+ * cor da coluna e altura fixa para o painel não pular a cada leitura.
  */
 export function ControlColumn({
   title,
@@ -75,44 +79,78 @@ export function ControlColumn({
 
   return (
     <View style={styles.column}>
-      <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
+      {/* Kicker da coluna: traço na cor do controle e micro-rótulo em caixa alta. */}
+      <View style={styles.titleRow}>
+        <View style={[styles.titleBar, { backgroundColor: accentColor }]} />
+        <Text
+          style={[styles.title, LabelType, { color: accentColor }]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.8}>
+          {title}
+        </Text>
+      </View>
 
       <View style={styles.stepRow}>
         {stepButton(steps.big)}
         {stepButton(steps.small)}
       </View>
 
-      <View
-        style={styles.readout}
-        accessible
-        accessibilityLabel={`${title}: ${formatDecimal(value, 1)} ${spokenUnit}`}>
-        <View style={[styles.meterTrack, { backgroundColor: theme.backgroundSelected }]}>
+      {/* Número, medidor e alvo apagam juntos quando o controle está bloqueado. */}
+      <View style={[styles.readoutBlock, disabled && styles.readoutDisabled]}>
+        <View
+          style={styles.readout}
+          accessible
+          accessibilityLabel={`${title}: ${formatDecimal(value, 1)} ${spokenUnit}`}>
           <View
             style={[
-              styles.meterFill,
-              { height: `${fraction * 100}%`, backgroundColor: meterColor },
-            ]}
-          />
+              styles.meterTrack,
+              {
+                backgroundColor: withAlpha(theme.text, 0.08),
+                borderColor: withAlpha(theme.text, 0.06),
+              },
+            ]}>
+            <View
+              style={[
+                styles.meterFill,
+                {
+                  height: `${Math.max(fraction * 100, 4)}%`,
+                  // Com a lona parada o medidor mostra um pingo na cor do cartão;
+                  // a escala de esforço só entra quando há velocidade.
+                  backgroundColor: fraction > 0 ? meterColor : accentColor,
+                },
+              ]}
+            />
+          </View>
+          <View style={styles.numberBlock}>
+            <Text
+              style={[
+                styles.number,
+                NumeralType,
+                { color: disabled ? theme.textMuted : accentColor },
+                !disabled && neonGlow(accentColor, 15, 0.55),
+              ]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.4}>
+              {formatDecimal(value, 1)}
+            </Text>
+            <Text style={[styles.unit, LabelType, { color: theme.textSecondary }]} numberOfLines={1}>
+              {unit}
+            </Text>
+          </View>
         </View>
-        <View style={styles.numberBlock}>
-          <Text
-            style={[styles.number, { color: accentColor }]}
-            numberOfLines={1}
-            adjustsFontSizeToFit
-            minimumFontScale={0.4}>
-            {formatDecimal(value, 1)}
-          </Text>
-          <Text style={[styles.unit, { color: theme.textSecondary }]}>{unit}</Text>
-        </View>
-      </View>
 
-      {/* A linha fica reservada para o número não pular quando o alvo aparece. */}
-      <View style={styles.targetSlot}>
-        {showsTarget(target, value, steps.small) ? (
-          <Text style={[styles.target, { color: theme.textSecondary }]}>
-            alvo {formatDecimal(target, 1)}
-          </Text>
-        ) : null}
+        {/* A linha fica reservada para o número não pular quando o alvo aparece. */}
+        <View style={styles.targetSlot}>
+          {showsTarget(target, value, steps.small) ? (
+            <Text
+              style={[styles.target, LabelType, { color: theme.textSecondary }]}
+              numberOfLines={1}>
+              alvo {formatDecimal(target, 1)}
+            </Text>
+          ) : null}
+        </View>
       </View>
 
       <View style={styles.stepRow}>
@@ -120,10 +158,14 @@ export function ControlColumn({
         {stepButton(-steps.small)}
       </View>
 
-      {hint ? <Text style={[styles.note, { color: theme.textSecondary }]}>{hint}</Text> : null}
-      {warning ? (
-        <Text style={[styles.note, { color: theme.noticeWarning }]}>{warning}</Text>
-      ) : null}
+      {/* Slot sempre presente: os dois cartões terminam na mesma altura e o
+          painel não pulsa quando a dica ou o aviso aparece. */}
+      <View style={styles.noteSlot}>
+        {hint ? <Text style={[styles.note, { color: theme.textSecondary }]}>{hint}</Text> : null}
+        {warning ? (
+          <Text style={[styles.note, { color: theme.noticeWarning }]}>{warning}</Text>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -132,12 +174,20 @@ const styles = StyleSheet.create({
   column: {
     flex: 1,
     gap: Spacing.two,
-    paddingVertical: Spacing.two,
-    paddingHorizontal: Spacing.two,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  titleBar: {
+    width: 12,
+    height: 2,
+    borderRadius: 1,
   },
   title: {
-    fontSize: 17,
-    fontWeight: 600,
+    flexShrink: 1,
+    letterSpacing: 2.2,
   },
   stepRow: {
     flexDirection: 'row',
@@ -148,20 +198,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.one,
   },
   stepLabel: {
-    fontFamily: Fonts.numeral,
+    ...NumeralType,
     fontSize: 24,
-    fontWeight: 'normal',
-    fontVariant: ['tabular-nums'],
+    lineHeight: 28,
+    letterSpacing: 0.5,
+  },
+  readoutBlock: {
+    gap: Spacing.two,
+  },
+  readoutDisabled: {
+    opacity: 0.45,
   },
   readout: {
     flexDirection: 'row',
     alignItems: 'stretch',
     gap: Spacing.two,
-    minHeight: 120,
+    minHeight: 118,
   },
   meterTrack: {
-    width: 6,
+    width: 5,
     borderRadius: 3,
+    borderWidth: 1,
     overflow: 'hidden',
   },
   // Posição absoluta: uma altura em % num filho comum faria o trilho (e a
@@ -178,29 +235,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   number: {
-    fontFamily: Fonts.numeral,
-    fontSize: 104,
+    fontSize: 96,
     // Altura fixa: o número pode encolher para caber (`adjustsFontSizeToFit`)
-    // sem que a coluna mude de altura.
-    lineHeight: 108,
-    height: 108,
-    fontVariant: ['tabular-nums'],
+    // sem que a coluna mude de altura. O padding interno (compensado por margem
+    // negativa) dá espaço para o halo não ser recortado no Android.
+    lineHeight: 100,
+    height: 132,
+    paddingVertical: 16,
+    marginVertical: -16,
     // Sem o respiro extra do Android, o algarismo fica alinhado ao medidor.
     includeFontPadding: Platform.OS === 'android' ? false : undefined,
   },
   unit: {
-    fontSize: 16,
-    fontWeight: 600,
+    fontSize: 12,
+    lineHeight: 14,
+    letterSpacing: 1.4,
   },
   targetSlot: {
-    minHeight: 22,
+    minHeight: 18,
   },
   target: {
-    fontSize: 16,
-    fontWeight: 600,
+    letterSpacing: 1.6,
+  },
+  noteSlot: {
+    minHeight: 44,
+    gap: Spacing.one,
   },
   note: {
-    fontSize: 14,
-    lineHeight: 19,
+    fontSize: 13,
+    lineHeight: 18,
   },
 });

@@ -1,13 +1,25 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
+import { AmbientGlow } from '@/components/ambient-glow';
+import { BrandMark } from '@/components/brand-mark';
 import { DeviceRow } from '@/components/device-row';
 import { GuideStrip } from '@/components/guide-strip';
 import { NoticeBanner } from '@/components/notice-banner';
-import { MaxContentWidth, MinTouchTarget, Spacing } from '@/constants/theme';
+import { SectionLabel } from '@/components/section-label';
+import { Surface } from '@/components/surface';
+import {
+  MaxContentWidth,
+  MinTouchTarget,
+  Neon,
+  NumeralType,
+  Spacing,
+  TitleType,
+  withAlpha,
+} from '@/constants/theme';
 import { useGuide, useGuideActions } from '@/guide/guide-context';
 import { useTheme } from '@/hooks/use-theme';
 import { DiagnosticsModal } from '@/screens/diagnostics-modal';
@@ -18,6 +30,48 @@ const STEPS = [
   'Na esteira, segure o botão Bluetooth por 5 segundos, até o painel entrar no modo APP.',
   'Toque em Procurar esteiras e escolha a sua na lista. Se o painel mostrar um código, ele pode fazer parte do nome dela.',
 ];
+
+/** O número do passo é o único acento neon dos cartões de instrução. */
+const STEP_COLOR = Neon.volt;
+
+/** Interruptor desenhado no tema: trilho e polegar nas cores do app. */
+function NeonSwitch({
+  value,
+  onChange,
+  accessibilityLabel,
+}: {
+  value: boolean;
+  onChange: (value: boolean) => void;
+  accessibilityLabel: string;
+}) {
+  const theme = useTheme();
+
+  return (
+    <Pressable
+      onPress={() => onChange(!value)}
+      accessibilityRole="switch"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ checked: value }}
+      hitSlop={10}
+      style={[
+        styles.switchTrack,
+        {
+          backgroundColor: value ? withAlpha(Neon.volt, 0.16) : withAlpha(theme.text, 0.14),
+          borderColor: value ? withAlpha(Neon.volt, 0.7) : withAlpha(theme.text, 0.28),
+        },
+      ]}>
+      <View
+        style={[
+          styles.switchThumb,
+          {
+            backgroundColor: value ? Neon.volt : theme.text,
+            alignSelf: value ? 'flex-end' : 'flex-start',
+          },
+        ]}
+      />
+    </Pressable>
+  );
+}
 
 /** Primeira tela: instruções, busca por esteiras e o modo demonstração. */
 export function ConnectScreen() {
@@ -50,58 +104,72 @@ export function ConnectScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.background }]}>
+      {/* Halo frio e discreto: tira o preto chapado do fundo da tela de abertura. */}
+      <AmbientGlow intensity={0.55} />
       <GuideStrip />
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.content}>
-          <View>
-            <View style={styles.topLine}>
-              <Text style={[styles.appName, { color: theme.textSecondary }]}>Gym Burn</Text>
-              <View style={styles.topActions}>
+          <View style={styles.topLine}>
+            <View style={styles.topActions}>
+              <ActionButton variant="text" label="Coleta" onPress={() => router.push('/coleta')} />
+              <ActionButton
+                variant="text"
+                label="Registros"
+                onPress={() => router.push('/registros')}
+              />
+              {/* Uma conexão que falhou também deixa registro: é daqui que se chega a ele. */}
+              {hasLog ? (
                 <ActionButton
                   variant="text"
-                  label="Coleta"
-                  onPress={() => router.push('/coleta')}
+                  label="Diagnóstico"
+                  onPress={() => setDiagnosticsOpen(true)}
                 />
-                <ActionButton
-                  variant="text"
-                  label="Registros"
-                  onPress={() => router.push('/registros')}
-                />
-                {/* Uma conexão que falhou também deixa registro: é daqui que se chega a ele. */}
-                {hasLog ? (
-                  <ActionButton
-                    variant="text"
-                    label="Diagnóstico"
-                    onPress={() => setDiagnosticsOpen(true)}
-                  />
-                ) : null}
-              </View>
+              ) : null}
             </View>
-            <Text style={[styles.title, { color: theme.text }]} accessibilityRole="header">
+          </View>
+
+          <View style={styles.hero}>
+            <BrandMark size="md" />
+            <Text
+              style={[styles.title, TitleType, { color: theme.text }]}
+              accessibilityRole="header">
               Conecte sua esteira
             </Text>
           </View>
 
-          <View style={styles.steps}>
+          <Surface padded={false}>
             {STEPS.map((step, index) => (
-              <View key={step} style={styles.step}>
-                <Text style={[styles.stepNumber, { color: theme.text }]}>{index + 1}</Text>
+              <View
+                key={step}
+                style={[
+                  styles.step,
+                  index > 0 && { borderTopWidth: 1, borderTopColor: theme.border },
+                ]}>
+                <Text style={[styles.stepNumber, NumeralType, { color: STEP_COLOR }]}>
+                  {index + 1}
+                </Text>
                 <Text style={[styles.stepText, { color: theme.text }]}>{step}</Text>
               </View>
             ))}
+          </Surface>
+
+          <View style={styles.actions}>
+            <ActionButton
+              variant="outline"
+              label="Primeiro teste na esteira"
+              onPress={openGuide}
+              style={styles.secondaryButton}
+              labelStyle={styles.secondaryLabel}
+            />
+
+            <ActionButton
+              variant="outline"
+              label="Coleta para engenharia reversa"
+              onPress={() => router.push('/coleta')}
+              style={styles.secondaryButton}
+              labelStyle={styles.secondaryLabel}
+            />
           </View>
-
-          <ActionButton
-            variant="outline"
-            label="Primeiro teste na esteira"
-            onPress={openGuide}
-          />
-
-          <ActionButton
-            variant="outline"
-            label="Coleta para engenharia reversa"
-            onPress={() => router.push('/coleta')}
-          />
 
           <NoticeBanner />
 
@@ -122,11 +190,14 @@ export function ConnectScreen() {
           )}
 
           {scanning || visible.length > 0 ? (
-            <View>
-              <Text style={[styles.sectionTitle, { color: theme.text }]} accessibilityRole="header">
-                Esteiras encontradas
-              </Text>
-              <View style={[styles.list, { borderColor: theme.border }]}>
+            <View style={styles.devices}>
+              <View
+                accessible
+                accessibilityRole="header"
+                accessibilityLabel="Esteiras encontradas">
+                <SectionLabel label="Esteiras encontradas" accent={Neon.cyan} />
+              </View>
+              <View style={styles.list}>
                 {visible.map((device) => (
                   <DeviceRow
                     key={device.id}
@@ -146,20 +217,20 @@ export function ConnectScreen() {
             </View>
           ) : null}
 
-          <View style={styles.switchRow}>
+          <Surface style={styles.switchRow}>
             <Text
               style={[styles.switchLabel, { color: theme.text }]}
               onPress={() => setShowAll(!showAll)}>
               Mostrar outros aparelhos Bluetooth
             </Text>
-            <Switch
+            <NeonSwitch
               value={showAll}
-              onValueChange={setShowAll}
+              onChange={setShowAll}
               accessibilityLabel="Mostrar outros aparelhos Bluetooth"
             />
-          </View>
+          </Surface>
 
-          <View style={[styles.demo, { borderColor: theme.border }]}>
+          <Surface tone="raised" style={styles.demo}>
             <Text style={[styles.demoText, { color: theme.textSecondary }]}>
               Sem esteira por perto? Use uma esteira simulada para conhecer o app.
             </Text>
@@ -169,7 +240,7 @@ export function ConnectScreen() {
               onPress={actions.openDemo}
               disabled={connecting}
             />
-          </View>
+          </Surface>
         </View>
       </ScrollView>
 
@@ -197,51 +268,59 @@ const styles = StyleSheet.create({
     minHeight: MinTouchTarget,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
   },
   topActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: Spacing.one,
   },
-  appName: {
-    fontSize: 16,
-    fontWeight: 600,
+  hero: {
+    gap: Spacing.two,
   },
   title: {
-    fontSize: 30,
-    lineHeight: 36,
-    fontWeight: 700,
-  },
-  steps: {
-    gap: Spacing.three,
+    fontSize: 38,
+    lineHeight: 42,
   },
   step: {
     flexDirection: 'row',
+    alignItems: 'flex-start',
     gap: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.three,
   },
   stepNumber: {
-    width: 20,
-    fontSize: 17,
+    minWidth: 22,
+    fontSize: 30,
     lineHeight: 24,
-    fontWeight: 700,
+    marginTop: -1,
   },
   stepText: {
     flex: 1,
-    fontSize: 17,
-    lineHeight: 24,
+    flexShrink: 1,
+    fontSize: 16,
+    lineHeight: 22,
   },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: 700,
-    marginBottom: Spacing.two,
+  actions: {
+    gap: Spacing.two,
+  },
+  // Abertura: as ações de apoio ficam mais leves que o CTA principal.
+  secondaryButton: {
+    minHeight: 52,
+  },
+  secondaryLabel: {
+    fontSize: 18,
+  },
+  devices: {
+    gap: Spacing.two,
   },
   list: {
-    borderTopWidth: 1,
+    gap: Spacing.two,
   },
   empty: {
     fontSize: 15,
     lineHeight: 21,
-    paddingTop: Spacing.three,
+    paddingTop: Spacing.two,
   },
   switchRow: {
     minHeight: MinTouchTarget,
@@ -249,14 +328,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.three,
   },
+  switchTrack: {
+    width: 56,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 4,
+    justifyContent: 'center',
+  },
+  switchThumb: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+  },
   switchLabel: {
     flex: 1,
+    flexShrink: 1,
     fontSize: 16,
+    lineHeight: 22,
   },
   demo: {
     gap: Spacing.three,
-    paddingTop: Spacing.four,
-    borderTopWidth: 1,
   },
   demoText: {
     fontSize: 15,
