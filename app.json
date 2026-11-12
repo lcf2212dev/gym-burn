@@ -9,7 +9,7 @@
     "userInterfaceStyle": "dark",
     "backgroundColor": "#070A10",
     "ios": {
-      "icon": "./assets/expo.icon",
+      "icon": "./assets/images/icon.png",
       "bundleIdentifier": "com.gymburn.app"
     },
     "android": {
@@ -23,10 +23,6 @@
       "package": "com.gymburn.app",
       "userInterfaceStyle": "dark"
     },
-    "androidStatusBar": {
-      "barStyle": "light-content",
-      "backgroundColor": "#070A10"
-    },
     "plugins": [
       "expo-router",
       [
@@ -34,7 +30,7 @@
         {
           "backgroundColor": "#070A10",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 200
         }
       ],
       [
