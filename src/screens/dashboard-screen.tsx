@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { useKeepAwake } from 'expo-keep-awake';
 import { useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -100,11 +101,18 @@ export function DashboardScreen() {
                   </View>
                 ) : null}
               </View>
-              <ActionButton
-                variant="text"
-                label="Diagnóstico"
-                onPress={() => setDiagnosticsOpen(true)}
-              />
+              <View style={styles.headerActions}>
+                <ActionButton
+                  variant="text"
+                  label="Coleta"
+                  onPress={() => router.push('/coleta')}
+                />
+                <ActionButton
+                  variant="text"
+                  label="Diagnóstico"
+                  onPress={() => setDiagnosticsOpen(true)}
+                />
+              </View>
             </View>
           </View>
 
@@ -229,6 +237,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: Spacing.two,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   deviceName: {
     flexShrink: 1,

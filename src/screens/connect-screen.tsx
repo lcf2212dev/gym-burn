@@ -59,6 +59,11 @@ export function ConnectScreen() {
               <View style={styles.topActions}>
                 <ActionButton
                   variant="text"
+                  label="Coleta"
+                  onPress={() => router.push('/coleta')}
+                />
+                <ActionButton
+                  variant="text"
                   label="Registros"
                   onPress={() => router.push('/registros')}
                 />
@@ -90,6 +95,12 @@ export function ConnectScreen() {
             variant="outline"
             label="Primeiro teste na esteira"
             onPress={openGuide}
+          />
+
+          <ActionButton
+            variant="outline"
+            label="Coleta para engenharia reversa"
+            onPress={() => router.push('/coleta')}
           />
 
           <NoticeBanner />

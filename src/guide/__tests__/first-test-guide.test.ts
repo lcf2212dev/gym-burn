@@ -1287,6 +1287,7 @@ describe('isolamento', () => {
     const guide = new FirstTestGuide({
       session: {
         actions: rig.session.actions,
+        probe: rig.session.probe,
         subscribe: (listener) => {
           notify = listener;
           return () => {};

@@ -4,6 +4,7 @@ import type {
   BleTransport,
   CharacteristicInfo,
   ScannedDevice,
+  ServiceInfo,
 } from '@/ble/transport';
 import {
   ControlPointOp,
@@ -12,6 +13,7 @@ import {
   DEVICE_INFORMATION_SERVICE,
   FTMS,
   bytesToHex,
+  hexToBytes,
   controlPointOpName,
   controlPointResultName,
   decodeDeviceInformationText,
@@ -42,6 +44,7 @@ import type {
   CommandTally,
   LogEntry,
   Notice,
+  ProbeApi,
   RangeInfo,
   SessionMode,
   TreadmillActions,
@@ -326,6 +329,7 @@ const STOP_FALLBACK =
  */
 export class TreadmillSession implements TreadmillStore {
   readonly actions: TreadmillActions;
+  readonly probe: ProbeApi;
 
   private readonly options: Required<TreadmillSessionOptions>;
   private readonly listeners = new Set<() => void>();
@@ -458,6 +462,15 @@ export class TreadmillSession implements TreadmillStore {
       stop: traced('Parar', () => this.requestBelt('stop')),
       dismissNotice: () => this.update({ notice: null }),
       clearLog: () => this.update({ log: [] }),
+    };
+    this.probe = {
+      available: () => this.snapshot.phase === 'connected' && this.connection !== null,
+      services: () => this.probeServices(),
+      read: (serviceUuid, characteristicUuid) => this.probeRead(serviceUuid, characteristicUuid),
+      write: (serviceUuid, characteristicUuid, hex) =>
+        this.probeWrite(serviceUuid, characteristicUuid, hex),
+      subscribe: (serviceUuid, characteristicUuid, onValue) =>
+        this.probeSubscribe(serviceUuid, characteristicUuid, onValue),
     };
   }
 
@@ -880,6 +893,91 @@ export class TreadmillSession implements TreadmillStore {
     } catch (error) {
       this.log('error', `${name} indisponível: ${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * Sonda GATT: lê, escreve e assina características fora do FTMS, para
+   * descobrir o serviço proprietário 0xFFF0 que a T600X expõe. Não mexe na
+   * sessão normal: cada operação vai para o registro e as assinaturas são
+   * removidas junto com a conexão.
+   */
+  private probeConnection(): BleConnection {
+    const connection = this.connection;
+    if (!connection || this.snapshot.phase !== 'connected') {
+      throw new Error('Conecte na esteira para usar a sonda.');
+    }
+    if (!this.snapshot.identityConfirmed) {
+      throw new Error('Confirme que esta é a sua esteira antes de usar a sonda.');
+    }
+    return connection;
+  }
+
+  private probeLabel(serviceUuid: string, characteristicUuid: string): string {
+    return shortUuid(serviceUuid) + '/' + shortUuid(characteristicUuid);
+  }
+
+  private async probeServices(): Promise<ServiceInfo[]> {
+    return this.probeConnection().getServices();
+  }
+
+  private async probeRead(serviceUuid: string, characteristicUuid: string): Promise<string> {
+    const connection = this.probeConnection();
+    const label = this.probeLabel(serviceUuid, characteristicUuid);
+    this.trace('info', 'Sonda: lendo ' + label);
+    try {
+      const bytes = await connection.read(serviceUuid, characteristicUuid);
+      this.trace('rx', 'Sonda: leitura ' + label, bytes);
+      return bytesToHex(bytes);
+    } catch (error) {
+      this.trace('error', 'Sonda: falha ao ler ' + label + ': ' + errorMessage(error));
+      throw error;
+    }
+  }
+
+  private async probeWrite(
+    serviceUuid: string,
+    characteristicUuid: string,
+    hex: string,
+  ): Promise<void> {
+    const connection = this.probeConnection();
+    const data = hexToBytes(hex);
+    const label = this.probeLabel(serviceUuid, characteristicUuid);
+    this.trace('info', 'Sonda: escrevendo ' + label + ' (' + bytesToHex(data) + ')');
+    try {
+      await connection.write(serviceUuid, characteristicUuid, data);
+      this.trace('tx', 'Sonda: escrita ' + label, data);
+    } catch (error) {
+      this.trace('error', 'Sonda: falha ao escrever ' + label + ': ' + errorMessage(error));
+      throw error;
+    }
+  }
+
+  private async probeSubscribe(
+    serviceUuid: string,
+    characteristicUuid: string,
+    onValue: (hex: string) => void,
+  ): Promise<() => void> {
+    const connection = this.probeConnection();
+    const label = this.probeLabel(serviceUuid, characteristicUuid);
+    const subscription = await connection.subscribe(
+      serviceUuid,
+      characteristicUuid,
+      (data) => {
+        this.trace('rx', 'Sonda: notificação ' + label, data);
+        try {
+          onValue(bytesToHex(data));
+        } catch {
+          // A interface não pode derrubar a assinatura.
+        }
+      },
+    );
+    this.subscriptions.push(subscription);
+    this.trace('info', 'Sonda: assinatura ' + label + ' ativa');
+    return () => {
+      subscription.remove();
+      this.subscriptions = this.subscriptions.filter((item) => item !== subscription);
+      this.trace('info', 'Sonda: assinatura ' + label + ' cancelada');
+    };
   }
 
   async disconnect(): Promise<void> {

@@ -1,4 +1,4 @@
-import type { ScannedDevice } from '@/ble/transport';
+import type { ScannedDevice, ServiceInfo } from '@/ble/transport';
 import type { FitnessMachineFeature, SupportedRange, TrainingStatus } from '@/ftms';
 
 /** De onde vem a esteira: o rádio de verdade ou a esteira simulada. */
@@ -189,4 +189,32 @@ export interface TreadmillActions {
   stop(): void;
   dismissNotice(): void;
   clearLog(): void;
+}
+
+/**
+ * Sonda BLE para experimentos com características fora do FTMS (por exemplo o
+ * serviço proprietário 0xFFF0 que a T600X expõe). Ao contrário de
+ * TreadmillActions, que nunca devolve resultado, a sonda devolve o valor lido
+ * e entrega as notificações por callback: é uma ferramenta de diagnóstico, não
+ * um comando da esteira. Tudo o que passa por aqui vai para o registro em
+ * arquivo.
+ */
+export interface ProbeApi {
+  /** Há uma conexão BLE ativa e pronta (o modo demonstração não tem rádio). */
+  available(): boolean;
+  /** Inventário completo do GATT da conexão atual. */
+  services(): Promise<ServiceInfo[]>;
+  /** Lê a característica e devolve o valor em hexadecimal. */
+  read(serviceUuid: string, characteristicUuid: string): Promise<string>;
+  /** Escreve os bytes em hexadecimal na característica. */
+  write(serviceUuid: string, characteristicUuid: string, hex: string): Promise<void>;
+  /**
+   * Assina notify/indicate e entrega cada valor em hexadecimal. Devolve a
+   * função que cancela a assinatura.
+   */
+  subscribe(
+    serviceUuid: string,
+    characteristicUuid: string,
+    onValue: (hex: string) => void,
+  ): Promise<() => void>;
 }

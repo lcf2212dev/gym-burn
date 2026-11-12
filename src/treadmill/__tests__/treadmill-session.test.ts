@@ -3591,3 +3591,28 @@ async function startBelt0Mute(rig: Rig): Promise<void> {
   await advance(4000);
   expect(snap(rig).belt).toBe('running');
 }
+
+// --- Sonda GATT (coleta e engenharia reversa) ----------------------------------
+
+describe('sonda GATT', () => {
+  it('recusa leitura antes de confirmar que a esteira é a do usuário', async () => {
+    const rig = createRig();
+    rig.session.actions.connect(SIMULATED_DEVICE_ID);
+    await advance(200);
+    expect(snap(rig).phase).toBe('connected');
+    await expect(rig.session.probe.read(FTMS.service, FTMS.feature)).rejects.toThrow(
+      'Confirme que esta é a sua esteira',
+    );
+  });
+
+  it('depois da confirmação lista os serviços e lê uma característica', async () => {
+    const rig = createRig();
+    await connect(rig);
+    expect(rig.session.probe.available()).toBe(true);
+    const services = await rig.session.probe.services();
+    expect(services.some((service) => sameUuid(service.uuid, FTMS.service))).toBe(true);
+    const hex = await rig.session.probe.read(FTMS.service, FTMS.feature);
+    expect(hex).toMatch(/^[0-9A-F]{2}( [0-9A-F]{2})+$/);
+  });
+});
+

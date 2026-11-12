@@ -8,6 +8,8 @@ O que faz:
 - ajusta velocidade e inclinação;
 - inicia, pausa e para a lona;
 - modo demonstração, com uma esteira simulada, sem usar o rádio;
+- **sonda BLE do serviço proprietário 0xFFF0** (experimental): lê, escreve e assina características fora do FTMS e registra tudo, para descobrir o protocolo de controle do painel (ver [docs/sonda-ble.md](docs/sonda-ble.md));
+- **coleta RE**: página para deixar rodando na academia — despeja o GATT, lê todas as características legíveis, assina as notificações extras e grava marcações de eventos no mesmo registro (ver [docs/coleta-re.md](docs/coleta-re.md));
 - tela de diagnóstico, com o registro dos pacotes enviados e recebidos, que pode ser compartilhado como texto;
 - roteiro do primeiro teste na esteira real, que acompanha cada passo, marca o que a esteira aceitou e pergunta o que só quem está na frente dela vê;
 - gravação contínua de tudo o que acontece em arquivos de texto no celular, para depurar depois.
@@ -64,7 +66,7 @@ Para parar pelo painel, segure Stop por 3 segundos, ou aperte o botão vermelho 
 
 A esteira não precisa aparecer na lista de Bluetooth das configurações do celular: o app faz a própria busca e conecta por ela. Fóruns de apps de treino recomendam inclusive não parear esse tipo de equipamento pelas configurações do sistema.
 
-Consoles Matrix e Vision costumam se anunciar com o número de série (`CTM780…` seguido de mais uma dúzia de caracteres, numa Vision T600E) ou com um nome curto e um sufixo de quatro caracteres (`MX-TM xxxx`, numa Matrix T50), não com o nome do modelo. O número de série das T600X começa com `TM781`, então o nome esperado é algo como `CTM781…`. O código que o painel mostra ao entrar no modo APP provavelmente é parte desse nome. Nada disso tem fonte do fabricante; um scanner BLE como o nRF Connect tira a dúvida.
+Consoles Matrix e Vision costumam se anunciar com o número de série (`CTM780…` seguido de mais uma dúzia de caracteres, numa Vision T600E) ou com um nome curto e um sufixo de quatro caracteres (`MX-TM xxxx`, numa Matrix T50), não com o nome do modelo. O número de série das T600X começa com `TM781`, então o nome esperado é algo como `CTM781…`. O código que o painel mostra ao entrar no modo APP provavelmente é parte desse nome. Nada disso tem fonte do fabricante; um scanner BLE como o nRF Connect tira a dúvida. No teste real de 11/11/2026 a esteira apareceu como **VISION ID 1931** — o sufixo 1931 são os dois últimos octetos do MAC (A0:BB:3E:40:19:31), não o serial nem o código do painel.
 
 A lista do app mostra os aparelhos que anunciam o serviço FTMS e os que têm nome de console Matrix (`CTM…`, `MX-TM…`, `MATRIX…`), ordenados por força de sinal: numa academia com várias esteiras iguais, a sua tende a ficar no topo. Se ela não aparecer, ligue **Mostrar outros aparelhos Bluetooth**, que lista tudo o que estiver ao alcance, inclusive aparelhos sem nome.
 
@@ -189,6 +191,8 @@ kill -USR1 <pid do script>                  # "aperta" o Emergency Stop do paine
 
 ## Pendências conhecidas: o que validar na esteira real
 
+> Atualização 11/11/2026: o teste real respondeu as principais pendências — ver [docs/teste-real-2026-11-11.md](docs/teste-real-2026-11-11.md). Resumo: o FTMS da T600X é **somente leitura** para velocidade/inclinação (Target Setting Features = 0x10, só FC) e o Control Point recusa todo comando com 0x05 Control Not Permitted; a esteira também expõe um **serviço proprietário 0xFFF0** (FFF1 read/write, FFF3 write, FFF4 notify, FFF2/FFF5 read), que é o próximo alvo de investigação.
+
 - Se existe Control Point e o que os bits de Target Setting (Fitness Machine Feature) dizem.
 - Se as faixas de velocidade e inclinação vêm da esteira ou caem na ficha técnica.
 - Largura do campo de ritmo no Treadmill Data (1 ou 2 octetos; ver `docs/protocolo-ftms.md`).
@@ -198,6 +202,19 @@ kill -USR1 <pid do script>                  # "aperta" o Emergency Stop do paine
 - Se o console está em unidades métricas: há relato, em outro modelo Matrix, de comandos de velocidade falhando com o console em milhas.
 - iOS não foi testado.
 - Ícone e splash ainda são os do template do Expo.
+
+## Resultados do teste real (11/11/2026)
+
+Os registros das sessões de 11/11/2026 com a T600X real (VISION ID 1931) mostram que:
+
+- a conexão e a leitura funcionam: FTMS (0x1826) completo, Treadmill Data a cada ~1 s, velocidade/inclinação/distância/tempo coerentes com o painel, Training Status e Fitness Machine Status chegando;
+- o controle por FTMS **não funciona nesta unidade**: Request Control devolve Success, mas Start/Stop/Set Target Speed/Set Target Inclination devolvem **Control Not Permitted (0x05)**;
+- o motivo está no anúncio: Target Setting Features = 0x10 (só frequência cardíaca), ou seja, a esteira declara que não aceita alvo de velocidade nem de inclinação pelo FTMS;
+- a esteira expõe serviços que a simulação não tinha: 0x181C (User Data), 0x1816 (CSC), 00010203-0405-0607-0809-0a0b0c0d1912 e o **proprietário 0xFFF0** (FFF1 read/write, FFF2 read, FFF3 write, FFF4 notify, FFF5 read), provável canal de controle do fabricante;
+- a faixa de inclinação reportada (0–50%, passo 3%) é implausível para a T600X e deve ser ignorada em favor da ficha (0–15%, passo 0,5%);
+- Device Information (modelo/firmware/serial do console) ainda não está nos registros: as sessões rodavam um APK anterior ao commit que passou a lê-la; a próxima visita deve capturar.
+
+Detalhes, tabelas de evidência e próximos passos em [docs/teste-real-2026-11-11.md](docs/teste-real-2026-11-11.md).
 
 ## Licença
 

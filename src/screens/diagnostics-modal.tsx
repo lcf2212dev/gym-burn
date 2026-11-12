@@ -181,6 +181,37 @@ function DiagnosticsContent({ onClose }: { onClose: () => void }) {
         <Row label="Lona" value={BELT_STATE_LABELS[belt]} />
       </Section>
 
+      <Section title="Coleta para engenharia reversa">
+        <Paragraph>
+          Uma página para deixar rodando na academia: inventário do GATT, leituras de todas as
+          características legíveis, assinatura das notificações que o app ainda não escuta e
+          marcações de eventos (andou, inclinou, parou) para correlacionar depois.
+        </Paragraph>
+        <ActionButton
+          variant="outline"
+          label="Abrir coleta"
+          onPress={() => {
+            onClose();
+            router.push('/coleta');
+          }}
+        />
+      </Section>
+
+      <Section title="Sonda BLE">
+        <Paragraph>
+          Leitura e escrita manual das características fora do FTMS, em especial o serviço
+          proprietário 0xFFF0 que a T600X expõe. Cada operação vai para o registro em arquivo.
+        </Paragraph>
+        <ActionButton
+          variant="outline"
+          label="Abrir sonda 0xFFF0"
+          onPress={() => {
+            onClose();
+            router.push('/sonda');
+          }}
+        />
+      </Section>
+
       <Section title="Registro">
         <View style={styles.logActions}>
           <ActionButton
