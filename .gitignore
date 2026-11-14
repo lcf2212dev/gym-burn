@@ -45,3 +45,12 @@ example
 # Python
 __pycache__/
 *.pyc
+
+# Material local de engenharia reversa (APKs de terceiros e descompilados)
+/gymburn-re/
+
+# Logs coletados do aparelho (contêm MACs de dispositivos BLE)
+/gymburn-logs/
+
+# Artefatos de execução do app / capturas
+/.phone/

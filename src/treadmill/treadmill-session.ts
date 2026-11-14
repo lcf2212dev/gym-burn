@@ -23,6 +23,8 @@ import {
   encodeSetTargetSpeed,
   encodeStartOrResume,
   encodeStop,
+  encodeVendorControlOpcode,
+  isVendorControlOpcode,
   parseControlPointResponse,
   parseFitnessMachineFeature,
   parseMachineStatus,
@@ -32,11 +34,44 @@ import {
   parseTreadmillData,
   sameUuid,
   shortUuid,
+  uuid16,
+  vendorControlOpcodeInfo,
   type FitnessMachineFeature,
+  type VendorControlOpCode,
   type SupportedRange,
 } from '@/ftms';
+import {
+  GIZWITS_COMMANDS,
+  GIZWITS_LINGO,
+  GIZWITS_MACHINE_INFO_REQUEST,
+  encodeGizwitsFrame,
+  encodeGizwitsPause,
+  encodeGizwitsSetIncline,
+  encodeGizwitsSetSpeed,
+  encodeGizwitsStartWorkout,
+  encodeGizwitsStop,
+  gizwitsCommandName,
+  parseGizwitsFrame,
+} from '@/gizwits/frame';
+import { VENDOR_DISCOVERY_CANDIDATES, type VendorDiscoveryCandidate } from '@/vendor/discovery';
+import { formatDecimal } from '@/utils/format';
+import type { VendorMappingStorage } from '@/vendor/mapping-storage';
+import { buildLiteralPayload, buildVendorPayload } from '@/vendor/payload';
+import {
+  emptyVendorState,
+  VENDOR_ACTION_LABELS,
+  type VendorAction,
+  type VendorDiscoveryObservation,
+  type VendorMapping,
+  type VendorTarget,
+} from '@/vendor/types';
 
-import { T600X_INCLINATION_RANGE, T600X_SPEED_RANGE } from './t600x';
+import {
+  plausibleInclinationRange,
+  T600X_INCLINATION_RANGE,
+  T600X_INCLINATION_READING_FACTOR,
+  T600X_SPEED_RANGE,
+} from './t600x';
 import type { TreadmillStore } from './treadmill-context';
 import type {
   BeltState,
@@ -53,6 +88,9 @@ import type {
   TreadmillCapabilities,
   TreadmillMetrics,
   TreadmillSnapshot,
+  GizwitsAttempt,
+  GizwitsProbeSnapshot,
+  VendorOpcodeProbe,
 } from './types';
 
 /**
@@ -61,6 +99,142 @@ import type {
  * rádio no Android segue presa até o aparelho responder (veja `logDeviceInformation`).
  */
 const DEVICE_INFORMATION_READ_TIMEOUT_MS = 2000;
+
+// Serviço proprietário do fabricante (o FTMS desta esteira é somente leitura para
+// velocidade/inclinação; o 0xFFF0 é a única porta conhecida para comandos).
+const VENDOR_SERVICE = uuid16(0xfff0);
+const VENDOR_CHANNELS = {
+  fff1: uuid16(0xfff1),
+  fff2: uuid16(0xfff2),
+  fff3: uuid16(0xfff3),
+  fff4: uuid16(0xfff4),
+  fff5: uuid16(0xfff5),
+} as const;
+// Varredura da Sonda: o perfil de demonstração da TI notifica até ~5 s depois da
+// escrita, então a janela de observação é larga e o próximo byte espera mais um pouco.
+const VENDOR_DISCOVERY_SETTLE_MS = 6000;
+const VENDOR_DISCOVERY_PAUSE_MS = 800;
+const VENDOR_DISCOVERY_READ_TIMEOUT_MS = 1500;
+
+// Teste automático do protocolo Gizwits (AFG Pro) no 0xFFF0: pede machine info e
+// espera uma notificação no FFF4. Janela curta; a resposta vem em <1 s quando vem.
+const GIZWITS_PROBE_POLL_MS = 100;
+const GIZWITS_PROBE_REPLY_LIMIT = 512;
+
+// Constante compartilhada: resetar para o mesmo objeto não dispara update (o que
+// manteria a lista de mudanças do modo de conexão idêntica à de antes).
+const EMPTY_GIZWITS_PROBE: GizwitsProbeSnapshot = {
+  status: 'idle',
+  stage: null,
+  startedAt: null,
+  finishedAt: null,
+  replyHex: null,
+  replyBytes: 0,
+  replyCommand: null,
+  compatible: null,
+  attempts: [],
+  hint: null,
+  detail: null,
+};
+
+type GizwitsTarget = 'fff3' | 'fff1';
+type GizwitsVariant = {
+  name: string;
+  label: string;
+  target: GizwitsTarget;
+  frame: Uint8Array;
+  timeoutMs: number;
+};
+type GizwitsSafeStep = {
+  name: string;
+  label: string;
+  frame: Uint8Array;
+  timeoutMs: number;
+};
+
+function reverseSync(frame: Uint8Array): Uint8Array {
+  const copy = frame.slice();
+  copy[0] = 0xaa;
+  copy[1] = 0x55;
+  return copy;
+}
+
+/** Aceita 55 AA e também AA 55 (variante testada contra o módulo). */
+function looksLikeGizwitsFrame(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 10 &&
+    ((bytes[0] === 0x55 && bytes[1] === 0xaa) || (bytes[0] === 0xaa && bytes[1] === 0x55))
+  );
+}
+
+function reverseCrc(frame: Uint8Array): Uint8Array {
+  const copy = frame.slice();
+  const low = copy[8];
+  copy[8] = copy[9];
+  copy[9] = low;
+  return copy;
+}
+
+
+
+function vendorTargetUuid(target: VendorTarget): string {
+  return target === 'fff1' ? VENDOR_CHANNELS.fff1 : VENDOR_CHANNELS.fff3;
+}
+
+// Espera da varredura, separada de `sleep()` para não acordar o motor de comandos do FTMS.
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function commandKindOfVendorAction(action: VendorAction): CommandKind {
+  switch (action) {
+    case 'start':
+      return 'start';
+    case 'pause':
+      return 'pause';
+    case 'stop':
+      return 'stop';
+    case 'speedUp':
+    case 'speedDown':
+      return 'speed';
+    case 'inclineUp':
+    case 'inclineDown':
+      return 'inclination';
+  }
+}
+
+/** `promise` com prazo; a promessa que perde a corrida é abandonada. */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(message));
+      }
+    }, ms);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+/** Sem armazenamento injetado, o mapeamento do 0xFFF0 fica só na memória. */
+const NO_VENDOR_STORAGE: VendorMappingStorage = {
+  load: async () => null,
+  save: async () => undefined,
+};
 
 class ReadTimeoutError extends Error {
   constructor(ms: number) {
@@ -131,6 +305,11 @@ export interface TreadmillSessionOptions {
    */
   trace?: TraceSink;
   now?: () => number;
+  /**
+   * Onde o mapeamento do controle experimental (0xFFF0) é guardado. Sem isso, o
+   * mapeamento vale só durante a execução atual.
+   */
+  vendorStorage?: VendorMappingStorage;
 }
 
 type BeltCommand = 'start' | 'pause';
@@ -145,7 +324,7 @@ type Command =
 type QueuedCommand = Exclude<Command, { kind: 'stop' }>;
 
 type ProcedureOutcome =
-  | { type: 'result'; resultCode: number }
+  | { type: 'result'; resultCode: number; parameter: Uint8Array }
   | { type: 'writeError'; error: Error }
   | { type: 'timeout' }
   // Um Parar passou na frente e não esperou esta resposta.
@@ -392,6 +571,189 @@ export class TreadmillSession implements TreadmillStore {
   private settledInclinationSamples = 0;
   private loggedDataShapes = new Set<string>();
 
+  // --- Controle pelo canal alternativo (Gizwits / AFG Pro) ------------------
+  //
+  // Ativado quando o plano automático confirma que o canal 0xFFF0 responde ao
+  // protocolo Gizwits. O canal não tem ACK por comando: a confirmação é feita
+  // pela telemetria (0x2ACD), e cada comando tem uma janela de espera. Se a
+  // esteira não reagir, o app avisa e manda usar o painel/emergência.
+
+  private gizwitsControlEnabled(): boolean {
+    return (
+      this.snapshot.gizwitsProbe.compatible === true &&
+      this.snapshot.gizwitsProbe.status === 'compatible' &&
+      this.snapshot.phase === 'connected' &&
+      this.snapshot.identityConfirmed &&
+      this.connection !== null
+    );
+  }
+
+  private writeGizwitsControlFrame(frame: Uint8Array, label: string): Promise<void> {
+    const connection = this.connection;
+    if (!connection) return Promise.reject(new Error('sem conexão com a esteira'));
+    this.trace('tx', `Canal alternativo: ${label}`, frame);
+    return connection.write(VENDOR_SERVICE, VENDOR_CHANNELS.fff3, frame);
+  }
+
+  private sendGizwitsControl(frame: Uint8Array, label: string): void {
+    this.gizwitsLastActionAt = this.options.now();
+    void this.writeGizwitsControlFrame(frame, label).catch((error) => {
+      this.log('error', `Canal alternativo: falha ao enviar ${label}: ${errorMessage(error)}`);
+      this.notify('error', `Não consegui enviar o comando pelo canal alternativo (${label}).`);
+    });
+  }
+
+  /** Avisa se o efeito esperado não aparecer na telemetria dentro da janela. */
+  private confirmGizwitsEffect(
+    label: string,
+    timeoutMs: number,
+    expected: () => boolean,
+    onFail?: () => void,
+  ): void {
+    const token = ++this.gizwitsCommandToken;
+    setTimeout(() => {
+      if (token !== this.gizwitsCommandToken) return;
+      if (this.snapshot.phase !== 'connected') return;
+      if (expected()) return;
+      onFail?.();
+      this.notify(
+        'warning',
+        `A esteira não confirmou ${label}. Confira o painel e, se precisar parar, use o Emergency Stop.`,
+      );
+    }, timeoutMs);
+  }
+
+  private requestBeltGizwits(action: BeltCommand | 'stop'): void {
+    if (action === 'stop') {
+      this.countRequest('stop');
+      this.update({ targetSpeedKmh: null, targetInclinationPercent: null });
+      this.sendGizwitsControl(encodeGizwitsStop(), 'parar');
+      this.confirmGizwitsEffect(
+        'a parada',
+        8000,
+        () => this.snapshot.belt !== 'running' || (this.snapshot.metrics.speedKmh ?? 0) <= 0.2,
+      );
+      return;
+    }
+    if (action === 'pause') {
+      this.countRequest('pause');
+      this.markBraked();
+      this.dropPendingSpeed();
+      this.sendGizwitsControl(encodeGizwitsPause(false), 'pausar');
+      this.confirmGizwitsEffect(
+        'a pausa',
+        6000,
+        () => (this.snapshot.metrics.speedKmh ?? 0) <= 0.2,
+      );
+      return;
+    }
+    // start/continuar
+    if (this.snapshot.belt === 'running') return;
+    if (this.isStartBlocked()) {
+      this.notify('info', 'Aguarde a lona parar antes de iniciar.');
+      return;
+    }
+    this.countRequest('start');
+    if (this.snapshot.belt === 'paused') {
+      this.sendGizwitsControl(encodeGizwitsPause(true), 'continuar');
+      this.confirmGizwitsEffect(
+        'a retomada',
+        6000,
+        () => (this.snapshot.metrics.speedKmh ?? 0) > 0.1,
+      );
+      return;
+    }
+    const range = this.snapshot.capabilities?.speedRange;
+    const startSpeed = range ? clamp(0.8, range.min, range.max) : 0.8;
+    this.sendGizwitsControl(
+      encodeGizwitsStartWorkout({ speedKmh: startSpeed, inclinePercent: 0 }),
+      `iniciar (${formatDecimal(startSpeed, 1)} km/h)`,
+    );
+    this.confirmGizwitsEffect(
+      'o início',
+      8000,
+      () => this.snapshot.belt === 'running' || (this.snapshot.metrics.speedKmh ?? 0) > 0.1,
+    );
+  }
+
+  private changeSpeedGizwits(deltaKmh: number): void {
+    const capabilities = this.snapshot.capabilities;
+    if (!capabilities) return;
+    if (this.options.now() - this.gizwitsLastActionAt < 250) return;
+    const measured = this.snapshot.metrics.speedKmh;
+    if (this.snapshot.belt !== 'running' || measured === null || measured <= 0) {
+      this.notify('info', 'Inicie a lona para ajustar a velocidade.');
+      return;
+    }
+    const target = quantize(measured + deltaKmh, capabilities.speedRange);
+    if (target === this.snapshot.targetSpeedKmh) return;
+    this.countRequest('speed');
+    this.speedTargetSetAt = this.options.now();
+    this.update({ targetSpeedKmh: target });
+    this.sendGizwitsControl(
+      encodeGizwitsSetSpeed(target),
+      `velocidade ${formatDecimal(target, 1)} km/h`,
+    );
+    this.confirmGizwitsEffect(
+      'o ajuste de velocidade',
+      4000,
+      () => {
+        const speed = this.snapshot.metrics.speedKmh;
+        return speed !== null && Math.abs(speed - target) <= 0.3;
+      },
+      () => this.invalidateSpeedTarget(),
+    );
+  }
+
+  private changeInclinationGizwits(deltaPercent: number): void {
+    const capabilities = this.snapshot.capabilities;
+    if (!capabilities) return;
+    if (this.options.now() - this.gizwitsLastActionAt < 250) return;
+    const measured = this.snapshot.metrics.inclinationPercent;
+    const base =
+      this.snapshot.targetInclinationPercent ??
+      (measured === null ? 0 : this.correctedInclinationReading(measured));
+    const target = quantize(base + deltaPercent, capabilities.inclinationRange);
+    if (target === this.snapshot.targetInclinationPercent) return;
+    this.countRequest('inclination');
+    this.update({ targetInclinationPercent: target });
+    this.sendGizwitsControl(
+      encodeGizwitsSetIncline(target),
+      `inclinação ${formatDecimal(target, 1)} %`,
+    );
+    this.confirmGizwitsEffect(
+      'o ajuste de inclinação',
+      6000,
+      () => {
+        const incline = this.snapshot.metrics.inclinationPercent;
+        if (incline === null) return false;
+        return Math.abs(this.correctedInclinationReading(incline) - target) <= 0.7;
+      },
+      () => this.update({ targetInclinationPercent: null }),
+    );
+  }
+
+  // --- Controle experimental (0xFFF0) ---------------------------------------
+  private vendorSubscription: BleSubscription | null = null;
+  /** Habilitação do FFF4 em andamento (evita assinatura dupla). */
+  private vendorSubscriptionPending: Promise<void> | null = null;
+  /** Enquanto a varredura roda, guarda as respostas do FFF4 que chegarem. */
+  private vendorReplyCollector: string[] | null = null;
+  /** Incrementado para interromper uma varredura em andamento. */
+  private vendorDiscoveryEpoch = 0;
+  /** Há uma varredura executando (protege contra duas ao mesmo tempo). */
+  private vendorDiscoveryActive = false;
+  // Identifica o pedido de opcode vendor atual: uma resposta antiga não pode sobrescrever um pedido novo.
+  private vendorOpcodeProbeToken = 0;
+  // Teste Gizwits: assinatura temporária do FFF4 e guarda contra dois testes.
+  private gizwitsProbeSubscription: BleSubscription | null = null;
+  private gizwitsProbeInFlight = false;
+  private gizwitsProbeToken = 0;
+  private gizwitsProbeObservations: Uint8Array[] | null = null;
+  // Controle pelo canal alternativo depois que o plano confirma o protocolo.
+  private gizwitsCommandToken = 0;
+  private gizwitsLastActionAt = Number.NEGATIVE_INFINITY;
+
   constructor(options: TreadmillSessionOptions) {
     this.options = {
       responseTimeoutMs: 10_000,
@@ -409,6 +771,7 @@ export class TreadmillSession implements TreadmillStore {
       maxLogEntries: 300,
       trace: () => undefined,
       now: Date.now,
+      vendorStorage: NO_VENDOR_STORAGE,
       ...options,
     };
     this.snapshot = {
@@ -430,6 +793,9 @@ export class TreadmillSession implements TreadmillStore {
       busy: false,
       notice: null,
       log: [],
+      vendor: emptyVendorState(),
+      vendorOpcodeProbe: null,
+      gizwitsProbe: EMPTY_GIZWITS_PROBE,
     };
     // Cada toque entra no registro completo, antes de qualquer efeito: é o que
     // permite depois comparar o que o usuário pediu com o que a esteira fez.
@@ -462,6 +828,27 @@ export class TreadmillSession implements TreadmillStore {
       stop: traced('Parar', () => this.requestBelt('stop')),
       dismissNotice: () => this.update({ notice: null }),
       clearLog: () => this.update({ log: [] }),
+      setVendorMode: (enabled) => {
+        this.trace('action', enabled ? 'Ativar controle 0xFFF0' : 'Desativar controle 0xFFF0');
+        void this.setVendorMode(enabled);
+      },
+      setVendorMapping: (mapping) => {
+        this.trace('action', `Mapeamento do 0xFFF0: ${mapping.name}`);
+        void this.setVendorMapping(mapping);
+      },
+      runVendorDiscovery: () => {
+        this.trace('action', 'Iniciar varredura do 0xFFF0');
+        void this.runVendorDiscovery();
+      },
+      cancelVendorDiscovery: () => this.cancelVendorDiscovery(),
+      sendVendorOpcode: (opCode) => {
+        this.trace('action', `Sonda FTMS: opcode vendor 0x${opCode.toString(16).toUpperCase()}`);
+        this.sendVendorOpcode(opCode);
+      },
+      runGizwitsProbe: () => {
+        this.trace('action', 'Teste do canal alternativo (Gizwits)');
+        void this.runGizwitsProbe();
+      },
     };
     this.probe = {
       available: () => this.snapshot.phase === 'connected' && this.connection !== null,
@@ -472,6 +859,18 @@ export class TreadmillSession implements TreadmillStore {
       subscribe: (serviceUuid, characteristicUuid, onValue) =>
         this.probeSubscribe(serviceUuid, characteristicUuid, onValue),
     };
+  }
+
+  /**
+   * Carrega o mapeamento do controle experimental salvo em disco. Chamado uma vez
+   * na abertura do app; sem arquivo, o controle experimental começa desligado e
+   * sem protocolo (a Sonda oferece os presets).
+   */
+  async restoreVendorMapping(): Promise<void> {
+    const mapping = await this.options.vendorStorage.load();
+    if (mapping && !this.snapshot.vendor.mapping) {
+      this.update({ vendor: { ...this.snapshot.vendor, mapping } });
+    }
   }
 
   // Funções-flecha: `useSyncExternalStore` chama sem `this`.
@@ -525,7 +924,7 @@ export class TreadmillSession implements TreadmillStore {
     if (!this.snapshot.devices.some((device) => device.advertisesFtms)) {
       this.notify(
         'info',
-        'Nenhuma esteira encontrada. Confira se o painel está no modo APP e busque de novo. Se ela não se anunciar como esteira, ligue "Mostrar outros aparelhos Bluetooth".',
+        'Nenhuma esteira encontrada. Confira se o painel está no modo APP e toque em Procurar de novo.',
       );
     }
   }
@@ -642,6 +1041,8 @@ export class TreadmillSession implements TreadmillStore {
       phase: 'connecting',
       device: { id: deviceId, name: known?.name ?? null },
       notice: null,
+      vendorOpcodeProbe: null,
+      gizwitsProbe: EMPTY_GIZWITS_PROBE,
     });
     this.log('info', `Conectando a ${known?.name ?? deviceId}`);
 
@@ -665,7 +1066,7 @@ export class TreadmillSession implements TreadmillStore {
         // com `setUpTreadmill` falaria (por deviceId) com uma conexão que já não é esta.
         return;
       }
-      const capabilities = await this.setUpTreadmill(connection, epoch);
+      const { capabilities, vendorAvailable } = await this.setUpTreadmill(connection, epoch);
       if (epoch !== this.linkEpoch) {
         return;
       }
@@ -674,7 +1075,17 @@ export class TreadmillSession implements TreadmillStore {
         capabilities,
         control: capabilities.hasControlPoint ? 'idle' : 'unavailable',
         // Na demonstração não há outra esteira; sem Control Point não há comando.
-        identityConfirmed: mode === 'demo' || !capabilities.hasControlPoint,
+        // Sem Control Point e sem 0xFFF0 não há comando possível, e a confirmação
+        // não é necessária; com o canal proprietário, ela continua valendo.
+        identityConfirmed: mode === 'demo' || (!capabilities.hasControlPoint && !vendorAvailable),
+        vendor: {
+          available: vendorAvailable,
+          enabled: false,
+          mapping: this.snapshot.vendor.mapping,
+          lastReply: null,
+          lastSend: null,
+          discovery: null,
+        },
       });
       this.log('info', 'Esteira pronta');
     } catch (error) {
@@ -692,7 +1103,7 @@ export class TreadmillSession implements TreadmillStore {
   private async setUpTreadmill(
     connection: BleConnection,
     epoch: number,
-  ): Promise<TreadmillCapabilities> {
+  ): Promise<{ capabilities: TreadmillCapabilities; vendorAvailable: boolean }> {
     const characteristics = await connection.getCharacteristics(FTMS.service);
     if (characteristics.length === 0) {
       throw new Error(
@@ -778,12 +1189,34 @@ export class TreadmillSession implements TreadmillStore {
       ),
     );
 
+    // O serviço proprietário 0xFFF0 não faz parte do FTMS: se existir, é a única
+    // porta conhecida para comandos de velocidade/inclinação nesta esteira.
+    let vendorAvailable = false;
+    try {
+      const vendorCharacteristics = await connection.getCharacteristics(VENDOR_SERVICE);
+      const has = (uuid: string) =>
+        vendorCharacteristics.some(
+          (characteristic) =>
+            sameUuid(characteristic.uuid, uuid) &&
+            (sameUuid(uuid, VENDOR_CHANNELS.fff4)
+              ? characteristic.canNotify || characteristic.canIndicate
+              : characteristic.canWrite || characteristic.canRead),
+        );
+      vendorAvailable =
+        has(VENDOR_CHANNELS.fff1) && has(VENDOR_CHANNELS.fff3) && has(VENDOR_CHANNELS.fff4);
+    } catch {
+      // Aparelho sem o serviço proprietário: o controle experimental fica indisponível.
+    }
+
     return {
-      feature,
-      hasControlPoint,
-      speedRange: resolveRange(speedRange, T600X_SPEED_RANGE),
-      inclinationRange: resolveRange(inclinationRange, T600X_INCLINATION_RANGE),
-      characteristics: characteristics.map((characteristic) => characteristic.uuid),
+      capabilities: {
+        feature,
+        hasControlPoint,
+        speedRange: resolveRange(speedRange, T600X_SPEED_RANGE),
+        inclinationRange: resolveRange(inclinationRange, T600X_INCLINATION_RANGE),
+        characteristics: characteristics.map((characteristic) => characteristic.uuid),
+      },
+      vendorAvailable,
     };
   }
 
@@ -1010,6 +1443,11 @@ export class TreadmillSession implements TreadmillStore {
   /** Solta tudo o que pertence à conexão atual e volta ao estado sem esteira. */
   private async teardown(connection: BleConnection | null): Promise<void> {
     this.settlePendingResponse({ type: 'linkLost' });
+    this.vendorDiscoveryEpoch++;
+    this.vendorDiscoveryActive = false;
+    this.vendorReplyCollector = null;
+    this.vendorSubscription = null;
+    this.vendorSubscriptionPending = null;
     for (const subscription of this.subscriptions) {
       subscription.remove();
     }
@@ -1020,7 +1458,12 @@ export class TreadmillSession implements TreadmillStore {
     }
     // Num passo só: quem observa a sessão nunca vê "conectado" com o estado da conexão já zerado.
     // A lista de aparelhos fica: reconectar depois de uma queda é um toque só.
-    this.resetLinkState({ phase: 'idle', device: null });
+    // O mapeamento do 0xFFF0 é configuração e sobrevive; o resto do estado do canal é do link.
+    this.resetLinkState({
+      phase: 'idle',
+      device: null,
+      vendor: { ...emptyVendorState(), mapping: this.snapshot.vendor.mapping },
+    });
   }
 
   private resetLinkState(extra: Partial<TreadmillSnapshot> = {}): void {
@@ -1048,6 +1491,18 @@ export class TreadmillSession implements TreadmillStore {
     this.lastInclinationSample = null;
     this.settledInclinationSamples = 0;
     this.loggedDataShapes = new Set();
+    this.vendorDiscoveryEpoch++;
+    this.vendorReplyCollector = null;
+    this.gizwitsProbeToken++;
+    this.gizwitsProbeInFlight = false;
+    this.removeGizwitsProbeSubscription();
+    if (this.vendorSubscription) {
+      this.vendorSubscription.remove();
+      this.subscriptions = this.subscriptions.filter(
+        (subscription) => subscription !== this.vendorSubscription,
+      );
+      this.vendorSubscription = null;
+    }
     this.update({
       capabilities: null,
       control: 'idle',
@@ -1060,6 +1515,7 @@ export class TreadmillSession implements TreadmillStore {
       startBlocked: false,
       commands: NO_COMMANDS,
       busy: false,
+      gizwitsProbe: EMPTY_GIZWITS_PROBE,
       ...extra,
     });
   }
@@ -1195,13 +1651,48 @@ export class TreadmillSession implements TreadmillStore {
   private inclinationTargetIsStale(inclination: number): boolean {
     const target = this.snapshot.targetInclinationPercent;
     const step = this.snapshot.capabilities?.inclinationRange.step ?? 0.5;
+    const corrected = this.correctedInclinationReading(inclination);
     return (
       target !== null &&
       this.pendingInclination === null &&
       this.pumpingEpoch === null &&
       this.settledInclinationSamples >= SETTLED_INCLINATION_SAMPLES &&
-      Math.abs(inclination - target) > Math.max(step, 0.5)
+      Math.abs(corrected - target) > Math.max(step, 0.5)
     );
+  }
+
+  /**
+   * Alguns consoles declaram o alvo de velocidade em outra escala: esta T600X
+   * manda raw/100 = 80 km/h para uma lona a 5,0 (fator 16, dossiê §7.1). Se o
+   * valor cru cai fora da faixa, tenta a escala real (÷16); se nem ela é
+   * plausível, o aviso é ignorado em vez de envenenar o alvo (que serve de base
+   * para os próximos ajustes).
+   */
+  /**
+   * A família de firmware desta esteira é reconhecida pela faixa de inclinação
+   * declarada (0–50 %/3 %, template do FTMS). Só nela o alvo de velocidade do
+   * 0x2ADA vem em ×16; numa esteira conforme a escala é a da especificação.
+   */
+  private usesVendorTemplateFingerprint(): boolean {
+    const range = this.snapshot.capabilities?.inclinationRange;
+    return Boolean(range && plausibleInclinationRange(range) !== range);
+  }
+
+  private normalizeReportedSpeed(kmh: number): number | null {
+    if (!Number.isFinite(kmh) || kmh < 0) return null;
+    const range = this.snapshot.capabilities?.speedRange;
+    if (!range) return kmh;
+    const scaled = kmh / 16;
+    if (this.usesVendorTemplateFingerprint()) {
+      // Nesta família o aviso vem em ×16 (80 para uma lona a 5,0). Divide sempre;
+      // não dá para desempatar pela medida, que atrasa em aceleração.
+      return scaled <= range.max * 1.5 ? Math.min(scaled, range.max) : null;
+    }
+    if (kmh <= range.max * 1.5) return Math.min(kmh, range.max);
+    if (scaled >= range.min * 0.5 && scaled <= range.max * 1.5) {
+      return Math.min(scaled, range.max);
+    }
+    return null;
   }
 
   private handleMachineStatus(bytes: Uint8Array, epoch: number): void {
@@ -1249,14 +1740,24 @@ export class TreadmillSession implements TreadmillStore {
         this.speedTargetSetAt = this.options.now();
         this.update({ belt: 'running' });
         break;
-      case 'targetSpeedChanged':
-        this.confirmedSpeed = event.speedKmh;
+      case 'targetSpeedChanged': {
+        const speed = this.normalizeReportedSpeed(event.speedKmh);
+        if (speed === null) {
+          this.log(
+            'error',
+            `Fitness Machine Status: alvo de velocidade implausível (${event.speedKmh})`,
+            bytes,
+          );
+          break;
+        }
+        this.confirmedSpeed = speed;
         this.speedTargetSetAt = this.options.now();
         // Um pedido do app ainda na fila vale mais que o aviso da esteira.
         if (this.pendingSpeed === null) {
-          this.update({ targetSpeedKmh: event.speedKmh });
+          this.update({ targetSpeedKmh: speed });
         }
         break;
+      }
       case 'targetInclineChanged':
         this.confirmedInclination = event.inclinationPercent;
         if (this.pendingInclination === null) {
@@ -1307,7 +1808,11 @@ export class TreadmillSession implements TreadmillStore {
       bytes,
     );
     if (this.pendingResponse?.opCode === response.requestOpCode) {
-      this.settlePendingResponse({ type: 'result', resultCode: response.resultCode });
+      this.settlePendingResponse({
+        type: 'result',
+        resultCode: response.resultCode,
+        parameter: response.parameter,
+      });
     } else if (
       response.requestOpCode === ControlPointOp.RequestControl &&
       response.resultCode === ControlPointResult.Success &&
@@ -1337,7 +1842,198 @@ export class TreadmillSession implements TreadmillStore {
     );
   }
 
+  // --- Opcodes vendor do FTMS (experimento de campo) ----------------------
+
+  /**
+   * Envia um op code proprietário da JHT no Control Point (`0x7E`/`0x7F`). É o
+   * experimento para descobrir se o firmware desta T600X aceita extensões do
+   * fabricante: um `Success` em `0x7E` indica que o console entra no modo de
+   * atualização (Wi-Fi AP de serviço).
+   *
+   * Segurança: este app **não** tem cliente HTTP do console e **nunca** chama
+   * `/upload` — não existe caminho de atualização de firmware por aqui. O único
+   * efeito colateral conhecido é o console reiniciar e a conexão cair.
+   */
+  sendVendorOpcode(opCode: number): void {
+    if (!isVendorControlOpcode(opCode)) {
+      return;
+    }
+    const info = vendorControlOpcodeInfo(opCode);
+    const blocked = this.vendorOpcodeBlockedReason();
+    if (blocked) {
+      this.update({
+        vendorOpcodeProbe: {
+          opCode,
+          label: info.label,
+          status: 'blocked',
+          at: this.options.now(),
+          resultCode: null,
+          parameterHex: null,
+          detail: blocked,
+        },
+      });
+      this.log('info', `Sonda FTMS: opcode vendor ${info.short} não enviado (${blocked})`);
+      this.notify('warning', `Opcode ${info.short} não enviado: ${blocked}.`);
+      return;
+    }
+    const token = ++this.vendorOpcodeProbeToken;
+    this.update({
+      vendorOpcodeProbe: {
+        opCode,
+        label: info.label,
+        status: 'pending',
+        at: this.options.now(),
+        resultCode: null,
+        parameterHex: null,
+        detail: 'pedindo o controle…',
+      },
+    });
+    void this.runVendorOpcode(opCode, info.short, token);
+  }
+
+  /** `null` = pode enviar; senão, o motivo em texto para o usuário. */
+  private vendorOpcodeBlockedReason(): string | null {
+    if (this.snapshot.mode !== 'ble') {
+      return 'o teste só funciona conectado à esteira real (o modo demonstração não tem rádio)';
+    }
+    if (this.snapshot.phase !== 'connected' || !this.snapshot.capabilities?.hasControlPoint) {
+      return 'a conexão atual não tem Control Point';
+    }
+    if (!this.snapshot.identityConfirmed) {
+      return 'confirme “É esta esteira” antes do teste';
+    }
+    if (this.snapshot.vendor.enabled) {
+      return 'desative o controle experimental 0xFFF0 antes de testar o Control Point';
+    }
+    if (this.snapshot.vendorOpcodeProbe?.status === 'pending' || this.pendingResponse) {
+      return 'já há um comando aguardando resposta';
+    }
+    if (this.stopRequested) {
+      return 'há um Parar em andamento';
+    }
+    const speed = this.snapshot.metrics.speedKmh;
+    if (speed === null) {
+      return 'ainda não recebi a velocidade da esteira; espere a telemetria mostrar 0,0 km/h';
+    }
+    if (this.snapshot.belt === 'running' || speed > 0.5) {
+      return 'a lona está andando: pare a esteira e espere parar antes do teste';
+    }
+    if (this.hungWrites > 0) {
+      return 'há uma escrita presa na fila do sistema; desconecte e conecte de novo';
+    }
+    return null;
+  }
+
+  private async runVendorOpcode(
+    opCode: VendorControlOpCode,
+    short: string,
+    token: number,
+  ): Promise<void> {
+    const epoch = this.linkEpoch;
+    this.log('info', `Sonda FTMS: enviando opcode vendor ${short}`);
+    if (this.snapshot.control !== 'granted') {
+      const control = await this.requestControl(epoch);
+      if (this.vendorOpcodeProbeToken !== token) return;
+      if (control.status !== 'granted') {
+        const detail =
+          control.status === 'refused'
+            ? `o controle não foi liberado (${controlPointResultName(control.resultCode)})`
+            : 'não foi possível obter o controle do console';
+        this.finishVendorOpcodeProbe(token, 'blocked', null, null, detail);
+        this.notify('warning', `Opcode ${short} não enviado: ${detail}.`);
+        return;
+      }
+    }
+    const outcome = await this.runProcedure(
+      encodeVendorControlOpcode(opCode),
+      `Sonda: opcode vendor ${short} (${vendorControlOpcodeInfo(opCode).label})`,
+      false,
+    );
+    if (this.vendorOpcodeProbeToken !== token) return;
+    switch (outcome.type) {
+      case 'result': {
+        const parameterHex = outcome.parameter.length > 0 ? bytesToHex(outcome.parameter) : null;
+        const resultName = controlPointResultName(outcome.resultCode);
+        this.finishVendorOpcodeProbe(token, 'answered', outcome.resultCode, parameterHex, resultName);
+        if (outcome.resultCode === ControlPointResult.Success) {
+          this.notify(
+            'success',
+            `Opcode ${short}: Success${parameterHex ? ` (parâmetro ${parameterHex})` : ''}.`,
+          );
+        } else {
+          this.notify('info', `Opcode ${short}: ${resultName}.`);
+        }
+        return;
+      }
+      case 'timeout':
+        this.finishVendorOpcodeProbe(token, 'timeout', null, null, 'sem resposta do console');
+        this.notify('warning', `Opcode ${short}: sem resposta (o console pode ter reiniciado).`);
+        return;
+      case 'writeError':
+        this.finishVendorOpcodeProbe(
+          token,
+          'failed',
+          null,
+          null,
+          `falha ao escrever: ${outcome.error.message}`,
+        );
+        this.notify('error', `Opcode ${short}: falha ao escrever.`);
+        return;
+      case 'preempted':
+        this.finishVendorOpcodeProbe(token, 'blocked', null, null, 'um Parar passou na frente');
+        this.notify('info', `Opcode ${short} cancelado por um Parar.`);
+        return;
+      case 'linkLost':
+        this.finishVendorOpcodeProbe(
+          token,
+          'failed',
+          null,
+          null,
+          'a conexão caiu (o console pode ter reiniciado)',
+        );
+        this.notify(
+          'warning',
+          `Opcode ${short}: a conexão caiu — se o console reiniciou, isso indica que o opcode foi aceito.`,
+        );
+        return;
+    }
+  }
+
+  private finishVendorOpcodeProbe(
+    token: number,
+    status: VendorOpcodeProbe['status'],
+    resultCode: number | null,
+    parameterHex: string | null,
+    detail: string | null,
+  ): void {
+    if (this.vendorOpcodeProbeToken !== token) return;
+    const current = this.snapshot.vendorOpcodeProbe;
+    this.update({
+      vendorOpcodeProbe: {
+        opCode: current?.opCode ?? 0,
+        label: current?.label ?? '',
+        status,
+        at: current?.at ?? this.options.now(),
+        resultCode,
+        parameterHex,
+        detail,
+      },
+    });
+    this.log(
+      status === 'answered' ? 'info' : 'error',
+      `Sonda FTMS: opcode vendor ${current?.label ?? '?'} → ${detail ?? status}`,
+    );
+  }
+
   private changeSpeed(deltaKmh: number): void {
+    if (this.gizwitsControlEnabled()) {
+      this.changeSpeedGizwits(deltaKmh);
+      return;
+    }
+    if (this.vendorControlEnabled()) {
+      this.changeSpeedVendor(deltaKmh);
+      return;
+    }
     const capabilities = this.snapshot.capabilities;
     if (!capabilities || !this.canCommand()) {
       return;
@@ -1367,6 +2063,14 @@ export class TreadmillSession implements TreadmillStore {
   }
 
   private changeInclination(deltaPercent: number): void {
+    if (this.gizwitsControlEnabled()) {
+      this.changeInclinationGizwits(deltaPercent);
+      return;
+    }
+    if (this.vendorControlEnabled()) {
+      this.changeInclinationVendor(deltaPercent);
+      return;
+    }
     const capabilities = this.snapshot.capabilities;
     if (!capabilities || !this.canCommand()) {
       return;
@@ -1390,6 +2094,14 @@ export class TreadmillSession implements TreadmillStore {
   }
 
   private requestBelt(action: BeltCommand | 'stop'): void {
+    if (this.gizwitsControlEnabled()) {
+      this.requestBeltGizwits(action);
+      return;
+    }
+    if (this.vendorControlEnabled()) {
+      this.requestBeltVendor(action);
+      return;
+    }
     if (!this.canCommand()) {
       return;
     }
@@ -1419,6 +2131,1065 @@ export class TreadmillSession implements TreadmillStore {
       this.beltQueue.push(action);
     }
     void this.pump();
+  }
+
+  // --- Controle experimental (0xFFF0) ---------------------------------------
+  //
+  // O FTMS desta esteira recusa velocidade/inclinação (Target Setting Features =
+  // 0x10). O 0xFFF0 é a única porta conhecida para comandos, mas o protocolo do
+  // fabricante ainda não é conhecido: o app manda os bytes do mapeamento
+  // configurado na Sonda e registra o que voltar. Não há confirmação da esteira
+  // nesse canal; o efeito é conferido pela telemetria (0x2ACD) e pelo painel.
+
+  /** Leitura fresca do estado da lona (método evita o estreitamento de tipo do `if` anterior). */
+  private beltMayBeRunning(): boolean {
+    return this.snapshot.belt === 'running';
+  }
+
+  private vendorControlEnabled(): boolean {
+    return (
+      this.snapshot.vendor.enabled &&
+      this.snapshot.phase === 'connected' &&
+      this.snapshot.identityConfirmed
+    );
+  }
+
+  private async setVendorMode(enabled: boolean): Promise<void> {
+    if (!enabled) {
+      this.cancelVendorDiscovery();
+      this.removeVendorSubscription();
+      this.update({ vendor: { ...this.snapshot.vendor, enabled: false } });
+      this.notify('info', 'Controle experimental desativado.');
+      return;
+    }
+    if (this.snapshot.phase !== 'connected' || !this.snapshot.identityConfirmed) {
+      this.notify('warning', 'Conecte e confirme a esteira antes de ativar o controle experimental.');
+      return;
+    }
+    if (!this.snapshot.vendor.available) {
+      this.notify('error', 'Esta esteira não expôs o canal proprietário 0xFFF0.');
+      return;
+    }
+    if (!this.snapshot.vendor.mapping) {
+      this.notify('warning', 'Escolha um protocolo experimental na Sonda antes de ativar o controle.');
+      return;
+    }
+    try {
+      await this.ensureVendorSubscription();
+    } catch (error) {
+      this.notify('error', `Não foi possível assinar o FFF4: ${errorMessage(error)}`);
+      return;
+    }
+    if (this.snapshot.phase !== 'connected' || !this.snapshot.identityConfirmed) {
+      this.notify('warning', 'A conexão caiu antes de ativar o controle experimental.');
+      return;
+    }
+    this.update({ vendor: { ...this.snapshot.vendor, enabled: true } });
+    const deviceRange = this.snapshot.capabilities?.inclinationRange;
+    if (
+      deviceRange &&
+      (deviceRange.max > T600X_INCLINATION_RANGE.max ||
+        deviceRange.step > T600X_INCLINATION_RANGE.step)
+    ) {
+      this.notify(
+        'warning',
+        'Controle experimental ativado. A faixa de inclinação do FTMS é implausível (0–50 %, passo 3 %): o app usa a ficha da T600X (0–15 %, passo 0,5 %). Confira o painel a cada toque.',
+      );
+      return;
+    }
+    this.notify(
+      'info',
+      'Controle experimental ativado: os comandos vão pelo 0xFFF0 e não têm confirmação da esteira. Confira o painel a cada toque.',
+    );
+  }
+
+  private async setVendorMapping(mapping: VendorMapping): Promise<void> {
+    this.update({ vendor: { ...this.snapshot.vendor, mapping } });
+    try {
+      await this.options.vendorStorage.save(mapping);
+    } catch (error) {
+      this.trace(
+        'error',
+        `Controle 0xFFF0: não foi possível salvar o mapeamento: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  private async ensureVendorSubscription(): Promise<void> {
+    if (this.vendorSubscription) return;
+    if (this.vendorSubscriptionPending) return this.vendorSubscriptionPending;
+    const connection = this.connection;
+    if (!connection) throw new Error('sem conexão com a esteira');
+    const epoch = this.linkEpoch;
+    const pending = (async () => {
+      const subscription = await withTimeout(
+        connection.subscribe(VENDOR_SERVICE, VENDOR_CHANNELS.fff4, (data) =>
+          this.handleVendorReply(data),
+        ),
+        this.options.writeTimeoutMs,
+        'a esteira não confirmou a assinatura do FFF4 a tempo',
+      );
+      if (epoch !== this.linkEpoch) {
+        // A conexão caiu durante a assinatura: não deixa nada pendurado.
+        subscription.remove();
+        return;
+      }
+      this.vendorSubscription = subscription;
+      this.subscriptions.push(subscription);
+      this.trace('info', 'Controle 0xFFF0: assinatura FFF4 ativa');
+    })();
+    this.vendorSubscriptionPending = pending.finally(() => {
+      this.vendorSubscriptionPending = null;
+    });
+    return this.vendorSubscriptionPending;
+  }
+
+  private removeVendorSubscription(): void {
+    const subscription = this.vendorSubscription;
+    if (!subscription) return;
+    subscription.remove();
+    this.subscriptions = this.subscriptions.filter((item) => item !== subscription);
+    this.vendorSubscription = null;
+    this.trace('info', 'Controle 0xFFF0: assinatura FFF4 cancelada');
+  }
+
+  // --- Plano automático do canal alternativo (protocolo Gizwits / AFG Pro) ---
+  //
+  // O app AFG Pro (JHT) controla esteira pelo mesmo serviço 0xFFF0 da T600X:
+  // assina o FFF4 e manda frames `55 AA ...` no FFF3. O plano abaixo é só de
+  // leitura/parada (nunca liga a lona) e roda sozinho depois que o usuário
+  // confirma a esteira. Se o primeiro pedido não responder, tenta variantes de
+  // canal, sequência e CRC; se precisar de uma ação humana (parar a lona), deixa
+  // a frase em `hint`, que o painel mostra na faixa do topo.
+
+  private removeGizwitsProbeSubscription(): void {
+    const subscription = this.gizwitsProbeSubscription;
+    if (!subscription) return;
+    this.gizwitsProbeSubscription = null;
+    subscription.remove();
+    this.subscriptions = this.subscriptions.filter((entry) => entry !== subscription);
+  }
+
+  private setGizwitsProbe(patch: Partial<GizwitsProbeSnapshot>): void {
+    this.update({ gizwitsProbe: { ...this.snapshot.gizwitsProbe, ...patch } });
+  }
+
+  private setGizwitsAttempt(
+    name: string,
+    label: string,
+    patch: Partial<Omit<GizwitsAttempt, 'name' | 'label'>>,
+  ): void {
+    const attempts = [...this.snapshot.gizwitsProbe.attempts];
+    const index = attempts.findIndex((attempt) => attempt.name === name);
+    if (index === -1) {
+      attempts.push({ name, label, status: 'pending', replyHex: null, detail: null, ...patch });
+    } else {
+      attempts[index] = { ...attempts[index], ...patch };
+    }
+    this.setGizwitsProbe({ attempts });
+  }
+
+  private async subscribeGizwitsProbe(
+    connection: BleConnection,
+    token: number,
+  ): Promise<boolean> {
+    try {
+      const subscription = await connection.subscribe(
+        VENDOR_SERVICE,
+        VENDOR_CHANNELS.fff4,
+        (data) => {
+          if (token !== this.gizwitsProbeToken) return;
+          this.gizwitsProbeObservations?.push(data);
+          this.trace('rx', 'Teste Gizwits: notificação', data);
+        },
+      );
+      if (token !== this.gizwitsProbeToken) {
+        subscription.remove();
+        return false;
+      }
+      this.gizwitsProbeSubscription = subscription;
+      this.subscriptions.push(subscription);
+      this.trace('info', 'Teste Gizwits: FFF4 assinado (aguardando notificações)');
+      return true;
+    } catch (error) {
+      this.trace(
+        'error',
+        `Teste Gizwits: não consegui assinar o FFF4: ${errorMessage(error)}`,
+      );
+      return false;
+    }
+  }
+
+  private async sendGizwitsAndWait(
+    connection: BleConnection,
+    token: number,
+    target: GizwitsTarget,
+    frame: Uint8Array,
+    timeoutMs: number,
+  ): Promise<Uint8Array | null> {
+    const observations = this.gizwitsProbeObservations;
+    if (!observations) return null;
+    const start = observations.length;
+    const channel = target === 'fff1' ? VENDOR_CHANNELS.fff1 : VENDOR_CHANNELS.fff3;
+    try {
+      await connection.write(VENDOR_SERVICE, channel, frame);
+      this.trace('tx', `Teste Gizwits (${target.toUpperCase()})`, frame);
+    } catch (error) {
+      this.trace(
+        'error',
+        `Teste Gizwits: falha ao escrever no ${target.toUpperCase()}: ${errorMessage(error)}`,
+      );
+      throw error;
+    }
+    const deadline = this.options.now() + timeoutMs;
+    while (this.options.now() < deadline) {
+      if (this.gizwitsProbeToken !== token) return null;
+      const found = observations.slice(start).find(looksLikeGizwitsFrame);
+      if (found) return found;
+      await wait(GIZWITS_PROBE_POLL_MS);
+    }
+    return null;
+  }
+
+  private async runGizwitsAttempt(
+    connection: BleConnection,
+    token: number,
+    name: string,
+    label: string,
+    target: GizwitsTarget,
+    frame: Uint8Array,
+    timeoutMs: number,
+  ): Promise<Uint8Array | null> {
+    this.setGizwitsProbe({ stage: label });
+    this.setGizwitsAttempt(name, label, { status: 'running', detail: null, replyHex: null });
+    let reply: Uint8Array | null = null;
+    try {
+      reply = await this.sendGizwitsAndWait(connection, token, target, frame, timeoutMs);
+    } catch (error) {
+      if (this.gizwitsProbeToken !== token) return null;
+      this.setGizwitsAttempt(name, label, { status: 'error', detail: errorMessage(error) });
+      this.trace('info', `Teste Gizwits: ${label} falhou na escrita: ${errorMessage(error)}`);
+      return null;
+    }
+    if (this.gizwitsProbeToken !== token) return null;
+    if (!reply) {
+      this.setGizwitsAttempt(name, label, { status: 'timeout' });
+      return null;
+    }
+    const limited = reply.slice(0, GIZWITS_PROBE_REPLY_LIMIT);
+    this.setGizwitsAttempt(name, label, {
+      status: 'reply',
+      replyHex: bytesToHex(limited),
+      detail: `${target.toUpperCase()} · ${reply.length} byte(s)`,
+    });
+    return reply;
+  }
+
+  /**
+   * Varredura automática e segura (a mesma da Sonda, sem precisar abrir a Sonda):
+   * escreve 1 byte por vez no FFF3/FFF1 e observa qualquer notificação no FFF4,
+   * além de ler FFF1/FFF2 antes/depois. Só roda com a lona parada.
+   */
+  private async runAutomaticGizwitsSweep(
+    connection: BleConnection,
+    token: number,
+  ): Promise<Uint8Array | null> {
+    const candidates: {
+      name: string;
+      label: string;
+      target: GizwitsTarget;
+      bytes: Uint8Array;
+    }[] = [
+      { name: 'disc-fff3-00', label: 'FFF3 ← 00', target: 'fff3', bytes: hexToBytes('00') },
+      { name: 'disc-fff3-01', label: 'FFF3 ← 01', target: 'fff3', bytes: hexToBytes('01') },
+      { name: 'disc-fff3-55', label: 'FFF3 ← 55', target: 'fff3', bytes: hexToBytes('55') },
+      { name: 'disc-fff3-aa', label: 'FFF3 ← AA', target: 'fff3', bytes: hexToBytes('AA') },
+      {
+        name: 'disc-fff3-at',
+        label: 'FFF3 ← AT\r\n',
+        target: 'fff3',
+        bytes: Uint8Array.of(0x41, 0x54, 0x0d, 0x0a),
+      },
+      { name: 'disc-fff1-00', label: 'FFF1 ← 00', target: 'fff1', bytes: hexToBytes('00') },
+      { name: 'disc-fff1-55', label: 'FFF1 ← 55', target: 'fff1', bytes: hexToBytes('55') },
+      { name: 'disc-fff1-aa', label: 'FFF1 ← AA', target: 'fff1', bytes: hexToBytes('AA') },
+    ];
+    const observations = this.gizwitsProbeObservations;
+    if (!observations) return null;
+
+    for (const candidate of candidates) {
+      if (this.gizwitsProbeToken !== token) return null;
+      if (this.beltMayBeRunning()) {
+        this.setGizwitsProbe({
+          status: 'waitingBelt',
+          stage: null,
+          hint: 'No painel, pare a esteira. Eu termino o teste do canal alternativo sozinho.',
+          detail: 'a lona começou a andar durante a varredura',
+        });
+        return null;
+      }
+      this.setGizwitsProbe({ stage: candidate.label });
+      this.setGizwitsAttempt(candidate.name, candidate.label, {
+        status: 'running',
+        detail: null,
+        replyHex: null,
+      });
+      const start = observations.length;
+      const channel = candidate.target === 'fff1' ? VENDOR_CHANNELS.fff1 : VENDOR_CHANNELS.fff3;
+      try {
+        await connection.write(VENDOR_SERVICE, channel, candidate.bytes);
+        this.trace('tx', `Teste Gizwits (${candidate.target.toUpperCase()})`, candidate.bytes);
+      } catch (error) {
+        this.setGizwitsAttempt(candidate.name, candidate.label, {
+          status: 'error',
+          detail: errorMessage(error),
+        });
+        continue;
+      }
+      const deadline = this.options.now() + 1200;
+      let found: Uint8Array | null = null;
+      while (this.options.now() < deadline) {
+        if (this.gizwitsProbeToken !== token) return null;
+        found = observations[start] ?? null;
+        if (found) break;
+        await wait(100);
+      }
+      if (found) {
+        this.setGizwitsAttempt(candidate.name, candidate.label, {
+          status: 'reply',
+          replyHex: bytesToHex(found.slice(0, GIZWITS_PROBE_REPLY_LIMIT)),
+          detail: `${found.length} byte(s)`,
+        });
+        return found;
+      }
+      this.setGizwitsAttempt(candidate.name, candidate.label, { status: 'timeout' });
+    }
+    return null;
+  }
+
+  private async traceGizwitsReads(connection: BleConnection, token: number): Promise<void> {
+    const channels: [string, string][] = [
+      ['FFF1', VENDOR_CHANNELS.fff1],
+      ['FFF2', VENDOR_CHANNELS.fff2],
+      ['FFF5', VENDOR_CHANNELS.fff5],
+    ];
+    for (const [label, uuid] of channels) {
+      if (this.gizwitsProbeToken !== token) return;
+      try {
+        const value = await connection.read(VENDOR_SERVICE, uuid);
+        this.trace('rx', `Teste Gizwits: leitura ${label}`, value);
+      } catch (error) {
+        this.trace('info', `Teste Gizwits: ${label} sem leitura (${errorMessage(error)})`);
+      }
+    }
+  }
+
+  async runGizwitsProbe(): Promise<void> {
+    if (this.gizwitsProbeInFlight) return;
+    if (this.snapshot.phase !== 'connected' || !this.connection) return;
+    if (!this.snapshot.identityConfirmed) return;
+    if (this.snapshot.mode === 'demo') {
+      this.setGizwitsProbe({ status: 'unavailable', detail: 'modo demonstração', hint: null });
+      return;
+    }
+    if (!this.snapshot.vendor.available) {
+      this.setGizwitsProbe({
+        status: 'unavailable',
+        detail: 'esta esteira não expôs o canal 0xFFF0',
+        hint: null,
+      });
+      return;
+    }
+    if (this.beltMayBeRunning()) {
+      this.setGizwitsProbe({
+        status: 'waitingBelt',
+        stage: null,
+        hint: 'No painel, pare a esteira. Eu termino o teste do canal alternativo sozinho.',
+        detail: 'a lona está andando',
+      });
+      this.trace('info', 'Teste Gizwits: adiado com a lona andando');
+      return;
+    }
+
+    const token = ++this.gizwitsProbeToken;
+    const startedAt = this.options.now();
+    this.gizwitsProbeInFlight = true;
+    this.gizwitsProbeObservations = [];
+    this.update({
+      gizwitsProbe: {
+        ...EMPTY_GIZWITS_PROBE,
+        status: 'running',
+        stage: 'machine info',
+        startedAt,
+        attempts: [],
+      },
+    });
+    this.trace('info', 'Teste Gizwits: começando o plano automático');
+    try {
+      const connection = this.probeConnection();
+      if (!(await this.subscribeGizwitsProbe(connection, token))) {
+        throw new Error('não foi possível assinar o FFF4');
+      }
+      await this.traceGizwitsReads(connection, token);
+
+      // 1) O handshake do app AFG: pede machine info no FFF3.
+      let target: GizwitsTarget = 'fff3';
+      let reply = await this.runGizwitsAttempt(
+        connection,
+        token,
+        'machine-info',
+        'machine info (FFF3)',
+        target,
+        GIZWITS_MACHINE_INFO_REQUEST,
+        5000,
+      );
+
+      // 2) Sem resposta: variantes baratas e seguras.
+      if (!reply) {
+        const variants: GizwitsVariant[] = [
+          {
+            name: 'fff1',
+            label: 'machine info no FFF1',
+            target: 'fff1',
+            frame: GIZWITS_MACHINE_INFO_REQUEST,
+            timeoutMs: 2500,
+          },
+          {
+            name: 'seq',
+            label: 'machine info com sequência 1',
+            target: 'fff3',
+            frame: encodeGizwitsFrame(GIZWITS_LINGO.general, GIZWITS_COMMANDS.general.getMachineInfo, undefined, 1),
+            timeoutMs: 2500,
+          },
+          {
+            // Pausar com a lona parada é inofensivo; serve para testar o CRC invertido.
+            name: 'crc-be',
+            label: 'pausar com CRC invertido',
+            target: 'fff3',
+            frame: reverseCrc(encodeGizwitsFrame(GIZWITS_LINGO.remote, GIZWITS_COMMANDS.remote.pauseWorkout, Uint8Array.of(0))),
+            timeoutMs: 2500,
+          },
+          {
+            name: 'aa55',
+            label: 'machine info com sincronismo AA 55',
+            target: 'fff3',
+            frame: reverseSync(GIZWITS_MACHINE_INFO_REQUEST),
+            timeoutMs: 2500,
+          },
+          {
+            name: 'pause-std',
+            label: 'pausar com CRC normal',
+            target: 'fff3',
+            frame: encodeGizwitsPause(false),
+            timeoutMs: 2500,
+          },
+          {
+            name: 'ack',
+            label: 'ack do canal remoto',
+            target: 'fff3',
+            frame: encodeGizwitsFrame(GIZWITS_LINGO.remote, 0),
+            timeoutMs: 2000,
+          },
+        ];
+        for (const variant of variants) {
+          if (this.beltMayBeRunning()) {
+            this.setGizwitsProbe({
+              status: 'waitingBelt',
+              stage: null,
+              hint: 'No painel, pare a esteira. Eu termino o teste do canal alternativo sozinho.',
+              detail: 'a lona começou a andar durante o teste',
+            });
+            return;
+          }
+          reply = await this.runGizwitsAttempt(
+            connection,
+            token,
+            variant.name,
+            variant.label,
+            variant.target,
+            variant.frame,
+            variant.timeoutMs,
+          );
+          if (reply) {
+            target = variant.target;
+            break;
+          }
+        }
+      }
+
+      if (this.gizwitsProbeToken !== token) return;
+
+      if (!reply) {
+        // 2.1) Ainda sem resposta: varredura automática de bytes seguros.
+        const sweepReply = await this.runAutomaticGizwitsSweep(connection, token);
+        if (this.gizwitsProbeToken !== token) return;
+        if (this.snapshot.gizwitsProbe.status === 'waitingBelt') return;
+        if (sweepReply) {
+          this.setGizwitsProbe({
+            status: 'compatible',
+            stage: null,
+            compatible: true,
+            finishedAt: this.options.now(),
+            replyHex: bytesToHex(sweepReply.slice(0, GIZWITS_PROBE_REPLY_LIMIT)),
+            replyBytes: sweepReply.length,
+            replyCommand: null,
+            detail: 'o canal enviou dados durante a varredura automática',
+            hint: null,
+          });
+          this.trace('info', 'Teste Gizwits: varredura recebeu dados');
+          this.notify(
+            'info',
+            'Teste automático do canal alternativo: a esteira enviou dados durante a varredura. O detalhe fica na Sonda.',
+          );
+          return;
+        }
+      }
+
+      if (!reply) {
+        this.setGizwitsProbe({
+          status: 'incompatible',
+          stage: null,
+          compatible: false,
+          finishedAt: this.options.now(),
+          detail: 'a esteira não respondeu a nenhuma das tentativas',
+          hint: null,
+        });
+        this.trace('info', 'Teste Gizwits: nenhuma tentativa respondeu');
+        this.notify(
+          'info',
+          'Teste automático do canal alternativo: a esteira não respondeu a nenhuma tentativa. O treino segue normal.',
+        );
+        return;
+      }
+
+      const parsed = parseGizwitsFrame(reply);
+      this.setGizwitsProbe({
+        status: 'running',
+        compatible: true,
+        replyHex: bytesToHex(reply.slice(0, GIZWITS_PROBE_REPLY_LIMIT)),
+        replyBytes: reply.length,
+        replyCommand: parsed === null ? null : gizwitsCommandName(parsed.lingo, parsed.command),
+      });
+      this.trace('info', 'Teste Gizwits: canal respondeu; seguindo com testes seguros');
+
+      // 3) Canal respondeu: testa comandos de leitura/parada, nunca de movimento.
+      const safeSteps: GizwitsSafeStep[] = [
+        {
+          name: 'workout-data',
+          label: 'consultar dados do treino',
+          frame: encodeGizwitsFrame(
+            GIZWITS_LINGO.general,
+            GIZWITS_COMMANDS.general.getWorkoutData,
+          ),
+          timeoutMs: 2000,
+        },
+        {
+          name: 'stop-idle',
+          label: 'parar treino (já parado)',
+          frame: encodeGizwitsFrame(GIZWITS_LINGO.general, GIZWITS_COMMANDS.general.stopWorkout),
+          timeoutMs: 2000,
+        },
+        {
+          name: 'pause-idle',
+          label: 'pausar (já parado)',
+          frame: encodeGizwitsFrame(
+            GIZWITS_LINGO.remote,
+            GIZWITS_COMMANDS.remote.pauseWorkout,
+            Uint8Array.of(0),
+          ),
+          timeoutMs: 2000,
+        },
+      ];
+      for (const step of safeSteps) {
+        if (this.beltMayBeRunning()) {
+          this.setGizwitsProbe({
+            status: 'waitingBelt',
+            stage: null,
+            hint: 'No painel, pare a esteira. Eu termino o teste do canal alternativo sozinho.',
+            detail: 'a lona começou a andar durante o teste',
+          });
+          return;
+        }
+        await this.runGizwitsAttempt(
+          connection,
+          token,
+          step.name,
+          step.label,
+          target,
+          step.frame,
+          step.timeoutMs,
+        );
+        if (this.gizwitsProbeToken !== token) return;
+      }
+
+      const answered = this.snapshot.gizwitsProbe.attempts.filter(
+        (attempt) => attempt.status === 'reply',
+      ).length;
+      this.setGizwitsProbe({
+        status: 'compatible',
+        stage: null,
+        finishedAt: this.options.now(),
+        detail: `canal compatível: ${answered} tentativa(s) com resposta`,
+        hint: null,
+      });
+      this.trace('info', `Teste Gizwits: plano concluído com ${answered} resposta(s)`);
+      this.notify(
+        'info',
+        'Teste automático do canal alternativo: a esteira respondeu. Os controles do app agora usam esse canal.',
+      );
+    } catch (error) {
+      if (this.gizwitsProbeToken !== token) return;
+      const detail = errorMessage(error);
+      this.setGizwitsProbe({
+        status: 'error',
+        stage: null,
+        finishedAt: this.options.now(),
+        detail,
+        hint: 'A conexão atrapalhou o teste. Desconecte e conecte de novo para repetir.',
+      });
+      this.trace('error', 'Teste Gizwits: ' + detail);
+    } finally {
+      if (token === this.gizwitsProbeToken) {
+        this.gizwitsProbeInFlight = false;
+        this.gizwitsProbeObservations = null;
+        this.removeGizwitsProbeSubscription();
+      }
+    }
+  }
+
+  private updateGizwitsProbe(patch: Partial<GizwitsProbeSnapshot>): void {
+    this.setGizwitsProbe(patch);
+  }
+
+  private handleVendorReply(bytes: Uint8Array): void {
+    const hex = bytesToHex(bytes);
+    this.trace('rx', 'Controle 0xFFF0: resposta', bytes);
+    this.vendorReplyCollector?.push(hex);
+    this.update({
+      vendor: { ...this.snapshot.vendor, lastReply: { at: this.options.now(), hex } },
+    });
+  }
+
+  private async writeVendor(
+    target: VendorTarget,
+    bytes: Uint8Array,
+    label: string,
+  ): Promise<void> {
+    const connection = this.connection;
+    if (!connection || this.snapshot.phase !== 'connected') {
+      throw new Error('sem conexão com a esteira');
+    }
+    this.trace('info', `Controle 0xFFF0: ${label} (${bytesToHex(bytes)})`);
+    // A escrita no 0xFFF0 não tem indication de confirmação; o prazo evita que um
+    // rádio travado segure o Parar ou a próxima tentativa para sempre.
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`a escrita não terminou em ${this.options.writeTimeoutMs} ms`)),
+        this.options.writeTimeoutMs,
+      );
+      connection.write(VENDOR_SERVICE, vendorTargetUuid(target), bytes).then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
+    this.trace('tx', `Controle 0xFFF0: ${label}`, bytes);
+  }
+
+  /** Envia a ação pelo canal proprietário. Devolve `false` quando não há o que enviar. */
+  private async sendVendorAction(action: VendorAction, value: number | null): Promise<boolean> {
+    if (this.snapshot.vendor.discovery?.running) {
+      this.notify('warning', 'Aguarde a varredura do 0xFFF0 terminar antes de mandar comandos.');
+      return false;
+    }
+    const mapping = this.snapshot.vendor.mapping;
+    if (!mapping) {
+      this.notify('warning', 'Nenhum protocolo experimental configurado. Escolha um na Sonda.');
+      return false;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = buildVendorPayload(mapping, action, value);
+    } catch (error) {
+      this.notify('warning', errorMessage(error));
+      return false;
+    }
+    const at = this.options.now();
+    const tally = (ok: boolean) => {
+      // O canal não responde: uma escrita aceita é "sem resposta", não "aceita".
+      if (!this.stopRequested) {
+        this.bumpTally(commandKindOfVendorAction(action), ok ? 'unconfirmed' : 'refused');
+      }
+    };
+    const outcome = (ok: boolean, error: string | null) => {
+      this.update({
+        vendor: {
+          ...this.snapshot.vendor,
+          lastSend: { action, hex: bytesToHex(bytes), at, ok, error },
+        },
+      });
+      tally(ok);
+    };
+    try {
+      await this.writeVendor(mapping.target, bytes, VENDOR_ACTION_LABELS[action]);
+    } catch (error) {
+      outcome(false, errorMessage(error));
+      this.notify(
+        'error',
+        `Falha ao enviar "${VENDOR_ACTION_LABELS[action]}" pelo 0xFFF0: ${errorMessage(error)}`,
+      );
+      return false;
+    }
+    outcome(true, null);
+    return true;
+  }
+
+  private changeSpeedVendor(deltaKmh: number): void {
+    const capabilities = this.snapshot.capabilities;
+    if (!capabilities) return;
+    if (this.stopRequested || this.isStartBlocked()) {
+      this.notify('info', 'Aguarde a lona parar antes de ajustar a velocidade.');
+      return;
+    }
+    const measured = this.snapshot.metrics.speedKmh;
+    if (this.snapshot.belt !== 'running' || measured === null || measured <= 0) {
+      this.notify('info', 'Inicie a lona para ajustar a velocidade.');
+      return;
+    }
+    // A velocidade medida é a única base confiável: o alvo notificado pode vir na
+    // escala errada do firmware e não há confirmação do canal proprietário.
+    const target = quantize(measured + deltaKmh, capabilities.speedRange);
+    if (target === this.snapshot.targetSpeedKmh) return;
+    if (Math.abs(target - measured) > Math.max(1, Math.abs(deltaKmh) * 2)) {
+      this.notify(
+        'warning',
+        'Ajuste de velocidade recusado: o alvo calculado ficou longe da velocidade medida.',
+      );
+      return;
+    }
+    this.countRequest('speed');
+    this.speedTargetSetAt = this.options.now();
+    this.update({ targetSpeedKmh: target });
+    const action: VendorAction = deltaKmh > 0 ? 'speedUp' : 'speedDown';
+    void this.sendVendorAction(action, target).then((ok) => {
+      if (!ok && this.snapshot.targetSpeedKmh === target) {
+        this.invalidateSpeedTarget();
+      }
+    });
+  }
+
+  /**
+   * Inclinação plausível para servir de base no controle experimental. O alvo
+   * notificado em 0x2ADA já usa a unidade certa (0,1 %); a medição do 0x2ACD
+   * desta unidade vem inflada ~6,667× (dossiê §7.2) e precisa ser convertida.
+   */
+  /**
+   * Converte a inclinação lida no 0x2ACD para a escala real quando a faixa
+   * declarada denuncia o template do firmware (o contador interno usa raw×0,015;
+   * o app lê raw/10, então toda leitura acima de ~2 % já vem inflada).
+   */
+  private correctedInclinationReading(percent: number): number {
+    const range = this.snapshot.capabilities?.inclinationRange;
+    if (!range || plausibleInclinationRange(range) === range) {
+      return percent;
+    }
+    return percent * T600X_INCLINATION_READING_FACTOR;
+  }
+
+  private vendorInclinationBase(): number | null {
+    const limit = T600X_INCLINATION_RANGE.max + 0.5;
+    const target = this.snapshot.targetInclinationPercent;
+    if (target !== null && target >= 0 && target <= limit) {
+      return target;
+    }
+    const measured = this.snapshot.metrics.inclinationPercent;
+    if (measured === null || measured < 0) return null;
+    const corrected = this.correctedInclinationReading(measured);
+    return corrected >= 0 && corrected <= limit ? corrected : null;
+  }
+
+  private changeInclinationVendor(deltaPercent: number): void {
+    const capabilities = this.snapshot.capabilities;
+    if (!capabilities) return;
+    if (this.stopRequested || this.isStartBlocked()) {
+      this.notify('info', 'Aguarde a lona parar antes de ajustar a inclinação.');
+      return;
+    }
+    // No canal experimental o alvo vale de verdade: usa a faixa plausível, não a
+    // declarada pelo template do FTMS (0–50 %/3 % nesta unidade).
+    const range = plausibleInclinationRange(capabilities.inclinationRange);
+    const base = this.vendorInclinationBase();
+    if (base === null) {
+      this.notify(
+        'warning',
+        'Sem leitura de inclinação confiável nesta conexão; ajuste pelo painel da esteira.',
+      );
+      return;
+    }
+    const target = quantize(base + deltaPercent, range);
+    if (target === this.snapshot.targetInclinationPercent) return;
+    if (Math.abs(target - base) > Math.max(range.step * 2, Math.abs(deltaPercent) * 2)) {
+      this.notify('warning', 'Ajuste de inclinação recusado: o alvo ficou longe da inclinação medida.');
+      return;
+    }
+    this.countRequest('inclination');
+    this.update({ targetInclinationPercent: target });
+    const action: VendorAction = deltaPercent > 0 ? 'inclineUp' : 'inclineDown';
+    void this.sendVendorAction(action, target).then((ok) => {
+      if (!ok && this.snapshot.targetInclinationPercent === target) {
+        this.invalidateInclinationTarget();
+      }
+    });
+  }
+
+  private requestBeltVendor(action: BeltCommand | 'stop'): void {
+    if (action === 'stop') {
+      // O Parar não pode ficar preso atrás da varredura: cancela e manda os bytes.
+      this.cancelVendorDiscovery();
+      this.countRequest('stop');
+      this.dropQueuedCommands();
+      this.dropPendingSpeed();
+      this.markBraked();
+      this.invalidateSpeedTarget();
+      this.invalidateInclinationTarget();
+      // Em paralelo, tenta o Control Point do FTMS: nesta T600X ele recusa, mas se
+      // o canal proprietário for só configuração, o Parar não pode depender dele.
+      this.requestStop();
+      void this.sendVendorAction('stop', null).then((ok) => {
+        this.notify(
+          ok ? 'info' : 'warning',
+          ok
+            ? 'Parar enviado pelo canal experimental (e tentado pelo FTMS). Se a lona não parar, use o painel ou o Emergency Stop.'
+            : 'Não foi possível enviar o Parar pelo 0xFFF0. O app tentou o FTMS; se a lona não parar, use o painel ou o Emergency Stop.',
+        );
+      });
+      return;
+    }
+    if (action === 'start') {
+      if (this.stopRequested || this.isStartBlocked()) return;
+      this.countRequest('start');
+      void this.sendVendorAction('start', null).then((ok) => {
+        if (ok) this.notify('info', 'Iniciar enviado pelo canal experimental; confira o painel.');
+      });
+      return;
+    }
+    if (this.stopRequested) return;
+    this.cancelVendorDiscovery();
+    this.countRequest('pause');
+    this.markBraked();
+    this.dropPendingSpeed();
+    void this.sendVendorAction('pause', null).then((ok) => {
+      if (ok) this.notify('info', 'Pausar enviado pelo canal experimental; confira o painel.');
+    });
+  }
+
+  /**
+   * Varredura segura do 0xFFF0: escreve 1 byte por vez (ou `AT`) nas
+   * características de escrita, com o FFF4 assinado, e registra o que mudou.
+   * Não manda comando de controle nenhum; a lona precisa estar parada.
+   */
+  private async runVendorDiscovery(): Promise<void> {
+    if (this.vendorDiscoveryActive || this.snapshot.vendor.discovery?.running) return;
+    if (this.snapshot.phase !== 'connected' || !this.snapshot.identityConfirmed) {
+      this.notify('warning', 'Conecte e confirme a esteira antes de sondar o 0xFFF0.');
+      return;
+    }
+    if (!this.snapshot.vendor.available) {
+      this.notify('error', 'Esta esteira não expôs o canal proprietário 0xFFF0.');
+      return;
+    }
+    if (this.snapshot.belt === 'running') {
+      this.notify('warning', 'Pare a lona antes de rodar a varredura do 0xFFF0.');
+      return;
+    }
+    const epoch = ++this.vendorDiscoveryEpoch;
+    this.vendorDiscoveryActive = true;
+    const candidates = VENDOR_DISCOVERY_CANDIDATES;
+    try {
+      try {
+        await this.ensureVendorSubscription();
+      } catch (error) {
+        this.notify('error', `Não foi possível assinar o FFF4: ${errorMessage(error)}`);
+        return;
+      }
+      if (epoch !== this.vendorDiscoveryEpoch || this.snapshot.phase !== 'connected') {
+        this.notify('warning', 'A conexão caiu antes de começar a varredura.');
+        return;
+      }
+      this.update({
+        vendor: {
+          ...this.snapshot.vendor,
+          discovery: { running: true, index: 0, total: candidates.length, observations: [] },
+        },
+      });
+      this.notify(
+        'info',
+        'Varredura do 0xFFF0 iniciada: 1 byte por vez, com 6 s de observação cada (cerca de 70 s no total). Lona vazia e Emergency Stop à mão.',
+      );
+      for (let index = 0; index < candidates.length; index++) {
+        if (epoch !== this.vendorDiscoveryEpoch || this.snapshot.phase !== 'connected') return;
+        if (this.beltMayBeRunning()) {
+          // Se a lona andou, algo respondeu: parar a varredura e mandar Parar.
+          this.cancelVendorDiscovery();
+          this.notify('warning', 'A lona começou a andar: varredura do 0xFFF0 interrompida.');
+          this.requestStop();
+          void this.sendVendorAction('stop', null);
+          return;
+        }
+        const observation = await this.runVendorCandidate(candidates[index], epoch);
+        if (epoch !== this.vendorDiscoveryEpoch || this.snapshot.phase !== 'connected') return;
+        const current = this.snapshot.vendor.discovery;
+        if (!current) return;
+        this.trace(
+          'info',
+          'Controle 0xFFF0: varredura — ' +
+            observation.label +
+            ' → FFF4=[' +
+            (observation.replies.length > 0 ? observation.replies.join(' ') : 'nada') +
+            '] FFF1=' +
+            (observation.fff1Before ?? '?') +
+            '→' +
+            (observation.fff1After ?? '?') +
+            ' FFF2=' +
+            (observation.fff2Before ?? '?') +
+            '→' +
+            (observation.fff2After ?? '?') +
+            ' vel=' +
+            String(observation.speedBefore) +
+            '→' +
+            String(observation.speedAfter) +
+            (observation.error ? ' erro=' + observation.error : ''),
+        );
+        this.update({
+          vendor: {
+            ...this.snapshot.vendor,
+            discovery: {
+              ...current,
+              index: index + 1,
+              observations: [...current.observations, observation],
+            },
+          },
+        });
+        await wait(VENDOR_DISCOVERY_PAUSE_MS);
+      }
+      if (epoch !== this.vendorDiscoveryEpoch) return;
+      const discovery = this.snapshot.vendor.discovery;
+      if (!discovery) return;
+      this.update({
+        vendor: { ...this.snapshot.vendor, discovery: { ...discovery, running: false } },
+      });
+      const hits = discovery.observations.filter(
+        (observation) =>
+          observation.replies.length > 0 ||
+          observation.fff1After !== observation.fff1Before ||
+          observation.fff2After !== observation.fff2Before ||
+          observation.speedAfter !== observation.speedBefore ||
+          observation.inclinationAfter !== observation.inclinationBefore,
+      );
+      this.notify(
+        hits.length > 0 ? 'warning' : 'info',
+        hits.length > 0
+          ? `Varredura concluída: ${hits.length} de ${discovery.total} bytes provocaram resposta. Veja os resultados na Sonda.`
+          : 'Varredura concluída: nenhum dos bytes testados provocou resposta visível no 0xFFF0.',
+      );
+    } finally {
+      if (epoch === this.vendorDiscoveryEpoch) {
+        this.vendorDiscoveryActive = false;
+      }
+    }
+  }
+
+  private cancelVendorDiscovery(): void {
+    const discovery = this.snapshot.vendor.discovery;
+    if (!discovery?.running) return;
+    this.vendorDiscoveryEpoch++;
+    this.vendorDiscoveryActive = false;
+    this.update({
+      vendor: { ...this.snapshot.vendor, discovery: { ...discovery, running: false } },
+    });
+    this.trace('info', 'Controle 0xFFF0: varredura cancelada');
+    this.notify('info', 'Varredura do 0xFFF0 cancelada.');
+  }
+
+  private async runVendorCandidate(
+    candidate: VendorDiscoveryCandidate,
+    epoch: number,
+  ): Promise<VendorDiscoveryObservation> {
+    const metricsBefore = this.snapshot.metrics;
+    const fff1Before = await this.readVendorChannel(VENDOR_CHANNELS.fff1);
+    const fff2Before = await this.readVendorChannel(VENDOR_CHANNELS.fff2);
+    this.vendorReplyCollector = [];
+    let hex = '';
+    let error: string | null = null;
+    if (epoch !== this.vendorDiscoveryEpoch || this.snapshot.phase !== 'connected') {
+      // Cancelou ou caiu durante as leituras: não escreve nada.
+      this.vendorReplyCollector = null;
+      return {
+        label: candidate.label,
+        target: candidate.target,
+        hex,
+        at: this.options.now(),
+        error: 'varredura cancelada antes da escrita',
+        replies: [],
+        fff1Before,
+        fff1After: fff1Before,
+        fff2Before,
+        fff2After: fff2Before,
+        speedBefore: metricsBefore.speedKmh,
+        speedAfter: this.snapshot.metrics.speedKmh,
+        inclinationBefore: metricsBefore.inclinationPercent,
+        inclinationAfter: this.snapshot.metrics.inclinationPercent,
+      };
+    }
+    try {
+      const bytes = buildLiteralPayload(candidate.format, candidate.payload);
+      hex = bytesToHex(bytes);
+      await this.writeVendor(candidate.target, bytes, 'descoberta ' + candidate.label);
+    } catch (writeError) {
+      error = errorMessage(writeError);
+    }
+    await wait(VENDOR_DISCOVERY_SETTLE_MS);
+    const replies = this.vendorReplyCollector ?? [];
+    this.vendorReplyCollector = null;
+    const fff1After = await this.readVendorChannel(VENDOR_CHANNELS.fff1);
+    const fff2After = await this.readVendorChannel(VENDOR_CHANNELS.fff2);
+    return {
+      label: candidate.label,
+      target: candidate.target,
+      hex,
+      at: this.options.now(),
+      error,
+      replies,
+      fff1Before,
+      fff1After,
+      fff2Before,
+      fff2After,
+      speedBefore: metricsBefore.speedKmh,
+      speedAfter: this.snapshot.metrics.speedKmh,
+      inclinationBefore: metricsBefore.inclinationPercent,
+      inclinationAfter: this.snapshot.metrics.inclinationPercent,
+    };
+  }
+
+  private async readVendorChannel(characteristicUuid: string): Promise<string | null> {
+    const connection = this.connection;
+    if (!connection) return null;
+    try {
+      const bytes = await readWithTimeout(
+        connection,
+        VENDOR_SERVICE,
+        characteristicUuid,
+        VENDOR_DISCOVERY_READ_TIMEOUT_MS,
+      );
+      return bytesToHex(bytes);
+    } catch {
+      return null;
+    }
   }
 
   /**

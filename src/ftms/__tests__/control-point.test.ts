@@ -2,6 +2,8 @@ import { bytesToHex, hexToBytes } from '../bytes';
 import {
   ControlPointOp,
   ControlPointResult,
+  VENDOR_CONTROL_OPCODES,
+  VendorControlOp,
   controlPointOpName,
   controlPointResultName,
   encodePause,
@@ -11,7 +13,10 @@ import {
   encodeSetTargetSpeed,
   encodeStartOrResume,
   encodeStop,
+  encodeVendorControlOpcode,
+  isVendorControlOpcode,
   parseControlPointResponse,
+  vendorControlOpcodeInfo,
 } from '../control-point';
 
 describe('comandos do Control Point', () => {
@@ -54,6 +59,38 @@ describe('comandos do Control Point', () => {
     expect(() => encodeSetTargetInclination(3276.8)).toThrow(RangeError);
     expect(() => encodeSetTargetInclination(-3276.9)).toThrow(RangeError);
     expect(() => encodeSetTargetInclination(Number.NaN)).toThrow(RangeError);
+  });
+});
+
+describe('op codes vendor da JHT (fora da spec)', () => {
+  it('conhece 0x7E e 0x7F e codifica um byte só', () => {
+    expect(Object.values(VendorControlOp)).toEqual([0x7e, 0x7f]);
+    expect(bytesToHex(encodeVendorControlOpcode(VendorControlOp.ResetConsoleResource))).toBe('7E');
+    expect(bytesToHex(encodeVendorControlOpcode(VendorControlOp.SetApMode))).toBe('7F');
+    expect(VENDOR_CONTROL_OPCODES.map((info) => info.opCode)).toEqual([0x7e, 0x7f]);
+  });
+
+  it('reconhece só os op codes vendor conhecidos', () => {
+    expect(isVendorControlOpcode(0x7e)).toBe(true);
+    expect(isVendorControlOpcode(0x7f)).toBe(true);
+    expect(isVendorControlOpcode(0x02)).toBe(false);
+  });
+
+  it('dá nome e descrição para a interface e o log', () => {
+    expect(vendorControlOpcodeInfo(0x7e).label).toContain('Device Update');
+    expect(vendorControlOpcodeInfo(0x7e).short).toBe('0x7E');
+    expect(vendorControlOpcodeInfo(0x7f).label).toBe('Set AP Mode');
+    expect(controlPointOpName(0x7e)).toBe('Reset Console Resource (Device Update)');
+    expect(controlPointOpName(0x7f)).toBe('Set AP Mode');
+  });
+
+  it('lê a resposta com o delay do 0x7E no parâmetro', () => {
+    const response = parseControlPointResponse(hexToBytes('80 7E 01 0A'));
+    expect(response).toEqual({
+      requestOpCode: 0x7e,
+      resultCode: ControlPointResult.Success,
+      parameter: Uint8Array.of(0x0a),
+    });
   });
 });
 

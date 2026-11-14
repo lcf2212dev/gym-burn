@@ -9,6 +9,69 @@ export const ControlPointOp = {
   ResponseCode: 0x80,
 } as const;
 
+/**
+ * Op codes proprietários da Johnson Health Tech no Control Point, fora da spec
+ * do SIG. Descobertos no app de firmware JohnsonOTA (ver docs/re/johnsonota.md):
+ * `0x7E` = "Device Update" (reinicia o console em modo de atualização) e
+ * `0x7F` = "Set AP Mode" (caminho antigo, obsoleto).
+ */
+export const VendorControlOp = {
+  ResetConsoleResource: 0x7e,
+  SetApMode: 0x7f,
+} as const;
+
+export type VendorControlOpCode = (typeof VendorControlOp)[keyof typeof VendorControlOp];
+
+export interface VendorControlOpcodeInfo {
+  opCode: VendorControlOpCode;
+  /** Nome como o fabricante usa ("Device Update" etc.). */
+  label: string;
+  /** Forma curta para a interface: `0x7E`. */
+  short: string;
+  /** O que o firmware faz, em uma frase. */
+  description: string;
+}
+
+/** Os únicos op codes vendor expostos no app: um byte cada, nada de payload. */
+export const VENDOR_CONTROL_OPCODES: readonly VendorControlOpcodeInfo[] = [
+  {
+    opCode: VendorControlOp.ResetConsoleResource,
+    label: 'Reset Console Resource (Device Update)',
+    short: '0x7E',
+    description:
+      'Manda o console reiniciar no modo de atualização (Wi-Fi AP de serviço). ' +
+      'A resposta de sucesso traz um delay em segundos antes do restart.',
+  },
+  {
+    opCode: VendorControlOp.SetApMode,
+    label: 'Set AP Mode',
+    short: '0x7F',
+    description:
+      'Caminho antigo (marcado obsoleto pelo fabricante) para o console entrar em modo AP. ' +
+      'Pode ser o que firmwares mais velhos conhecem no lugar do 0x7E.',
+  },
+];
+
+export function isVendorControlOpcode(opCode: number): opCode is VendorControlOpCode {
+  return opCode === VendorControlOp.ResetConsoleResource || opCode === VendorControlOp.SetApMode;
+}
+
+export function vendorControlOpcodeInfo(opCode: number): VendorControlOpcodeInfo {
+  return (
+    VENDOR_CONTROL_OPCODES.find((info) => info.opCode === opCode) ?? {
+      opCode: VendorControlOp.ResetConsoleResource,
+      label: `Op Code ${hexByte(opCode)}`,
+      short: hexByte(opCode),
+      description: '',
+    }
+  );
+}
+
+/** Payload do op code vendor: um único byte, sem parâmetro. */
+export function encodeVendorControlOpcode(opCode: VendorControlOpCode): Uint8Array {
+  return Uint8Array.of(opCode);
+}
+
 /** Result codes da indication de resposta (FTMS 1.0, tabela 4.24). */
 export const ControlPointResult = {
   Success: 0x01,
@@ -92,6 +155,8 @@ const OP_NAMES: Record<number, string> = {
   [ControlPointOp.StartOrResume]: 'Start or Resume',
   [ControlPointOp.StopOrPause]: 'Stop or Pause',
   [ControlPointOp.ResponseCode]: 'Response Code',
+  [VendorControlOp.ResetConsoleResource]: 'Reset Console Resource (Device Update)',
+  [VendorControlOp.SetApMode]: 'Set AP Mode',
 };
 
 const RESULT_NAMES: Record<number, string> = {

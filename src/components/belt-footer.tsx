@@ -15,7 +15,10 @@ import { useTreadmill } from '@/treadmill/treadmill-context';
 export function BeltFooter() {
   const theme = useTheme();
   const canCommandBelt = useTreadmill(
-    (s) => s.phase === 'connected' && s.control !== 'unavailable' && s.identityConfirmed,
+    (s) =>
+      s.phase === 'connected' &&
+      s.identityConfirmed &&
+      (s.vendor.enabled || s.control !== 'unavailable'),
   );
 
   if (!canCommandBelt) {

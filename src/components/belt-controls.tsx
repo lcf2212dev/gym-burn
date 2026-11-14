@@ -24,9 +24,11 @@ export function BeltControls() {
   const control = useTreadmill((s) => s.control);
   const belt = useTreadmill((s) => s.belt);
   const startBlocked = useTreadmill((s) => s.startBlocked);
+  // Sem FTMS, o 0xFFF0 ainda pode ser ativado na Sonda: aí os botões valem.
+  const vendorAvailable = useTreadmill((s) => s.vendor.available);
   const { start, pause, stop } = useTreadmillActions();
 
-  if (control === 'unavailable') {
+  if (control === 'unavailable' && !vendorAvailable) {
     return (
       <Text style={[styles.readOnly, { color: theme.text }]}>
         Esta esteira só transmite dados por Bluetooth. Ajuste velocidade e inclinação pelo painel

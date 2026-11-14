@@ -1,9 +1,9 @@
 import { createBleManagerTransport } from '@/ble/ble-manager-transport';
-import { FirstTestGuide } from '@/guide/first-test-guide';
 import { createRecorder, type DisposableRecorder } from '@/logging/create-recorder';
 import { installGlobalErrorTrace } from '@/logging/global-errors';
 import { SIMULATED_DEVICE_ID, SimulatedTreadmillTransport } from '@/simulator/simulated-treadmill';
 import { TreadmillSession } from '@/treadmill/treadmill-session';
+import { createVendorMappingStorage } from '@/vendor/mapping-storage';
 
 /** Os serviços que vivem durante toda a execução do app. */
 export interface AppServices {
@@ -11,12 +11,10 @@ export interface AppServices {
   recorder: DisposableRecorder;
   /** A sessão com a esteira: rádio de verdade, com a esteira simulada para o modo demonstração. */
   session: TreadmillSession;
-  /** O roteiro do primeiro teste na esteira real. */
-  guide: FirstTestGuide;
 }
 
 export function createAppServices(): AppServices {
-  // O gravador vem primeiro: a sessão e o roteiro escrevem nele desde a primeira linha.
+  // O gravador vem primeiro: a sessão escreve nele desde a primeira linha.
   const recorder = createRecorder();
   // O arquivo só nasce na primeira linha: sem esta, abrir o app e não tocar em nada não deixaria rastro.
   recorder.write({ at: Date.now(), kind: 'info', text: 'App aberto', hex: null });
@@ -26,7 +24,13 @@ export function createAppServices(): AppServices {
     ble: createBleManagerTransport(),
     demo: { transport: new SimulatedTreadmillTransport(), deviceId: SIMULATED_DEVICE_ID },
     trace: recorder.write,
+    // O protocolo do 0xFFF0 descoberto na academia fica salvo entre execuções.
+    vendorStorage: createVendorMappingStorage(),
   });
-  const guide = new FirstTestGuide({ session, trace: recorder.write });
-  return { recorder, session, guide };
+  // Carrega o mapeamento salvo sem atrasar a abertura do app. Numa execução nova o
+  // controle experimental já nasce com o último protocolo configurado.
+  void Promise.resolve()
+    .then(() => session.restoreVendorMapping())
+    .catch(() => undefined);
+  return { recorder, session };
 }

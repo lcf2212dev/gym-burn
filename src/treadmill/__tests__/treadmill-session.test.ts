@@ -12,6 +12,7 @@ import {
   DEVICE_INFORMATION_SERVICE,
   FTMS,
   bytesToHex,
+  hexToBytes,
   encodePause,
   encodeRequestControl,
   encodeSetTargetInclination,
@@ -21,6 +22,7 @@ import {
   sameUuid,
   uuid16,
 } from '@/ftms';
+import { parseGizwitsFrame } from '@/gizwits/frame';
 import {
   SIMULATED_DEVICE_ID,
   SimulatedTreadmillTransport,
@@ -40,6 +42,12 @@ afterEach(() => {
 });
 
 const R = ControlPointResult;
+
+// UUIDs do canal proprietário 0xFFF0 (o mesmo do app AFG Pro).
+const VENDOR_SERVICE = uuid16(0xfff0);
+const VENDOR_FFF1 = uuid16(0xfff1);
+const VENDOR_FFF3 = uuid16(0xfff3);
+const VENDOR_FFF4 = uuid16(0xfff4);
 
 // Comandos em hexadecimal, como aparecem no log e no transporte.
 const REQUEST_CONTROL = bytesToHex(encodeRequestControl());
@@ -92,6 +100,14 @@ interface Hooks {
    * lança nesse caso, o que esconde o que a sessão faria depois de a conexão acabar.
    */
   cacheCharacteristics?: boolean;
+  /**
+   * Canal proprietário 0xFFF0: faz o aparelho expor `FFF1`/`FFF3`/`FFF4` e
+   * responde à escrita no `FFF3` entregando `reply(...)` no `FFF4` assinado.
+   * Sem isso o simulador não tem o serviço, como a esteira de teste.
+   */
+  vendor?: {
+    reply?: (data: Uint8Array, service: string, uuid: string) => Uint8Array | null;
+  };
 }
 
 interface Rig {
@@ -118,6 +134,7 @@ function createRig(
   const deviceInformationReads: string[] = [];
   const disconnects = { count: 0 };
   let sink: ((data: Uint8Array) => void) | null = null;
+  let vendorSink: ((data: Uint8Array) => void) | null = null;
 
   const tap = (inner: BleConnection, cachedFtms: CharacteristicInfo[] | null): BleConnection => {
     const base: BleConnection = {
@@ -125,6 +142,13 @@ function createRig(
       deviceId: inner.deviceId,
       name: inner.name,
       getCharacteristics: async (service) => {
+        if (hooks.vendor && sameUuid(service, VENDOR_SERVICE)) {
+          return [
+            { uuid: VENDOR_FFF1, canRead: true, canWrite: false, canNotify: false, canIndicate: false },
+            { uuid: VENDOR_FFF3, canRead: false, canWrite: true, canNotify: false, canIndicate: false },
+            { uuid: VENDOR_FFF4, canRead: false, canWrite: false, canNotify: true, canIndicate: false },
+          ] satisfies CharacteristicInfo[];
+        }
         const open = () =>
           cachedFtms && sameUuid(service, FTMS.service)
             ? Promise.resolve(cachedFtms)
@@ -162,6 +186,16 @@ function createRig(
       },
       write: async (service, uuid, data) => {
         writes.push(bytesToHex(data));
+        if (
+          hooks.vendor &&
+          sameUuid(service, VENDOR_SERVICE) &&
+          (sameUuid(uuid, VENDOR_FFF3) || sameUuid(uuid, VENDOR_FFF1))
+        ) {
+          // O módulo responde no FFF4 (o mesmo callback da assinatura abaixo).
+          const reply = hooks.vendor.reply ? hooks.vendor.reply(data, service, uuid) : null;
+          if (reply) vendorSink?.(reply);
+          return;
+        }
         const forward = () => inner.write(service, uuid, data);
         if (hooks.write) {
           await hooks.write(data, forward);
@@ -170,6 +204,10 @@ function createRig(
         }
       },
       subscribe: async (service, uuid, onValue) => {
+        if (hooks.vendor && sameUuid(service, VENDOR_SERVICE) && sameUuid(uuid, VENDOR_FFF4)) {
+          vendorSink = onValue;
+          return { remove: () => { vendorSink = null; } } satisfies BleSubscription;
+        }
         if (sameUuid(uuid, FTMS.machineStatus) && hooks.suppressMachineStatus) {
           return { remove: () => undefined } satisfies BleSubscription;
         }
@@ -3616,3 +3654,283 @@ describe('sonda GATT', () => {
   });
 });
 
+
+describe('opcodes vendor do FTMS (0x7E/0x7F)', () => {
+  const VENDOR_7E = '7E';
+  const VENDOR_7F = '7F';
+
+  it('não envia com a lona andando e explica o bloqueio', async () => {
+    const rig = createRig();
+    await startBelt(rig);
+    rig.writes.length = 0;
+
+    rig.session.actions.sendVendorOpcode(0x7e);
+
+    expect(rig.writes).not.toContain(VENDOR_7E);
+    expect(snap(rig).vendorOpcodeProbe).toEqual(
+      expect.objectContaining({
+        opCode: 0x7e,
+        status: 'blocked',
+        detail: expect.stringContaining('lona'),
+      }),
+    );
+  });
+
+  it('envia 0x7E com a esteira parada, pede o controle e lê o delay da resposta', async () => {
+    const rig = createRig();
+    await connect(rig);
+    // O teste exige uma leitura de velocidade mostrando a esteira parada.
+    await advance(1100);
+    expect(snap(rig).metrics.speedKmh).toBe(0);
+    rig.hooks.indication = (data) =>
+      data[1] === 0x7e ? Uint8Array.of(ControlPointOp.ResponseCode, 0x7e, R.Success, 0x0a) : data;
+
+    rig.session.actions.sendVendorOpcode(0x7e);
+    await advance(1500);
+
+    expect(rig.writes).toContain(REQUEST_CONTROL);
+    expect(rig.writes).toContain(VENDOR_7E);
+    expect(snap(rig).control).toBe('granted');
+    expect(snap(rig).vendorOpcodeProbe).toEqual(
+      expect.objectContaining({
+        opCode: 0x7e,
+        status: 'answered',
+        resultCode: R.Success,
+        parameterHex: '0A',
+        detail: 'Success',
+      }),
+    );
+    expect(snap(rig).notice?.kind).toBe('success');
+  });
+
+  it('registra a recusa da esteira (Op Code Not Supported) sem inventar sucesso', async () => {
+    const rig = createRig();
+    await connect(rig);
+    await advance(1100);
+
+    rig.session.actions.sendVendorOpcode(0x7f);
+    await advance(1500);
+
+    expect(rig.writes).toContain(VENDOR_7F);
+    expect(snap(rig).vendorOpcodeProbe).toEqual(
+      expect.objectContaining({
+        opCode: 0x7f,
+        status: 'answered',
+        resultCode: R.OpCodeNotSupported,
+        parameterHex: null,
+        detail: 'Op Code Not Supported',
+      }),
+    );
+  });
+
+  it('ignora op code que não é vendor', async () => {
+    const rig = createRig();
+    await connect(rig);
+    rig.writes.length = 0;
+
+    rig.session.actions.sendVendorOpcode(0x02);
+    await advance(200);
+
+    expect(rig.writes).toEqual([]);
+    expect(snap(rig).vendorOpcodeProbe).toBeNull();
+  });
+
+  it('bloqueia no modo demonstração (não existe rádio)', async () => {
+    const rig = createRig();
+    rig.session.actions.openDemo();
+    await advance(200);
+    expect(snap(rig).mode).toBe('demo');
+    rig.writes.length = 0;
+
+    rig.session.actions.sendVendorOpcode(0x7e);
+
+    expect(rig.writes).toEqual([]);
+    expect(snap(rig).vendorOpcodeProbe).toEqual(
+      expect.objectContaining({ status: 'blocked', detail: expect.stringContaining('esteira real') }),
+    );
+  });
+});
+
+// --- Teste automático do protocolo Gizwits (AFG Pro) --------------------------
+
+describe('teste automático do canal Gizwits (0xFFF0)', () => {
+  const MACHINE_INFO_FRAME = '55 AA 00 00 01 02 00 00 00 00';
+  const replyFrame = () =>
+    Uint8Array.of(0x55, 0xaa, 0x00, 0x00, 0x01, 0x02, 0x04, 0x00, 0xaa, 0xbb, 0x0d, 0xf0, 0x00, 0x01, 0x02, 0x03);
+
+  it('pede machine info, segue nos testes seguros e termina compatível', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = { reply: () => replyFrame() };
+    await connect(rig);
+
+    rig.session.actions.runGizwitsProbe();
+    await advance(300);
+
+    const probe = snap(rig).gizwitsProbe;
+    expect(probe.status).toBe('compatible');
+    expect(probe.compatible).toBe(true);
+    expect(probe.replyHex).toMatch(/^55 AA/);
+    expect(probe.replyCommand).toBe('machine info');
+    expect(probe.attempts.map((attempt) => attempt.name)).toEqual([
+      'machine-info',
+      'workout-data',
+      'stop-idle',
+      'pause-idle',
+    ]);
+    expect(probe.attempts.every((attempt) => attempt.status === 'reply')).toBe(true);
+    expect(rig.writes).toContain(MACHINE_INFO_FRAME);
+  });
+
+  it('sem resposta, tenta FFF1, sequência, CRC invertido e ack, e termina incompatível', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = { reply: () => null };
+    await connect(rig);
+
+    rig.session.actions.runGizwitsProbe();
+    await advance(45000);
+
+    const probe = snap(rig).gizwitsProbe;
+    expect(probe.status).toBe('incompatible');
+    expect(probe.compatible).toBe(false);
+    expect(probe.attempts.map((attempt) => attempt.name)).toEqual([
+      'machine-info',
+      'fff1',
+      'seq',
+      'crc-be',
+      'aa55',
+      'pause-std',
+      'ack',
+      'disc-fff3-00',
+      'disc-fff3-01',
+      'disc-fff3-55',
+      'disc-fff3-aa',
+      'disc-fff3-at',
+      'disc-fff1-00',
+      'disc-fff1-55',
+      'disc-fff1-aa',
+    ]);
+    expect(probe.attempts.every((attempt) => attempt.status === 'timeout')).toBe(true);
+    expect(rig.writes).toContain(MACHINE_INFO_FRAME);
+  });
+
+  it('se só o FFF1 responde, marca compatível pela variante', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = {
+      reply: (_data, _service, uuid) => (sameUuid(uuid, VENDOR_FFF1) ? replyFrame() : null),
+    };
+    await connect(rig);
+
+    rig.session.actions.runGizwitsProbe();
+    await advance(8000);
+
+    const probe = snap(rig).gizwitsProbe;
+    expect(probe.status).toBe('compatible');
+    expect(probe.compatible).toBe(true);
+    expect(probe.attempts.find((attempt) => attempt.name === 'fff1')?.status).toBe('reply');
+  });
+
+  it('com a lona andando não escreve e pede para parar no painel', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = {};
+    await startBelt(rig);
+    rig.writes.length = 0;
+
+    rig.session.actions.runGizwitsProbe();
+    await advance(200);
+
+    const probe = snap(rig).gizwitsProbe;
+    expect(probe.status).toBe('waitingBelt');
+    expect(probe.hint).toContain('pare a esteira');
+    expect(rig.writes).not.toContain(MACHINE_INFO_FRAME);
+  });
+
+  it('se a varredura de bytes receber qualquer dado, marca compatível', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = {
+      reply: (data, _service, uuid) =>
+        sameUuid(uuid, VENDOR_FFF1) && data.length === 1 && data[0] === 0
+          ? Uint8Array.of(0x7e)
+          : null,
+    };
+    await connect(rig);
+
+    rig.session.actions.runGizwitsProbe();
+    await advance(35000);
+
+    const probe = snap(rig).gizwitsProbe;
+    expect(probe.status).toBe('compatible');
+    expect(probe.compatible).toBe(true);
+    expect(probe.detail).toContain('varredura');
+    expect(probe.attempts.find((attempt) => attempt.name === 'disc-fff1-00')?.status).toBe('reply');
+  });
+
+  it('no modo demonstração só marca indisponível, sem escrever', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = {};
+    rig.session.actions.openDemo();
+    await advance(200);
+
+    rig.session.actions.runGizwitsProbe();
+    await advance(50);
+
+    expect(snap(rig).gizwitsProbe.status).toBe('unavailable');
+    expect(rig.writes).not.toContain(MACHINE_INFO_FRAME);
+  });
+});
+
+
+describe('controle pelo canal alternativo (Gizwits)', () => {
+  const replyFrame = () =>
+    Uint8Array.of(0x55, 0xaa, 0x00, 0x00, 0x01, 0x02, 0x04, 0x00, 0xaa, 0xbb, 0x0d, 0xf0, 0x00, 0x01, 0x02, 0x03);
+
+  const lastFrame = (rig: Rig) => parseGizwitsFrame(hexToBytes(rig.writes[rig.writes.length - 1]));
+
+  async function compatibleRig(): Promise<Rig> {
+    const rig = createRig();
+    rig.hooks.vendor = { reply: () => replyFrame() };
+    await connect(rig);
+    rig.session.actions.runGizwitsProbe();
+    await advance(300);
+    expect(snap(rig).gizwitsProbe.status).toBe('compatible');
+    rig.writes.length = 0;
+    return rig;
+  }
+
+  it('Iniciar vira o frame de start workout (lingo 3, cmd 2, 17 bytes)', async () => {
+    const rig = await compatibleRig();
+
+    rig.session.actions.start();
+    await advance(10);
+
+    expect(rig.writes).toHaveLength(1);
+    const frame = lastFrame(rig)!;
+    expect(frame.lingo).toBe(3);
+    expect(frame.command).toBe(2);
+    expect(frame.payload).toHaveLength(17);
+  });
+
+  it('Inclinação e Parar viram frames do canal alternativo', async () => {
+    const rig = await compatibleRig();
+
+    rig.session.actions.changeInclination(0.5);
+    await advance(10);
+    expect(lastFrame(rig)).toEqual(expect.objectContaining({ lingo: 3, command: 6 }));
+
+    await advance(300);
+    rig.session.actions.stop();
+    await advance(10);
+    expect(lastFrame(rig)).toEqual(expect.objectContaining({ lingo: 1, command: 20 }));
+  });
+
+  it('sem canal compatível, os controles não escrevem no FFF3', async () => {
+    const rig = createRig();
+    rig.hooks.vendor = { reply: () => null };
+    await connect(rig);
+    rig.writes.length = 0;
+
+    rig.session.actions.changeInclination(0.5);
+    await advance(10);
+
+    expect(rig.writes.filter((write) => write.startsWith('55 AA'))).toHaveLength(0);
+  });
+});

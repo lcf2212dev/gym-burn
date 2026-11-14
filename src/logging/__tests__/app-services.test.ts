@@ -4,7 +4,6 @@ import { installGlobalErrorTrace } from '@/logging/global-errors';
 
 // Só a ligação entre os serviços interessa aqui: o resto é substituído.
 jest.mock('@/ble/ble-manager-transport', () => ({ createBleManagerTransport: jest.fn() }));
-jest.mock('@/guide/first-test-guide', () => ({ FirstTestGuide: jest.fn() }));
 jest.mock('@/simulator/simulated-treadmill', () => ({
   SIMULATED_DEVICE_ID: 'simulado',
   SimulatedTreadmillTransport: jest.fn(),

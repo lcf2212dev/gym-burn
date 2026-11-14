@@ -1,96 +1,87 @@
-import { router } from 'expo-router';
 import { useKeepAwake } from 'expo-keep-awake';
-import { useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useEffect } from 'react';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ActionButton } from '@/components/action-button';
 import { AmbientGlow } from '@/components/ambient-glow';
-import { BeltControls } from '@/components/belt-controls';
 import { BrandMark } from '@/components/brand-mark';
-import { ControlColumn } from '@/components/control-column';
-import { GuideStrip } from '@/components/guide-strip';
-import { IdentityCheck } from '@/components/identity-check';
-import { MetricGrid } from '@/components/metric-grid';
+import { ControlPanel } from '@/components/control-panel';
+import { GizwitsProbeCard } from '@/components/gizwits-probe-card';
+import { GizwitsProbeHintBanner } from '@/components/gizwits-probe-hint-banner';
+import { CopilotBanner } from '@/components/copilot-banner';
+import { MonitorPanel } from '@/components/monitor-panel';
 import { NoticeBanner } from '@/components/notice-banner';
-import { Pill } from '@/components/pill';
 import { StaleDataNotice } from '@/components/stale-data-notice';
 import { Surface } from '@/components/surface';
-import {
-  LabelType,
-  MaxContentWidth,
-  Neon,
-  Spacing,
-  TitleType,
-  speedHeatColor,
-  withAlpha,
-} from '@/constants/theme';
+import { MaxContentWidth, Spacing, TitleType } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { DiagnosticsModal } from '@/screens/diagnostics-modal';
-import { T600X_INCLINATION_RANGE, T600X_SPEED_RANGE } from '@/treadmill/t600x';
+import {
+  correctInclinationPercent,
+  T600X_INCLINATION_RANGE,
+} from '@/treadmill/t600x';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
-import { inclinationSteps, isBeltMoving, rangeFraction, speedSteps } from '@/utils/controls';
-import { CONTROL_STATE_LABELS } from '@/utils/labels';
-
-const UNDECLARED_CONTROL = 'A esteira não declara este controle; o comando pode ser recusado.';
 
 /**
- * Painel do treino: inclinação à esquerda e velocidade à direita, como no
- * console. É a tela lida de longe, apoiada no painel da esteira: fundo
- * carbono, dois cartões com números de placar e o rodapé com as teclas da lona.
+ * Painel depois de conectar: o copiloto diz o que fazer no topo, e logo abaixo
+ * fica o monitoramento — velocidade, inclinação, batimentos e as demais
+ * medidas. O app não tem botões de comando: quem controla a esteira é o painel.
  */
 export function DashboardScreen() {
   // A pessoa está correndo com o celular apoiado no painel: a tela não pode apagar.
   useKeepAwake();
 
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
-  const mode = useTreadmill((s) => s.mode);
   const phase = useTreadmill((s) => s.phase);
   const deviceName = useTreadmill((s) => s.device?.name ?? null);
-  const capabilities = useTreadmill((s) => s.capabilities);
-  const control = useTreadmill((s) => s.control);
   const identityConfirmed = useTreadmill((s) => s.identityConfirmed);
   const belt = useTreadmill((s) => s.belt);
-  const busy = useTreadmill((s) => s.busy);
   const metrics = useTreadmill((s) => s.metrics);
-  const targetSpeed = useTreadmill((s) => s.targetSpeedKmh);
-  const targetInclination = useTreadmill((s) => s.targetInclinationPercent);
+  const declaredInclinationRange = useTreadmill(
+    (s) => s.capabilities?.inclinationRange ?? T600X_INCLINATION_RANGE,
+  );
+  const gizwitsStatus = useTreadmill((s) => s.gizwitsProbe.status);
   const actions = useTreadmillActions();
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
-  // Durante a desconexão as capacidades podem já ter sido limpas.
-  const speedRange = capabilities?.speedRange ?? T600X_SPEED_RANGE;
-  const inclinationRange = capabilities?.inclinationRange ?? T600X_INCLINATION_RANGE;
-  const targets = capabilities?.feature?.targets ?? null;
+  // O usuário tocou no nome da esteira dele para conectar: isso já é a
+  // confirmação. O estado da sessão guarda essa confirmação para a sonda.
+  useEffect(() => {
+    if (!identityConfirmed && phase === 'connected') {
+      actions.confirmIdentity();
+    }
+  }, [actions, identityConfirmed, phase]);
 
-  // Sem Control Point não há o que comandar; sem a confirmação de que a esteira
-  // é a do usuário, a sessão recusa os comandos.
-  const canControl = control !== 'unavailable' && identityConfirmed;
-  // Lona freando depois de um Parar ainda tem velocidade, mas não está rodando.
-  const beltMoving = belt === 'running' && isBeltMoving(metrics.speedKmh);
+  // Assim que a esteira está confirmada, o painel faz sozinho o teste do canal
+  // alternativo (Gizwits): assina o FFF4, pede “machine info” e mostra o
+  // resultado no cartão. Só roda uma vez por conexão.
+  useEffect(() => {
+    const readyForProbe =
+      gizwitsStatus === 'idle' || (gizwitsStatus === 'waitingBelt' && belt !== 'running');
+    if (identityConfirmed && readyForProbe) {
+      actions.runGizwitsProbe();
+    }
+  }, [actions, belt, gizwitsStatus, identityConfirmed]);
+
+  // O FTMS desta família informa a inclinação ~6,667× maior que o painel; a
+  // faixa declarada (0–50 %/3 %) é template do firmware e denuncia a escala.
+  const displayMetrics = {
+    ...metrics,
+    inclinationPercent: correctInclinationPercent(
+      metrics.inclinationPercent,
+      declaredInclinationRange,
+    ),
+  };
+
   const disconnecting = phase === 'disconnecting';
-
-  // A cor do estado do controle é fixa: menta quando o controle é nosso,
-  // vermelho quando a esteira recusa ou retoma, ciano enquanto negocia.
-  const controlTone =
-    control === 'granted'
-      ? 'mint'
-      : control === 'denied' || control === 'lost'
-        ? 'red'
-        : control === 'unavailable'
-          ? 'neutral'
-          : 'cyan';
 
   return (
     <SafeAreaView
-      // A borda de baixo é do rodapé fixo.
       edges={['top', 'left', 'right']}
       style={[styles.safe, { backgroundColor: theme.background }]}>
-      {/* Halo discreto que tira o preto chapado do fundo; fica atrás de tudo. */}
       <AmbientGlow intensity={0.5} />
-      {/* Fora da rolagem, como o rodapé: a rolagem encolhe, Parar continua à vista. */}
-      <GuideStrip />
+      {/* Fora da rolagem: no topo, a ação pedida pelo teste (se houver) e a instrução do copiloto. */}
+      <GizwitsProbeHintBanner />
+      <CopilotBanner />
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.content}>
           <View style={styles.header}>
@@ -103,40 +94,12 @@ export function DashboardScreen() {
                 disabled={disconnecting}
               />
             </View>
-            <View style={styles.nameRow}>
-              <Text
-                style={[styles.deviceName, TitleType, { color: theme.text }]}
-                numberOfLines={1}
-                accessibilityRole="header">
-                {deviceName ?? 'Esteira sem nome'}
-              </Text>
-              {mode === 'demo' ? <Pill label="Demonstração" tone="neutral" /> : null}
-            </View>
-            <View style={styles.statusRow}>
-              <View style={styles.statusLeft} accessibilityLiveRegion="polite">
-                <Pill label={CONTROL_STATE_LABELS[control]} tone={controlTone} dot />
-                {busy ? (
-                  <View style={styles.busy}>
-                    <ActivityIndicator size="small" color={theme.textSecondary} />
-                    <Text style={[styles.busyText, LabelType, { color: theme.textSecondary }]}>
-                      Enviando…
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
-              <View style={styles.headerActions}>
-                <ActionButton
-                  variant="text"
-                  label="Coleta"
-                  onPress={() => router.push('/coleta')}
-                />
-                <ActionButton
-                  variant="text"
-                  label="Diagnóstico"
-                  onPress={() => setDiagnosticsOpen(true)}
-                />
-              </View>
-            </View>
+            <Text
+              style={[styles.deviceName, TitleType, { color: theme.text }]}
+              numberOfLines={1}
+              accessibilityRole="header">
+              {deviceName ?? 'Esteira'}
+            </Text>
           </View>
 
           {belt === 'safetyKey' ? (
@@ -152,71 +115,18 @@ export function DashboardScreen() {
           <NoticeBanner />
           <StaleDataNotice />
 
-          {/* Dois cartões de controle lado a lado, sem divisor: o próprio vão separa. */}
-          <View style={styles.columns}>
-            <Surface tone="raised" style={styles.columnCard}>
-              <ControlColumn
-                title="Inclinação"
-                unit="%"
-                spokenUnit="por cento"
-                noun="inclinação"
-                value={metrics.inclinationPercent}
-                target={targetInclination}
-                range={inclinationRange}
-                steps={inclinationSteps(inclinationRange)}
-                onChange={actions.changeInclination}
-                disabled={!canControl}
-                accentColor={theme.incline}
-                meterColor={theme.incline}
-                warning={canControl && targets?.inclination === false ? UNDECLARED_CONTROL : null}
-              />
-            </Surface>
-            <Surface tone="raised" style={styles.columnCard}>
-              <ControlColumn
-                title="Velocidade"
-                unit="km/h"
-                spokenUnit="km/h"
-                noun="velocidade"
-                value={metrics.speedKmh}
-                target={targetSpeed}
-                range={speedRange}
-                steps={speedSteps(speedRange)}
-                onChange={actions.changeSpeed}
-                // O app nunca põe a lona em movimento por um "+": só o botão Iniciar.
-                disabled={!canControl || !beltMoving}
-                accentColor={Neon.volt}
-                meterColor={speedHeatColor(rangeFraction(metrics.speedKmh, speedRange))}
-                hint={canControl && !beltMoving ? 'Inicie a lona para ajustar a velocidade.' : null}
-                warning={canControl && targets?.speed === false ? UNDECLARED_CONTROL : null}
-              />
-            </Surface>
-          </View>
+          <MonitorPanel metrics={displayMetrics} />
 
-          <MetricGrid metrics={metrics} />
+          <ControlPanel />
+
+          <GizwitsProbeCard />
 
           <Text style={[styles.footnote, { color: theme.textSecondary }]}>
-            Para parar pela esteira, aperte o botão vermelho Emergency Stop ou puxe a chave de
-            segurança.
+            Para parar ou mudar velocidade e inclinação, use o painel da esteira. O botão vermelho
+            (Emergency Stop) e a chave de segurança são a parada real.
           </Text>
         </View>
       </ScrollView>
-
-      {/* Fora da rolagem: Parar fica sempre à vista. */}
-      <View
-        style={[
-          styles.footer,
-          {
-            borderTopColor: withAlpha(Neon.volt, 0.25),
-            backgroundColor: theme.surfaceSunken,
-            paddingBottom: insets.bottom + Spacing.two,
-          },
-        ]}>
-        <View style={styles.footerContent}>
-          {identityConfirmed ? <BeltControls /> : <IdentityCheck />}
-        </View>
-      </View>
-
-      <DiagnosticsModal visible={diagnosticsOpen} onClose={() => setDiagnosticsOpen(false)} />
     </SafeAreaView>
   );
 }
@@ -229,14 +139,13 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingHorizontal: Spacing.three,
     paddingTop: Spacing.three,
-    paddingBottom: Spacing.two,
+    paddingBottom: Spacing.four,
   },
   content: {
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
     gap: Spacing.three,
-    paddingBottom: Spacing.five,
   },
   header: {
     gap: Spacing.one,
@@ -247,40 +156,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: Spacing.two,
   },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
   deviceName: {
     flexShrink: 1,
     fontSize: 22,
     lineHeight: 26,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
-  statusLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: Spacing.two,
-  },
-  busy: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.one,
-  },
-  busyText: {
-    letterSpacing: 1.4,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: 'auto',
   },
   safetyCard: {
     paddingVertical: Spacing.two + Spacing.half,
@@ -290,28 +169,8 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     fontWeight: 700,
   },
-  columns: {
-    flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: Spacing.two,
-  },
-  columnCard: {
-    flex: 1,
-    paddingHorizontal: Spacing.two + Spacing.one,
-    paddingVertical: Spacing.two + Spacing.one,
-  },
   footnote: {
     fontSize: 13,
     lineHeight: 19,
-  },
-  footer: {
-    borderTopWidth: 1,
-    paddingTop: Spacing.three,
-    paddingHorizontal: Spacing.three,
-  },
-  footerContent: {
-    width: '100%',
-    maxWidth: MaxContentWidth,
-    alignSelf: 'center',
   },
 });

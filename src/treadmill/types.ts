@@ -1,5 +1,6 @@
 import type { ScannedDevice, ServiceInfo } from '@/ble/transport';
 import type { FitnessMachineFeature, SupportedRange, TrainingStatus } from '@/ftms';
+import type { VendorMapping, VendorState } from '@/vendor/types';
 
 /** De onde vem a esteira: o rádio de verdade ou a esteira simulada. */
 export type SessionMode = 'ble' | 'demo';
@@ -65,6 +66,26 @@ export interface TreadmillMetrics {
   updatedAt: number | null;
 }
 
+/**
+ * Resultado da última tentativa de enviar um op code proprietário no Control
+ * Point do FTMS (`0x7E`/`0x7F`). Só existe para o experimento de campo da Sonda:
+ * é a única forma de saber se esse firmware aceita extensões do fabricante.
+ */
+export interface VendorOpcodeProbe {
+  opCode: number;
+  /** Nome curto do op code (ex.: "Reset Console Resource (Device Update)"). */
+  label: string;
+  status: 'pending' | 'answered' | 'timeout' | 'failed' | 'blocked';
+  /** `Date.now()` do pedido. */
+  at: number;
+  /** Result code da response (`Success`, `Control Not Permitted`, …); `null` se não houve. */
+  resultCode: number | null;
+  /** Parâmetro devolvido junto da response, em hexadecimal (ex.: o delay do 0x7E). */
+  parameterHex: string | null;
+  /** Explicação curta do desfecho, pronta para exibir. */
+  detail: string | null;
+}
+
 /** Os comandos que o app envia à esteira. */
 export type CommandKind = 'start' | 'pause' | 'stop' | 'speed' | 'inclination';
 
@@ -128,6 +149,56 @@ export interface LogEntry {
  * Estado completo da sessão. É imutável: cada mudança gera um objeto novo, e
  * as partes que não mudaram mantêm a mesma referência.
  */
+export type GizwitsProbeStatus =
+  | 'idle'
+  | 'running'
+  | 'waitingBelt'
+  | 'compatible'
+  | 'incompatible'
+  | 'error'
+  | 'unavailable';
+
+export type GizwitsAttemptStatus = 'pending' | 'running' | 'reply' | 'timeout' | 'error' | 'skipped';
+
+/** Uma tentativa do plano automático de descoberta do canal alternativo. */
+export interface GizwitsAttempt {
+  /** Identificador curto (machine-info, fff1, seq, crc-be, ack, workout-data, stop-idle, pause-idle). */
+  name: string;
+  /** Texto em português para a tela. */
+  label: string;
+  status: GizwitsAttemptStatus;
+  /** Resposta recebida (hex), quando houve. */
+  replyHex: string | null;
+  detail: string | null;
+}
+
+/**
+ * Plano automático de teste do protocolo Gizwits no 0xFFF0 (o do app AFG Pro).
+ *
+ * O app tenta primeiro o pedido de “machine info”; conforme a resposta, segue
+ * com consultas de leitura e, se não houver resposta, tenta variantes de canal,
+ * sequência e CRC. Se precisar de uma ação do usuário (por exemplo, parar a
+ * lona), `hint` traz a frase para a faixa do topo.
+ */
+export interface GizwitsProbeSnapshot {
+  status: GizwitsProbeStatus;
+  /** Tentativa em andamento, para a tela. */
+  stage: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** Resposta crua da primeira tentativa bem-sucedida. */
+  replyHex: string | null;
+  replyBytes: number;
+  replyCommand: string | null;
+  /** O canal respondeu em pelo menos uma tentativa? `null` enquanto não terminou. */
+  compatible: boolean | null;
+  attempts: GizwitsAttempt[];
+  /** Ação que o usuário precisa fazer; aparece na faixa discreta do topo. */
+  hint: string | null;
+  /** Resumo em linguagem simples. */
+  detail: string | null;
+}
+
 export interface TreadmillSnapshot {
   mode: SessionMode;
   scan: ScanState;
@@ -165,6 +236,20 @@ export interface TreadmillSnapshot {
   notice: Notice | null;
   /** Log de diagnóstico, do mais antigo para o mais novo, limitado em tamanho. */
   log: LogEntry[];
+  /**
+   * Controle experimental pelo canal proprietário 0xFFF0 (o FTMS desta esteira
+   * recusa comandos). Desligado por padrão: os botões continuam no FTMS até o
+   * usuário ativar e configurar um protocolo na Sonda.
+   */
+  vendor: VendorState;
+  /**
+   * Último teste de op code vendor do FTMS (`0x7E`/`0x7F`) feito na Sonda.
+   * Fica no snapshot depois de uma queda de conexão para o usuário poder ler o
+   * resultado (o console pode reiniciar e derrubar o link justamente no 0x7E).
+   */
+  vendorOpcodeProbe: VendorOpcodeProbe | null;
+  /** Teste automático do protocolo Gizwits no 0xFFF0 (feito logo após conectar). */
+  gizwitsProbe: GizwitsProbeSnapshot;
 }
 
 /**
@@ -189,6 +274,29 @@ export interface TreadmillActions {
   stop(): void;
   dismissNotice(): void;
   clearLog(): void;
+  /**
+   * Liga/desliga o controle experimental pelo 0xFFF0. Exige conexão, a esteira
+   * confirmada, o serviço proprietário disponível e um mapeamento configurado.
+   */
+  setVendorMode(enabled: boolean): void;
+  /** Aplica (e persiste) um mapeamento de protocolo do canal proprietário. */
+  setVendorMapping(mapping: VendorMapping): void;
+  /** Roda a varredura segura de bytes do 0xFFF0; tudo vai para o registro. */
+  runVendorDiscovery(): void;
+  /** Interrompe a varredura em andamento. */
+  cancelVendorDiscovery(): void;
+  /**
+   * Envia um op code vendor do FTMS no Control Point (`0x7E` ou `0x7F`) e
+   * guarda a resposta em `vendorOpcodeProbe`. Só aceita com a esteira parada,
+   * a conexão confirmada e o controle liberado; nunca atualiza firmware.
+   */
+  sendVendorOpcode(opCode: number): void;
+  /**
+   * Roda o teste automático do protocolo Gizwits no 0xFFF0 (pede machine info e
+   * escuta o FFF4). Só leitura; não mexe na lona. O painel chama sozinho uma vez
+   * por conexão; a Sonda permite repetir.
+   */
+  runGizwitsProbe(): void;
 }
 
 /**

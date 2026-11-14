@@ -29,3 +29,36 @@ export const T600X_INCLINATION_RANGE: RangeInfo = {
   step: 0.5,
   source: 'assumed',
 };
+
+/**
+ * Fator de conversão do contador interno de inclinação desta família de firmware
+ * (raw×0,015 = percentual real). O app lê o campo do 0x2ACD como 0,1 % (raw/10),
+ * então a leitura sai 6,667× maior; este fator converte a leitura exibida.
+ */
+export const T600X_INCLINATION_READING_FACTOR = 0.15;
+
+/**
+ * Corrige a inclinação do 0x2ACD para exibição quando a faixa declarada pelo FTMS
+ * denuncia o template do firmware (0–50 %/3 % na T600X). Com faixa plausível, a
+ * leitura é devolvida como veio.
+ */
+export function correctInclinationPercent(percent: number | null, range: RangeInfo): number | null {
+  if (percent === null) return null;
+  const implausible =
+    range.max > T600X_INCLINATION_RANGE.max || range.step > T600X_INCLINATION_RANGE.step;
+  if (!implausible) return percent;
+  const corrected = percent * T600X_INCLINATION_READING_FACTOR;
+  return Math.min(Math.max(corrected, 0), T600X_INCLINATION_RANGE.max);
+}
+
+/**
+ * Faixa plausível para comandos de inclinação. O FTMS da T600X declara 0–50 % com
+ * passo 3 % (constante de template do firmware), mas a mecânica é 0–15 % com
+ * 0,5 %: quantizar um comando real pela faixa declarada daria saltos e alvos que
+ * a máquina não tem. Uma faixa declarada dentro da ficha é respeitada.
+ */
+export function plausibleInclinationRange(range: RangeInfo): RangeInfo {
+  const implausible =
+    range.max > T600X_INCLINATION_RANGE.max || range.step > T600X_INCLINATION_RANGE.step;
+  return implausible ? T600X_INCLINATION_RANGE : range;
+}
