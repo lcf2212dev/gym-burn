@@ -1,4 +1,4 @@
-import { createBleManagerTransport } from '@/ble/ble-manager-transport';
+import { createTreadmillTransport } from '@/ble/treadmill-transport';
 import { createRecorder, type DisposableRecorder } from '@/logging/create-recorder';
 import { installGlobalErrorTrace } from '@/logging/global-errors';
 import { SIMULATED_DEVICE_ID, SimulatedTreadmillTransport } from '@/simulator/simulated-treadmill';
@@ -21,7 +21,7 @@ export function createAppServices(): AppServices {
   // Um erro que derrube o app na academia precisa estar no arquivo para ser entendido depois.
   installGlobalErrorTrace(recorder.write, recorder.flushSync);
   const session = new TreadmillSession({
-    ble: createBleManagerTransport(),
+    ble: createTreadmillTransport(),
     demo: { transport: new SimulatedTreadmillTransport(), deviceId: SIMULATED_DEVICE_ID },
     trace: recorder.write,
     // O protocolo do 0xFFF0 descoberto na academia fica salvo entre execuções.

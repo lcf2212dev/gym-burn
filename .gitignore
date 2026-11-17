@@ -54,3 +54,9 @@ __pycache__/
 
 # Artefatos de execução do app / capturas
 /.phone/
+
+# Ponte BLE (app Android separado)
+bridge-app/build/
+bridge-app/app/build/
+bridge-app/.gradle/
+bridge-app/local.properties
