@@ -78,9 +78,10 @@ Mesmo que algo mate o processo, o vigia tenta subir o serviço de novo a cada
 
 - É um app separado (`com.gymburn.bridge`): não compartilha permissões nem a
   pasta de espelho do GymBurn.
-- Só fala com o GymBurn em loopback. Em build **release** do GymBurn o Android
-  bloqueia HTTP em texto puro; é preciso liberar `127.0.0.1` num
-  `network_security_config` antes de usar a ponte fora do build de
-  desenvolvimento.
+- Só fala com o GymBurn em loopback. Builds **release** do GymBurn precisam
+  liberar `127.0.0.1` num `network_security_config` (feito no `android/` local:
+  `app/src/main/res/xml/network_security_config.xml` + atributo no manifesto).
+  Como `android/` é gerado (CNG), refaça essa configuração — ou transforme-a num
+  config plugin — depois de um `expo prebuild` limpo.
 - O protocolo da Matrix (canal `0xFFF0`, Gizwits) continua no GymBurn: a ponte
   é GATT genérico.

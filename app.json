@@ -2,7 +2,7 @@
   "expo": {
     "name": "Gym Burn",
     "slug": "gym-burn",
-    "version": "1.3.7",
+    "version": "1.3.8",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "gymburn",
@@ -22,7 +22,7 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.gymburn.app",
       "userInterfaceStyle": "dark",
-      "versionCode": 11
+      "versionCode": 12
     },
     "plugins": [
       "expo-router",
