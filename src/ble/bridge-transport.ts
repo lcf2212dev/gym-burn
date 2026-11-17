@@ -9,6 +9,8 @@ import {
   shortUuid,
 } from '@/ftms';
 
+import { Linking } from 'react-native';
+
 import { BleUnavailableError } from './transport';
 import type {
   BleConnection,
@@ -110,6 +112,28 @@ export async function bridgeAvailable(baseUrl: string = BRIDGE_BASE_URL): Promis
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Evita abrir o atalho da ponte a cada tentativa quando ela não está instalada. */
+let lastBridgeStartAt = 0;
+const BRIDGE_START_COOLDOWN_MS = 5_000;
+
+/**
+ * Acorda a ponte sem o usuário abrir o app dela: o `StartActivity` do app-ponte
+ * sobe o serviço e fecha antes de aparecer. Silencioso quando a ponte não está
+ * instalada.
+ */
+export async function requestBridgeStart(): Promise<void> {
+  const now = Date.now();
+  if (now - lastBridgeStartAt < BRIDGE_START_COOLDOWN_MS) {
+    return;
+  }
+  lastBridgeStartAt = now;
+  try {
+    await Linking.openURL('gymburn-bridge://start');
+  } catch {
+    // App da ponte não instalado, ou o Android recusou abrir o atalho.
   }
 }
 

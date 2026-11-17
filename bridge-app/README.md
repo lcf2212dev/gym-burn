@@ -15,7 +15,12 @@ isso:
 - guarda o endereço da última esteira e reconecta sozinho;
 - reemite o último anúncio da esteira conectada, para o GymBurn reencontrá-la
   na busca mesmo quando ela para de anunciar;
-- expõe tudo por um HTTP **local** (`127.0.0.1:8765`), sem nada exposto na rede.
+- expõe tudo por um HTTP **local** (`127.0.0.1:8765`), sem nada exposto na rede;
+- **vigia**: alarme a cada 60 s + job periódico persistente + `START_STICKY` +
+  receiver de boot. Se o processo morrer (limpeza de memória, atualização do
+  GymBurn, reboot), o serviço volta sozinho;
+- atalho `gymburn-bridge://start`: o próprio GymBurn acorda a ponte quando
+  abre, sem ninguém tocar no app dela.
 
 ## Como o GymBurn usa
 
@@ -54,6 +59,20 @@ adb shell am start -n com.gymburn.bridge/.MainActivity
 
 Na primeira abertura o app pede as permissões de Bluetooth e de notificação.
 O serviço sobe sozinho no boot e volta com `START_STICKY`.
+
+## Deixar sempre ativa no MIUI/HyperOS (uma vez)
+
+O MIUI é agressivo com serviços em segundo plano. No aparelho de teste,
+depois de configurar:
+
+1. **Início automático**: Segurança → Início automático em segundo plano →
+   *Ponte GymBurn* ligado.
+2. **Bateria**: Detalhes do app → Economia de bateria → *Nenhuma restrição*.
+3. **Fixo nos recentes**: no seletor de recentes, mantenha o card pressionado
+   e toque no cadeado — o "limpar tudo" não mata o app.
+
+Mesmo que algo mate o processo, o vigia tenta subir o serviço de novo a cada
+60 s (e o job persistente a cada 15 min, sobrevivendo a reboot).
 
 ## Limitações
 

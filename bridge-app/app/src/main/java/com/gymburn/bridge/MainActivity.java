@@ -106,6 +106,7 @@ public final class MainActivity extends Activity {
         } else {
             startService(intent);
         }
+        BridgeWatchdog.schedule(this);
         main.post(updateTick);
     }
 

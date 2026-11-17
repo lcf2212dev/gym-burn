@@ -4,7 +4,11 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.bluetooth.BluetoothAdapter;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -34,6 +38,20 @@ public final class BridgeService extends Service {
     private BleCentral ble;
     private BridgeHttpServer server;
     private Runnable notificationTick;
+    private boolean receiverRegistered;
+
+    /** Quando o Bluetooth volta, retoma a última esteira sem tocar em nada. */
+    private final BroadcastReceiver bluetoothReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(intent.getAction())) {
+                int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
+                if (state == BluetoothAdapter.STATE_ON && ble != null) {
+                    ble.resume();
+                }
+            }
+        }
+    };
 
     public static BleCentral central() {
         BridgeService local = instance;
@@ -59,6 +77,12 @@ public final class BridgeService extends Service {
         }
         // Retoma a última esteira sem precisar do app: o link nunca fica órfão entre builds.
         ble.resume();
+        BridgeWatchdog.schedule(this);
+        try {
+            registerReceiver(bluetoothReceiver, new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED));
+            receiverRegistered = true;
+        } catch (RuntimeException ignored) {
+        }
         notificationTick = () -> {
             updateNotification();
             main.postDelayed(notificationTick, 2500);
@@ -68,7 +92,17 @@ public final class BridgeService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && "reconnect".equals(intent.getAction()) && ble != null) {
+            ble.resume();
+        }
         return START_STICKY;
+    }
+
+    /** Usuário removeu o app dos recentes: volta em instantes pelo alarme. */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        BridgeWatchdog.ensureSoon(this, 1_500L);
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
@@ -79,6 +113,13 @@ public final class BridgeService extends Service {
     @Override
     public void onDestroy() {
         main.removeCallbacksAndMessages(null);
+        if (receiverRegistered) {
+            try {
+                unregisterReceiver(bluetoothReceiver);
+            } catch (RuntimeException ignored) {
+            }
+            receiverRegistered = false;
+        }
         if (server != null) {
             server.stop();
         }

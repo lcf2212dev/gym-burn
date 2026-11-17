@@ -1,4 +1,4 @@
-import { createTreadmillTransport } from '@/ble/treadmill-transport';
+import { createTreadmillTransport, wakeBridgeIfNeeded } from '@/ble/treadmill-transport';
 import { createRecorder, type DisposableRecorder } from '@/logging/create-recorder';
 import { installGlobalErrorTrace } from '@/logging/global-errors';
 import { SIMULATED_DEVICE_ID, SimulatedTreadmillTransport } from '@/simulator/simulated-treadmill';
@@ -20,6 +20,8 @@ export function createAppServices(): AppServices {
   recorder.write({ at: Date.now(), kind: 'info', text: 'App aberto', hex: null });
   // Um erro que derrube o app na academia precisa estar no arquivo para ser entendido depois.
   installGlobalErrorTrace(recorder.write, recorder.flushSync);
+  // Se a ponte BLE estiver fechada, o atalho dela sobe o serviço de novo.
+  wakeBridgeIfNeeded();
   const session = new TreadmillSession({
     ble: createTreadmillTransport(),
     demo: { transport: new SimulatedTreadmillTransport(), deviceId: SIMULATED_DEVICE_ID },

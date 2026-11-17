@@ -1,5 +1,5 @@
 import { createBleManagerTransport } from './ble-manager-transport';
-import { bridgeAvailable, createBridgeTransport } from './bridge-transport';
+import { bridgeAvailable, createBridgeTransport, requestBridgeStart } from './bridge-transport';
 import type { BleTransport } from './transport';
 
 /**
@@ -13,6 +13,24 @@ import type { BleTransport } from './transport';
  * A escolha é refeita a cada `prepare()`: abrir a ponte com o app já aberto
  * passa a valer na próxima tentativa de conexão, sem reiniciar o GymBurn.
  */
+/**
+ * Abre o app-ponte em segundo plano quando ele não responde. Chamado na
+ * abertura do GymBurn: a esteira volta a ficar conectada sem ninguém tocar no
+ * app da ponte.
+ */
+export function wakeBridgeIfNeeded(): void {
+  void (async () => {
+    try {
+      if (await bridgeAvailable()) {
+        return;
+      }
+      await requestBridgeStart();
+    } catch {
+      // Sem ponte instalada: o BLE direto continua valendo.
+    }
+  })();
+}
+
 export function createTreadmillTransport(): BleTransport {
   let delegate: BleTransport | null = null;
   let route: 'bridge' | 'direct' | null = null;
@@ -26,6 +44,12 @@ export function createTreadmillTransport(): BleTransport {
 
   return {
     async prepare() {
+      if (route !== 'bridge' && !(await bridgeAvailable())) {
+        // A ponte pode ter sido fechada pelo sistema: o atalho sobe o serviço de novo.
+        await requestBridgeStart();
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+
       if (route !== 'bridge' && (await bridgeAvailable())) {
         delegate = createBridgeTransport();
         route = 'bridge';
