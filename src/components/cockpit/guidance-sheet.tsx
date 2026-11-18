@@ -6,7 +6,7 @@ import { Kicker } from '@/components/card';
 import { Colors, Fonts, MaxContentWidth, Metric, TitleType } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
-import { pendingAction } from '@/workouts/guidance';
+import { pendingAction, PULSE_READINGS } from '@/workouts/guidance';
 import { useTreadmill } from '@/treadmill/treadmill-context';
 import { formatDecimal } from '@/utils/format';
 
@@ -75,6 +75,9 @@ export function GuidanceSheet() {
   if (!visible || !g || !stage) return null;
   const close = () => session.minimizeCue(key);
   const bpm = action === 'bpm';
+  // A primeira leitura do treino é a FC de repouso do dia: a esteira só lê
+  // batimentos com a lona andando, então ela é feita na velocidade mínima.
+  const resting = bpm && g.index === 0 && active?.restBpm == null;
   return (
     <Modal
       visible
@@ -95,13 +98,20 @@ export function GuidanceSheet() {
               Etapa {g.index + 1} · {stage.name}
             </Kicker>
             <Text accessibilityRole="header" style={styles.title}>
-              {bpm ? 'Meça seus batimentos' : 'Ajuste a esteira'}
+              {resting ? 'Meça a FC de repouso' : bpm ? 'Meça seus batimentos' : 'Ajuste a esteira'}
             </Text>
             {bpm ? (
-              <Text style={styles.detail}>
-                Apoie as mãos no sensor quando estiver confortável. O aviso fecha ao receber uma
-                nova leitura válida de BPM.
-              </Text>
+              <>
+                <Text style={styles.detail}>
+                  {resting
+                    ? 'Ligue a lona na velocidade mínima e segure os sensores antes de acelerar. Essa leitura ajusta a faixa de BPM de hoje.'
+                    : 'Apoie as mãos no sensor quando estiver confortável e segure por uns 10 segundos.'}
+                </Text>
+                <Text style={styles.detail}>
+                  Leituras recebidas: {Math.min(g.bpmCount, PULSE_READINGS)} de {PULSE_READINGS}. O
+                  aviso fecha sozinho.
+                </Text>
+              </>
             ) : (
               <>
                 <Target

@@ -70,15 +70,48 @@ envia. A referência completa dos campos e das escalas está em
 
 ## Treinos guiados
 
-Na primeira abertura, informe idade, peso e altura em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho.
+Na primeira abertura, informe idade, peso, altura e nível de atividade em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho.
 
-Toque em **Treino do dia** antes ou depois de conectar a esteira. O plano gerado fica salvo no celular para aquele dia. A escolha automática usa seu perfil e o histórico recente. Também é possível selecionar o objetivo e ajustar os 45 minutos iniciais. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda uma leitura nova de BPM. É possível minimizar e reabrir o aviso pelo painel.
-
-Durante o guia, a DeepSeek recebe o perfil, o objetivo do dia, o resumo do esforço e as leituras recentes de velocidade, inclinação e BPM. Pode manter a carga ou revisar os alvos da etapa em pequenos passos. Com internet indisponível o guia segue o plano local. A faixa de BPM orientativa usa percentuais da frequência máxima estimada pela idade. [Referência da American Heart Association](https://www.heart.org/en/healthy-living/exercise-and-physical-activity/fitness-basics/target-heart-rates).
+Toque em **Treino do dia** antes ou depois de conectar a esteira. O plano gerado fica salvo no celular para aquele dia. A escolha automática usa seu perfil, as faixas de BPM e as sessões válidas recentes (3 minutos ou mais em movimento). Também é possível selecionar o objetivo e ajustar os 45 minutos iniciais. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda 6 leituras novas de BPM, cerca de 10 segundos. É possível minimizar e reabrir o aviso pelo painel.
 
 Ajuste a velocidade e a inclinação pelo painel. O tempo do guia acompanha o movimento medido da lona.
 
-O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console, a desconexão ou **Encerrar registro** encerram a sessão. A DeepSeek recebe o perfil e o resumo do esforço medido para estimar o condicionamento. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. As demonstrações têm histórico próprio.
+O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console, a desconexão ou **Encerrar registro** encerram a sessão. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. As demonstrações têm histórico próprio.
+
+Para começar do zero, **Meu perfil → Apagar perfil e treinos** remove perfil, histórico, plano do dia e diário da IA. A chave da DeepSeek continua salva.
+
+### Frequência cardíaca
+
+A esteira só lê batimentos com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando. O app usa a menor das 5 últimas e desconta 15 bpm.
+
+A FC máxima começa em 220 − idade. Depois de cada sessão avaliada, a IA devolve uma previsão, e o app passa a usar a mediana das 3 últimas. A previsão fica presa a 10 bpm das estimativas pela idade e nunca abaixo do maior pico já observado. Caminhada submáxima não mede a FC máxima, então o erro típico continua na casa de ±10 bpm.
+
+Com repouso medido, a faixa de BPM do treino sai da reserva de frequência cardíaca; sem ele, de percentuais da máxima. A faixa pela reserva nunca se afasta mais de 10 bpm da faixa pela máxima, para uma leitura ruim de repouso não deslocar o alvo. É uma orientação de treino, não uma medição clínica. [Referência da American Heart Association](https://www.heart.org/en/healthy-living/exercise-and-physical-activity/fitness-basics/target-heart-rates).
+
+### Quando a IA é chamada
+
+As três chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com raciocínio ligado. A API ignora `temperature` nesse modo, por isso o app não envia esse parâmetro.
+
+| Chamada | Quando | Esforço de raciocínio | O que a DeepSeek recebe |
+| --- | --- | --- | --- |
+| Plano do dia | toque em **Gerar treino com IA** | `high` | perfil, FC de repouso e máxima, faixas de BPM, duração, modo e resumo das sessões válidas recentes |
+| Revisão de carga | durante o guia, quando as leituras saem da faixa e há mais de uma decisão possível | `low` | idade, nível de atividade, faixa do dia, etapa atual, resumo e leituras recentes de BPM, ajustes já feitos |
+| Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, nível de atividade, resumo da sessão por tipo de bloco e das sessões anteriores, estimativas de FC máxima |
+
+O plano tem teto de progressão: não passa de 0,5 km/h e 1% acima da maior carga principal recente, ou do teto do nível de atividade quando ainda não há histórico.
+
+A revisão usa a mediana de pelo menos 4 leituras, depois de descartar as 2 primeiras de cada pegada no sensor. Com o BPM na faixa nada é enviado. A carga só sobe em bloco de esforço, com os alvos atingidos há 2 minutos. Depois de um ajuste, o guia espera 1 minuto antes de revisar de novo. Uma resposta que chega atrasada só é aplicada se a etapa e a carga forem as mesmas e se as leituras dos últimos 30 segundos ainda admitirem a mesma decisão. O ajuste de um bloco de esforço vale também para os blocos iguais que ainda virão. Com internet indisponível o guia segue o plano local.
+
+Cada chamada tem até 3 novas tentativas em falha de rede, erro do servidor ou resposta fora do formato.
+
+### Diagnóstico da IA
+
+Em **Meu perfil → Diagnóstico da IA** ficam o diário das 200 últimas chamadas (o que foi enviado, o que voltou e quanto demorou), que pode ser compartilhado, e um conjunto de cenários fixos que mede o acerto da IA com a sua chave. Uma rodada completa leva vários minutos e custa centavos de dólar. Pelo adb:
+
+```bash
+adb shell am start -a android.intent.action.VIEW -d 'gymburn://diagnostico?rodar=1' com.gymburn.app
+adb logcat -s ReactNativeJS | grep gymburn-diag
+```
 
 ## Como usar na academia
 
@@ -187,6 +220,7 @@ esteira Matrix T600X  ── codec FTMS puro em src/ftms
 | `src/ftms` | codec puro do FTMS: bytes, Treadmill Data, Machine Status, Training Status, Device Information, Feature e faixas |
 | `src/ble` | contrato `BleTransport`, implementação com `react-native-ble-manager` e permissões do Android |
 | `src/simulator` | esteira simulada que fala FTMS em bytes; usada no modo demonstração e nos testes |
+| `src/workouts` | treinos guiados: plano e etapas, sessão de treino, regras de carga, frequência cardíaca, prompts e chamadas à DeepSeek, cenários de diagnóstico e banco SQLite |
 | `src/hooks` | tema e relógio de interface |
 | `src/utils` | formatação de números e textos em português do Brasil |
 | `src/constants` | tokens de tema: cores, tipografia, espaçamento |
@@ -205,6 +239,10 @@ A suíte cobre o codec do FTMS (bytes, Treadmill Data, Device Information, Featu
 permissões de Bluetooth do Android, a esteira simulada e a sessão de ponta a ponta com um transporte
 falso. Nenhum teste toca o rádio de verdade: a esteira simulada fala os mesmos bytes do FTMS, e o
 modo demonstração exercita exatamente o mesmo caminho da esteira real.
+
+Nos treinos guiados, a suíte cobre o plano, a sessão, as regras de carga, a frequência cardíaca e a
+montagem e validação dos prompts, sem chamar a DeepSeek. A qualidade das respostas da IA é medida à
+parte, no aparelho, pelos cenários de **Diagnóstico da IA**.
 
 ## Limitações conhecidas do firmware
 

@@ -4,7 +4,7 @@ import { Card, Kicker } from '@/components/card';
 import { Colors, Fonts, Neon, NumeralType, TitleType } from '@/constants/theme';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { currentCue } from '@/workouts/model';
-import { dailyTarget } from '@/workouts/adaptive';
+import { dailyTarget } from '@/workouts/physiology';
 import { pendingAction } from '@/workouts/guidance';
 import { formatDuration, formatDecimal } from '@/utils/format';
 
@@ -17,7 +17,7 @@ export function TrainingCard() {
   const elapsed = Math.floor((active?.totals.movingMs ?? 0) / 1000);
   const plan = active?.plan;
   const cue = plan && currentCue(plan, elapsed);
-  const target = plan && dailyTarget(plan, active.profile);
+  const target = plan && dailyTarget(plan, active.profile, active.hr);
   function finish() {
     Alert.alert('Encerrar registro do treino?', 'A IA avaliará o esforço registrado até aqui.', [
       { text: 'Continuar', style: 'cancel' },
@@ -65,6 +65,7 @@ export function TrainingCard() {
           </Text>
           <Text style={styles.goal}>
             {target.objective} · {target.low}–{target.high} BPM estimados
+            {active.restBpm ? ' · 1º minuto ' + active.restBpm : ''}
           </Text>
           {!!coach && <Text style={styles.small}>{coach}</Text>}
         </>

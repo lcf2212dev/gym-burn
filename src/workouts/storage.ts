@@ -9,9 +9,43 @@ function db() {
     database.execSync(`PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS prepared (source TEXT PRIMARY KEY, day TEXT NOT NULL, profile TEXT NOT NULL, plan TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS workouts (id TEXT PRIMARY KEY, started INTEGER NOT NULL, data TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS workouts (id TEXT PRIMARY KEY, started INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS ai_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);`);
   }
   return database;
+}
+
+/** Uma chamada à IA como ficou no diário: o que foi enviado, o que voltou e quanto demorou. */
+export type AiCall = { id: number; at: number; kind: string; data: Record<string, unknown> };
+const JOURNAL_SIZE = 200;
+
+export function saveCall(kind: string, data: object) {
+  const { lastInsertRowId } = db().runSync(
+    'INSERT INTO ai_calls (at, kind, data) VALUES (?, ?, ?)',
+    Date.now(),
+    kind,
+    JSON.stringify(data),
+  );
+  db().runSync('DELETE FROM ai_calls WHERE id <= ?', lastInsertRowId - JOURNAL_SIZE);
+}
+
+export function readCalls(): AiCall[] {
+  return db()
+    .getAllSync<{ id: number; at: number; kind: string; data: string }>(
+      'SELECT id, at, kind, data FROM ai_calls ORDER BY id DESC',
+    )
+    .map((row) => ({ ...row, data: JSON.parse(row.data) }));
+}
+
+/**
+ * Apaga perfil, treinos, planos preparados e o diário da IA. A chave da
+ * DeepSeek fica no armazenamento seguro do sistema, fora deste banco, e não é
+ * tocada.
+ */
+export function clearData() {
+  db().execSync(
+    'DELETE FROM prepared; DELETE FROM profile; DELETE FROM workouts; DELETE FROM ai_calls;',
+  );
 }
 
 export function readProfile(): Profile | null {

@@ -62,11 +62,15 @@ export default function Evolution() {
               {data.averageBpm
                 ? data.averageBpm + ' BPM médios · pico de ' + data.peakBpm
                 : 'Sem leitura de BPM'}
+              {w.restBpm ? ' · 1º minuto ' + w.restBpm : ''}
             </Text>
             {w.estimate ? (
               <>
                 <Text style={styles.caption}>{w.estimate.level}</Text>
                 <Text style={styles.body}>{w.estimate.summary}</Text>
+                {!!w.estimate.maxBpm && (
+                  <Text style={styles.body}>FC máxima prevista: {w.estimate.maxBpm} BPM</Text>
+                )}
               </>
             ) : (
               <UiButton
