@@ -22,7 +22,7 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.gymburn.app",
       "userInterfaceStyle": "dark",
-      "versionCode": 13
+      "versionCode": 15
     },
     "plugins": [
       "expo-router",
@@ -41,7 +41,17 @@
           "isBleRequired": true,
           "bluetoothAlwaysPermission": "O Gym Burn usa o Bluetooth para ler os dados da esteira."
         }
-      ]
+      ],
+      "expo-sqlite",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,

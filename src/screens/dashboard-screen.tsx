@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -8,6 +9,8 @@ import { ConsoleCard, DataFieldsCard, EquipmentCard } from '@/components/cockpit
 import { LiveChart } from '@/components/cockpit/live-chart';
 import { MetricGrid } from '@/components/cockpit/metric-grid';
 import { SpeedHero } from '@/components/cockpit/speed-hero';
+import { TrainingCard } from '@/components/cockpit/training-card';
+import { WorkoutLinks } from '@/components/workout-ui';
 import { VitalsRow } from '@/components/cockpit/vitals-row';
 import {
   BodyType,
@@ -85,6 +88,7 @@ export function DashboardScreen() {
   // A pessoa está correndo com o celular apoiado no painel: a tela não pode apagar.
   useKeepAwake();
 
+  const [details, setDetails] = useState(false);
   const now = useNow(1000);
   const phase = useTreadmill((state) => state.phase);
   const deviceName = useTreadmill((state) => state.device?.name ?? null);
@@ -96,24 +100,19 @@ export function DashboardScreen() {
   const link = useTreadmill((state) => state.link);
   const actions = useTreadmillActions();
 
-  const speedRange = capabilities?.speedRange ?? T600X_SPEED_RANGE;
   const silentForMs =
     now !== null && link.lastPacketAt !== null ? Math.max(now - link.lastPacketAt, 0) : null;
   const stale = silentForMs !== null && silentForMs > STALE_AFTER_MS;
   const live = link.lastPacketAt !== null && !stale;
 
   const disconnecting = phase === 'disconnecting';
-  const heartSamples = samples
-    .map((sample) => sample.heartRateBpm)
-    .filter((value): value is number => value !== null)
-    .slice(-24);
-
   return (
     <SafeAreaView
-      edges={['top', 'left', 'right']}
+      edges={['top', 'left', 'right', 'bottom']}
       style={[styles.safe, { backgroundColor: '#06080D' }]}>
       <AmbientGlow colors={[Neon.cyan, Neon.volt]} intensity={0.32} />
       <ScrollView
+        key={details ? 'dados' : 'painel'}
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         contentInsetAdjustmentBehavior="automatic">
@@ -121,7 +120,10 @@ export function DashboardScreen() {
           <View style={styles.header}>
             <View style={styles.headerText}>
               <Kicker color={Metric.speed}>Gym Burn</Kicker>
-              <Text style={[styles.deviceName, TitleType]} numberOfLines={1} accessibilityRole="header">
+              <Text
+                style={[styles.deviceName, TitleType]}
+                numberOfLines={1}
+                accessibilityRole="header">
                 {deviceName ?? 'Esteira'}
               </Text>
               <StatusDot live={live} />
@@ -133,9 +135,7 @@ export function DashboardScreen() {
               disabled={disconnecting}
               hitSlop={8}
               style={styles.disconnect}>
-              <Text style={styles.disconnectText}>
-                {disconnecting ? 'saindo…' : 'Desconectar'}
-              </Text>
+              <Text style={styles.disconnectText}>{disconnecting ? 'saindo…' : 'Desconectar'}</Text>
             </Pressable>
           </View>
 
@@ -154,45 +154,62 @@ export function DashboardScreen() {
             <View style={styles.stale}>
               <Text style={styles.staleText}>
                 A esteira parou de enviar dados
-                {silentForMs !== null ? ` há ${Math.round(silentForMs / 1000)} s` : ''}. Fique
-                perto do painel ou reconecte.
+                {silentForMs !== null ? ` há ${Math.round(silentForMs / 1000)} s` : ''}. Fique perto
+                do painel ou reconecte.
               </Text>
             </View>
           ) : null}
 
-          <SpeedHero metrics={metrics} speedRange={speedRange} live={live} />
+          {!details ? (
+            <>
+              <TrainingCard />
+              <VitalsRow metrics={metrics} samples={samples} />
+              <MetricGrid metrics={metrics} />
+              <LiveChart samples={samples} metrics={metrics} />
+            </>
+          ) : (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setDetails(false)}
+                style={styles.navButton}>
+                <Text style={styles.navText}>‹ Voltar ao painel</Text>
+              </Pressable>
+              <SpeedHero
+                metrics={metrics}
+                speedRange={capabilities?.speedRange ?? T600X_SPEED_RANGE}
+                live={live}
+              />
+              <ConsoleCard status={status} />
+              <EquipmentCard equipment={equipment} capabilities={capabilities} />
+              <DataFieldsCard metrics={metrics} />
 
-          <VitalsRow
-            inclinationPercent={metrics.inclinationPercent}
-            heartRateBpm={metrics.heartRateBpm}
-            heartSamples={heartSamples}
-          />
-
-          <LiveChart samples={samples} metrics={metrics} />
-
-          <MetricGrid metrics={metrics} />
-
-          <ConsoleCard status={status} />
-          <EquipmentCard equipment={equipment} capabilities={capabilities} />
-          <DataFieldsCard metrics={metrics} />
-
-          <Card style={styles.aboutCard}>
-            <Text style={styles.aboutTitle}>Só leitura, por decisão</Text>
-            <Text style={styles.aboutText}>
-              Esta esteira não aceita comandos de velocidade ou inclinação por Bluetooth: ela
-              informa os dados, e o painel continua sendo o controle. Para parar, use o botão
-              vermelho (Emergency Stop) e a chave de segurança.
-            </Text>
-            {looksLikeMatrixConsole(deviceName) ? (
-              <Text style={styles.aboutHint}>
-                Painel na tela de APP: segure o botão Bluetooth por 5 s.
+              <Card style={styles.aboutCard}>
+                <Text style={styles.aboutTitle}>Só leitura, por decisão</Text>
+                <Text style={styles.aboutText}>
+                  Esta esteira não aceita comandos de velocidade ou inclinação por Bluetooth: ela
+                  informa os dados, e o painel continua sendo o controle. Para parar, use o botão
+                  vermelho (Emergency Stop) e a chave de segurança.
+                </Text>
+                {looksLikeMatrixConsole(deviceName) ? (
+                  <Text style={styles.aboutHint}>
+                    Painel na tela de APP: segure o botão Bluetooth por 5 s.
+                  </Text>
+                ) : null}
+              </Card>
+            </>
+          )}
+          <View style={styles.navigation}>
+            <WorkoutLinks />
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => setDetails(!details)}
+              style={styles.navButton}>
+              <Text style={styles.navText}>
+                {details ? 'Voltar ao painel' : 'Dados da esteira'}
               </Text>
-            ) : null}
-          </Card>
-
-          <Text style={styles.footer}>
-            Gym Burn · monitor da esteira
-          </Text>
+            </Pressable>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -206,14 +223,14 @@ const styles = StyleSheet.create({
   scroll: {
     flexGrow: 1,
     paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.three,
-    paddingBottom: Spacing.six,
+    paddingTop: Spacing.one,
+    paddingBottom: Spacing.one,
   },
   content: {
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
-    gap: Spacing.three,
+    gap: 7,
   },
   header: {
     flexDirection: 'row',
@@ -339,12 +356,12 @@ const styles = StyleSheet.create({
     color: Metric.speed,
     marginTop: 2,
   },
-  footer: {
-    ...LabelType,
-    fontSize: 9,
-    letterSpacing: 1.4,
-    textAlign: 'center',
-    color: '#5C687A',
-    marginTop: Spacing.two,
+  navigation: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
   },
+  navButton: { minHeight: 44, justifyContent: 'center' },
+  navText: { color: Neon.cyan, fontSize: 15 },
 });

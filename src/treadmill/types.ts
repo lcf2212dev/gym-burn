@@ -97,6 +97,9 @@ export interface TreadmillMetrics {
 
 /** Uma amostra da telemetria, guardada para o gráfico ao vivo. */
 export interface TreadmillSample {
+  /** Horário da leitura do campo, inclusive quando o registro FTMS vem dividido. */
+  speedAt?: number | null;
+  inclineAt?: number | null;
   at: number;
   speedKmh: number | null;
   inclinationPercent: number | null;

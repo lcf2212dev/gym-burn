@@ -1,6 +1,7 @@
-import { useLocalSearchParams } from 'expo-router';
+import { Redirect, useLocalSearchParams } from 'expo-router';
 import { useEffect } from 'react';
 
+import { useWorkout } from '@/workouts/context';
 import { ConnectScreen } from '@/screens/connect-screen';
 import { DashboardScreen } from '@/screens/dashboard-screen';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
@@ -11,16 +12,18 @@ import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context
  * desenvolvimento usado para conferir a tela sem a academia.
  */
 export default function Index() {
+  const profile = useWorkout(s => s.profile);
   const phase = useTreadmill((state) => state.phase);
   const actions = useTreadmillActions();
   const { demo } = useLocalSearchParams<{ demo?: string }>();
 
   useEffect(() => {
-    if (demo === '1' && phase === 'idle') {
+    if (profile && demo === '1' && phase === 'idle') {
       actions.openDemo();
     }
-  }, [actions, demo, phase]);
+  }, [actions, demo, phase, profile]);
 
+  if (!profile) return <Redirect href="/perfil" />;
   const connected = phase === 'connected' || phase === 'disconnecting';
   return connected ? <DashboardScreen /> : <ConnectScreen />;
 }

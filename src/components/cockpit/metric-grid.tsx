@@ -144,7 +144,7 @@ export function MetricGrid({ metrics }: { metrics: TreadmillMetrics }) {
               style={[
                 styles.value,
                 NumeralType,
-                { color: tile.empty ? '#5C687A' : tile.color },
+                { color: tile.empty ? '#90A0B5' : tile.color },
               ]}
               numberOfLines={1}
               adjustsFontSizeToFit
@@ -167,18 +167,18 @@ const styles = StyleSheet.create({
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: Spacing.two,
+    gap: 5,
   },
   tile: {
-    width: '31.5%',
+    width: '32%',
     paddingHorizontal: Spacing.two + 2,
-    paddingVertical: Spacing.two + 2,
-    minHeight: 76,
+    paddingVertical: 5,
+    minHeight: 49,
     justifyContent: 'space-between',
     backgroundColor: withAlpha('#121823', 0.6),
   },
   label: {
-    fontSize: 9,
+    fontSize: 11,
     lineHeight: 12,
     letterSpacing: 1,
     color: '#9AA7B8',
@@ -187,19 +187,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'baseline',
     gap: 3,
-    marginTop: Spacing.two,
+    marginTop: 1,
   },
   value: {
     fontFamily: Fonts.numeral,
-    fontSize: 25,
+    fontSize: 23,
     lineHeight: 27,
     letterSpacing: -0.3,
     flexShrink: 1,
   },
   unit: {
     fontFamily: Fonts.body,
-    fontSize: 9,
-    color: '#5C687A',
+    fontSize: 11,
+    color: '#90A0B5',
     flexShrink: 1,
   },
 });

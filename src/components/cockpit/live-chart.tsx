@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Card, Kicker } from '@/components/card';
 import {
+
   ChartHeight,
   ChartSampleCount,
   Fonts,
@@ -111,9 +112,9 @@ export function LiveChart({
   const current = series.read(metrics);
 
   return (
-    <Card accent={series.color}>
+    <Card padded={false} style={{paddingHorizontal: 12, paddingVertical: 8}} accent={series.color}>
       <View style={styles.header}>
-        <Kicker color={series.color}>Ao vivo</Kicker>
+        <Kicker color={series.color}>Últimas leituras</Kicker>
         <View style={styles.tabs}>
           {SERIES.map((item) => {
             const active = item.key === selected;
@@ -190,7 +191,7 @@ export function LiveChart({
       </View>
 
       <View style={styles.footer}>
-        <Text style={styles.footerText}>1 amostra por segundo</Text>
+        <Text style={styles.footerText}>{recent.length} amostras</Text>
         <Text style={styles.footerText}>escala 0–{formatDecimal(domain, 0)}</Text>
       </View>
     </Card>
@@ -212,7 +213,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: Radius.pill,
     paddingHorizontal: Spacing.two + 2,
-    paddingVertical: 3,
+    minHeight: 36,
+    justifyContent: 'center',
   },
   tabText: {
     fontFamily: Fonts.label,
@@ -224,7 +226,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between',
-    marginTop: Spacing.two,
+    marginTop: 2,
   },
   currentRow: {
     flexDirection: 'row',
@@ -232,8 +234,8 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   current: {
-    fontSize: 40,
-    lineHeight: 42,
+    fontSize: 20,
+    lineHeight: 22,
   },
   unit: {
     fontFamily: Fonts.body,
@@ -261,7 +263,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 1.5,
-    marginTop: Spacing.three,
+    marginTop: 3,
     paddingTop: Spacing.one,
     borderBottomWidth: 1,
     borderBottomColor: withAlpha('#FFFFFF', 0.08),
@@ -285,7 +287,7 @@ const styles = StyleSheet.create({
   footer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: Spacing.two,
+    marginTop: 2,
   },
   footerText: {
     fontFamily: Fonts.body,

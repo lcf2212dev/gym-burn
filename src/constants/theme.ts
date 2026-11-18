@@ -179,7 +179,7 @@ export const MinTouchTarget = 48;
 export const MaxContentWidth = 560;
 
 /** Altura reservada do gráfico ao vivo, para a tela não pular quando chega dado. */
-export const ChartHeight = 132;
+export const ChartHeight = 44;
 
 /** Quantas amostras o gráfico mostra (1 por segundo ≈ 1 minuto). */
 export const ChartSampleCount = 60;

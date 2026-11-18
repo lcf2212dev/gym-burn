@@ -68,6 +68,18 @@ grade de métricas, um cartão com o equipamento encontrado e uma lista dos camp
 envia. A referência completa dos campos e das escalas está em
 [docs/dados-da-esteira.md](docs/dados-da-esteira.md).
 
+## Treinos guiados
+
+Na primeira abertura, informe idade, peso e altura em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho.
+
+Toque em **Treino do dia** antes ou depois de conectar a esteira. O plano gerado fica salvo no celular para aquele dia. A escolha automática usa seu perfil e o histórico recente. Também é possível selecionar o objetivo e ajustar os 45 minutos iniciais. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda uma leitura nova de BPM. É possível minimizar e reabrir o aviso pelo painel.
+
+Durante o guia, a DeepSeek recebe o perfil, o objetivo do dia, o resumo do esforço e as leituras recentes de velocidade, inclinação e BPM. Pode manter a carga ou revisar os alvos da etapa em pequenos passos. Com internet indisponível o guia segue o plano local. A faixa de BPM orientativa usa percentuais da frequência máxima estimada pela idade. [Referência da American Heart Association](https://www.heart.org/en/healthy-living/exercise-and-physical-activity/fitness-basics/target-heart-rates).
+
+Ajuste a velocidade e a inclinação pelo painel. O tempo do guia acompanha o movimento medido da lona.
+
+O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console, a desconexão ou **Encerrar registro** encerram a sessão. A DeepSeek recebe o perfil e o resumo do esforço medido para estimar o condicionamento. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. As demonstrações têm histórico próprio.
+
 ## Como usar na academia
 
 1. **Coloque o painel da esteira no modo APP.** Na Matrix T600X, segure a tecla Bluetooth do painel

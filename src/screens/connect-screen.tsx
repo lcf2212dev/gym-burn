@@ -1,3 +1,4 @@
+import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -21,6 +22,7 @@ import { NoticeBanner } from '@/components/notice-banner';
 import { Pill } from '@/components/pill';
 import { SectionLabel } from '@/components/section-label';
 import { Surface } from '@/components/surface';
+import { WorkoutLinks } from '@/components/workout-ui';
 import { UiButton } from '@/components/ui-button';
 import {
   BodyType,
@@ -59,6 +61,7 @@ const STEPS = [
  * texto na tela).
  */
 export function ConnectScreen() {
+  const router = useRouter();
   const theme = useTheme();
   const scan = useTreadmill((s) => s.scan);
   const devices = useTreadmill((s) => s.devices);
@@ -129,6 +132,8 @@ export function ConnectScreen() {
             </Text>
           </View>
 
+          <UiButton label="Treino do dia" onPress={() => router.push('/treino')} />
+          <WorkoutLinks />
           <NoticeBanner notice={bannerNotice} onDismiss={actions.dismissNotice} />
 
           {connecting ? (

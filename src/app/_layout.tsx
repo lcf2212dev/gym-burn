@@ -10,6 +10,8 @@ import { useEffect, useState } from 'react';
 
 import { createAppServices } from '@/app-services';
 import { Colors, Neon } from '@/constants/theme';
+import { GuidanceSheet } from '@/components/cockpit/guidance-sheet';
+import { WorkoutProvider } from '@/workouts/context';
 import { TreadmillProvider } from '@/treadmill/treadmill-context';
 
 // A splash fica até a fonte dos números carregar (ou falhar).
@@ -61,7 +63,10 @@ export default function RootLayout() {
       {/* O esquema é fixo no escuro (ver `use-color-scheme`). */}
       <ThemeProvider value={navigationTheme}>
         <StatusBar style="light" />
-        <Stack screenOptions={{ headerShown: false }} />
+        <WorkoutProvider store={services.session}>
+          <Stack screenOptions={{ headerShown: false }} />
+          <GuidanceSheet />
+        </WorkoutProvider>
       </ThemeProvider>
     </TreadmillProvider>
   );

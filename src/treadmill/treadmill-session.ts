@@ -725,13 +725,16 @@ export class TreadmillSession implements TreadmillStore {
     };
 
     // Uma amostra por notificação de Treadmill Data, para o gráfico ao vivo.
+    const lastSample = this.snapshot.samples.at(-1);
     const samples = [
       ...this.snapshot.samples,
       {
         at: now,
+        speedAt: data.instantaneousSpeedKmh !== undefined ? now : lastSample?.speedAt ?? null,
+        inclineAt: data.inclinationPercent !== undefined ? now : lastSample?.inclineAt ?? null,
         speedKmh: metrics.speedKmh,
         inclinationPercent: metrics.inclinationPercent,
-        heartRateBpm: metrics.heartRateBpm,
+        heartRateBpm: data.heartRateBpm || null,
         energyKcal: metrics.totalEnergyKcal,
         distanceM: metrics.distanceM,
       },
