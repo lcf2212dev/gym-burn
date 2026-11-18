@@ -1,6 +1,6 @@
 {
   "name": "gym-burn",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Monitor de esteira Matrix T600X por Bluetooth (FTMS), em modo somente leitura.",
   "license": "MIT",
   "main": "expo-router/entry",

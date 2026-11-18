@@ -1,21 +1,67 @@
 import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { ConsoleEvent, TreadmillSample } from '@/treadmill/types';
-import { dailyTarget, pulseWindow, revisedStage } from './adaptive';
+import {
+  allowedDecisions,
+  pulseFeatures,
+  pulseWindow,
+  REVIEW_READINGS,
+  revisedStage,
+  STEADY_SECONDS,
+  type Decision,
+  type Features,
+  type Load,
+  type Reading,
+} from './adaptive';
 import { assess, reviewIntensity } from './ai';
-import { advanceGuidance, type Guidance } from './guidance';
-import { accumulate, currentCue, newWorkout, type Plan, type Profile, type Workout } from './model';
-import { readProfile, readWorkouts, saveProfile, saveWorkout } from './storage';
+import { advanceGuidance, type Cue, type Guidance } from './guidance';
+import {
+  accumulate,
+  currentCue,
+  emptyLog,
+  insufficient,
+  levels,
+  logStage,
+  newWorkout,
+  REST_WINDOW_SECONDS,
+  validBpm,
+  type Plan,
+  type Profile,
+  type Stage,
+  type Workout,
+} from './model';
+import { dailyTarget, heartProfile, restingBpm, type Pulse } from './physiology';
+import { clearData, readProfile, readWorkouts, saveProfile, saveWorkout } from './storage';
+
+/** Intervalo mínimo entre revisões quando a pessoa volta a segurar o sensor. */
+const CONTACT_REVIEW_GAP = 20_000;
+/** Intervalo entre revisões com o sensor seguro o tempo todo. */
+const CONTINUOUS_REVIEW_GAP = 90_000;
+/** Depois de um ajuste, a FC precisa de tempo para responder antes de outra revisão. */
+const CHANGE_COOLDOWN = 60_000;
+/** Uma revisão em espera há mais que isto é trocada por outra com leituras novas. */
+const SUPERSEDE_AFTER = 30_000;
+/** Idade máxima das leituras que confirmam uma decisão na hora de aplicá-la. */
+const FRESH_WINDOW = 30_000;
 
 export class WorkoutSession {
   private listeners = new Set<() => void>();
   private previous: TreadmillSample | null = null;
   private lastEvent: ConsoleEvent | undefined;
   private reviewToken = 0;
+  private reviewAbort: AbortController | null = null;
   private reviewing = false;
+  private reviewStarted = 0;
+  /** Horário da última leitura já avaliada, pela IA ou pelas regras locais. */
   private lastReview = -Infinity;
+  private lastChange = -Infinity;
   private stageSince = 0;
+  /** Desde quando a esteira está nos alvos da etapa. */
+  private reachedSince: number | null = null;
   private contactStart = 0;
   private lastPulse = -Infinity;
+  /** Leituras do início do treino, de onde sai a FC de repouso do dia. */
+  private early: Pulse[] = [];
+  private restDone = false;
   private checkpoint = 0;
   private waitForStop = false;
   private state = {
@@ -70,16 +116,49 @@ export class WorkoutSession {
     this.update({ profile });
   }
 
+  /**
+   * Apaga perfil, treinos e diário do aparelho e volta à primeira abertura. O
+   * registro em curso é descartado. A chave da DeepSeek não é tocada.
+   */
+  reset() {
+    this.resetReview();
+    clearData();
+    this.previous = null;
+    // Com a lona andando, um registro novo só começa depois de uma parada.
+    this.waitForStop = true;
+    this.update({
+      profile: null,
+      coach: '',
+      guidance: null,
+      minimizedCue: null,
+      active: null,
+      history: [],
+      assessing: [],
+      error: '',
+    });
+  }
+
+  private sameSource(source: Workout['source']) {
+    return this.state.history.filter((h) => h.source === source);
+  }
+
   start(plan: Plan | null) {
     const { profile, active } = this.state;
     const machine = this.treadmill.getSnapshot();
     if (!profile || machine.phase !== 'connected' || machine.status.stoppedBySafetyKey) {
       throw new Error('Conecte a esteira e confira a chave de segurança.');
     }
+    // Quem já vinha andando num registro livre não está mais em repouso: vale
+    // a leitura que aquele registro fez, se fez.
+    const walking = !!active && active.totals.movingMs > 0;
     if (active) this.finish('Início do treino guiado');
-    const workout = newWorkout(profile, machine.mode, plan);
+    const workout = {
+      ...newWorkout(profile, machine.mode, plan, heartProfile(profile, this.sameSource(machine.mode))),
+      restBpm: walking ? (active.restBpm ?? null) : null,
+    };
     saveWorkout(workout);
     this.resetReview();
+    this.restDone = walking;
     this.stageSince = workout.started;
     this.checkpoint = workout.started;
     this.waitForStop = false;
@@ -128,120 +207,225 @@ export class WorkoutSession {
     const w = this.state.active;
     if (w) {
       const totals = accumulate(w.totals, sample, this.previous);
-      const next = { ...w, totals };
+      const elapsed = Math.floor(totals.movingMs / 1000);
+      const cue = w.plan && currentCue(w.plan, elapsed);
+      let next = this.measureRest({ ...w, totals }, sample, moving);
+      // O treino livre tem um registro só. No guiado, o que passa do fim do
+      // plano não pertence a etapa nenhuma.
+      const index = cue ? cue.index : w.plan ? -1 : 0;
+      if (index >= 0) {
+        const zone = dailyTarget(next.plan, next.profile, next.hr);
+        const log = Array.from(
+          { length: Math.max(index + 1, next.log?.length ?? 0) },
+          (_, i) => next.log?.[i] ?? emptyLog(),
+        );
+        log[index] = logStage(log[index], sample, this.previous, zone, cue ? cue.into : elapsed);
+        next = { ...next, log };
+      }
       if (sample.at - this.checkpoint >= 10000) {
         saveWorkout(next);
         this.checkpoint = sample.at;
       }
-      const cue = w.plan && currentCue(w.plan, Math.floor(totals.movingMs / 1000));
       const previous = this.state.guidance;
       if (cue && previous?.index !== cue.index) this.stageSince = sample.at;
       const guidance = advanceGuidance(previous, cue, sample, sample.at);
       this.update({ active: next, guidance });
       if (w.plan && totals.movingMs >= w.plan.minutes * 60000) this.finish('Duração concluída');
-      else if (cue && guidance && moving && !this.reviewing) {
-        const justMeasured = guidance.bpmReceived && !previous?.bpmReceived;
-        if (sample.heartRateBpm) {
-          if (sample.at - this.lastPulse > 10000) this.contactStart = sample.at;
-          this.lastPulse = sample.at;
-        }
-        const newContact =
-          this.contactStart > this.lastReview && sample.at - this.lastReview >= 20000;
-        if (justMeasured || newContact || sample.at - this.lastReview >= 90000) {
-          const since = Math.max(this.stageSince, sample.at - 12000);
-          const readings = pulseWindow(s.samples, since);
-          const briefContactEnded = !sample.heartRateBpm && this.lastPulse > this.lastReview;
-          if (readings.length && (readings.length >= 3 || justMeasured || briefContactEnded)) {
-            void this.review(next, cue, readings);
-          }
-        }
-      }
+      else if (cue && guidance && moving) this.consider(next, cue, guidance, sample, s.samples);
     }
     this.previous = sample;
   }
 
+  /** Guarda a FC de repouso do dia assim que as primeiras leituras do treino bastarem. */
+  private measureRest(w: Workout, sample: TreadmillSample, moving: boolean): Workout {
+    if (this.restDone) return w;
+    const closed = w.totals.movingMs > REST_WINDOW_SECONDS * 1000;
+    if (!closed && moving && validBpm(sample.heartRateBpm))
+      this.early.push({ at: sample.at, bpm: sample.heartRateBpm });
+    const rest = restingBpm(this.early, closed);
+    if (rest === null && !closed) return w;
+    this.restDone = true;
+    if (rest === null) return w;
+    const measured = { ...w, restBpm: rest };
+    // A faixa do dia é refeita com a medição de hoje.
+    return { ...measured, hr: heartProfile(w.profile, [measured, ...this.sameSource(w.source)]) };
+  }
+
+  private load(plan: Plan, index: number, g: Guidance, now: number): Load {
+    const stage = plan.stages[index];
+    const reached = g.speedReached && g.inclineReached;
+    return {
+      stage,
+      easy: stage.measure || plan.goal === 'Recuperação ativa',
+      reached,
+      secondsAtLoad: reached && this.reachedSince !== null ? (now - this.reachedSince) / 1000 : 0,
+    };
+  }
+
+  /**
+   * Decide se as leituras recentes pedem uma revisão da carga. As regras locais
+   * resolvem o que não tem escolha (BPM na faixa, etapa leve, carga recém-mudada);
+   * a IA só é consultada quando há mais de uma decisão possível.
+   */
+  private consider(
+    w: Workout,
+    cue: Cue,
+    g: Guidance,
+    sample: TreadmillSample,
+    samples: TreadmillSample[],
+  ) {
+    if (!w.plan) return;
+    if (validBpm(sample.heartRateBpm)) {
+      if (sample.at - this.lastPulse > 10000) this.contactStart = sample.at;
+      this.lastPulse = sample.at;
+    }
+    this.reachedSince = g.speedReached && g.inclineReached ? (this.reachedSince ?? sample.at) : null;
+    const sinceReview = sample.at - this.lastReview;
+    const newContact = this.contactStart > this.lastReview && sinceReview >= CONTACT_REVIEW_GAP;
+    if (sample.at - this.lastChange < CHANGE_COOLDOWN) return;
+    if (!newContact && sinceReview < CONTINUOUS_REVIEW_GAP) return;
+    if (this.reviewing && sample.at - this.reviewStarted < SUPERSEDE_AFTER) return;
+    const readings = pulseWindow(samples, this.stageSince, sample.at - 12000);
+    if (readings.length < REVIEW_READINGS) return;
+    const features = pulseFeatures(readings, dailyTarget(w.plan, w.profile, w.hr));
+    if (!features) return;
+    const load = this.load(w.plan, cue.index, g, sample.at);
+    const allowed = allowedDecisions(features, load);
+    this.lastReview = readings[readings.length - 1].at;
+    if (allowed.length > 1) void this.review(w, cue, readings, features, allowed, load);
+    else if (!this.reviewing) this.update({ coach: localVerdict(features, load) });
+  }
+
   private resetReview() {
+    this.reviewAbort?.abort();
+    this.reviewAbort = null;
     this.reviewToken++;
     this.reviewing = false;
     this.lastReview = -Infinity;
+    this.lastChange = -Infinity;
     this.lastPulse = -Infinity;
     this.contactStart = 0;
+    this.reachedSince = null;
+    this.early = [];
+    this.restDone = false;
   }
 
   private async review(
     w: Workout,
-    cue: NonNullable<ReturnType<typeof currentCue>>,
-    readings: ReturnType<typeof pulseWindow>,
+    cue: Cue,
+    readings: Reading[],
+    features: Features,
+    allowed: Decision[],
+    load: Load,
   ) {
-    if (!w.plan) return;
+    // Leituras novas valem mais que uma resposta que ainda não chegou.
+    this.reviewAbort?.abort();
     const token = ++this.reviewToken;
+    const abort = new AbortController();
+    this.reviewAbort = abort;
     this.reviewing = true;
-    this.lastReview = readings[readings.length - 1].at;
-    this.update({ coach: 'IA analisando os BPM…' });
+    this.reviewStarted = this.lastReview;
+    this.update({ coach: 'IA analisando ' + features.median + ' BPM…' });
     try {
-      const choice = await reviewIntensity(w, w.plan, cue, readings);
+      const { decision, reason } = await reviewIntensity(
+        {
+          workout: w,
+          index: cue.index,
+          left: cue.left,
+          load,
+          readings,
+          features,
+          allowed,
+          now: this.lastReview,
+        },
+        { signal: abort.signal },
+      );
       if (this.reviewToken !== token) return;
-      const active = this.state.active;
-      const plan = active?.plan;
-      const g = this.state.guidance;
-      const samples = this.treadmill.getSnapshot().samples;
-      const last = samples.at(-1);
-      const now = Date.now();
-      if (
-        !active ||
-        !plan ||
-        !g ||
-        g.index !== cue.index ||
-        !last ||
-        !last.speedKmh ||
-        now - this.lastReview > 20000 ||
-        now - (last.speedAt ?? 0) > 5000 ||
-        now - (last.inclineAt ?? 0) > 5000
-      ) {
-        this.update({ coach: 'Aguardando nova leitura' });
-        return;
-      }
-      const recent = pulseWindow(samples, Math.max(this.stageSince, now - 20000));
-      const stage = plan.stages[cue.index];
-      const target = dailyTarget(plan, w.profile);
-      const easy = stage.measure || plan.goal === 'Recuperação ativa';
-      const nextStage = revisedStage(
-        stage,
-        choice,
-        target,
-        recent,
-        last,
-        easy,
-        g.speedReached && g.inclineReached,
-      );
-      const bpm = recent.at(-1)?.bpm;
-      if (!bpm || nextStage === stage) {
-        this.update({
-          coach: bpm ? 'IA · alvos mantidos após ' + bpm + ' BPM' : 'Aguardando nova leitura',
-        });
-        return;
-      }
-      const stages = plan.stages.map((s, index) => (index === cue.index ? nextStage : s));
-      const next = { ...active, plan: { ...plan, stages } };
-      saveWorkout(next);
-      const guidance = advanceGuidance(
-        { ...g, adjusted: false },
-        { ...cue, stage: nextStage, measure: g.bpmRequestedAt !== null },
-        last,
-        now,
-      );
-      this.update({
-        active: next,
-        guidance,
-        minimizedCue: null,
-        coach: 'IA · ajuste após ' + bpm + ' BPM',
-      });
+      this.update({ coach: this.apply(cue.index, load.stage, decision, reason) });
     } catch {
       if (this.reviewToken === token)
         this.update({ coach: 'IA indisponível · seguindo o plano salvo' });
     } finally {
-      if (this.reviewToken === token) this.reviewing = false;
+      if (this.reviewToken === token) {
+        this.reviewing = false;
+        this.reviewAbort = null;
+      }
     }
+  }
+
+  /**
+   * Aplica a decisão da IA, se ela ainda couber. A resposta pode chegar bem
+   * depois das leituras enviadas: só vale com a mesma etapa, a mesma carga e
+   * leituras recentes que ainda admitam a mesma decisão. Devolve o texto do
+   * painel.
+   */
+  private apply(index: number, sent: Stage, decision: Decision, reason: string) {
+    const waiting = 'Aguardando nova leitura';
+    const active = this.state.active;
+    const plan = active?.plan;
+    const g = this.state.guidance;
+    const samples = this.treadmill.getSnapshot().samples;
+    const last = samples.at(-1);
+    const now = Date.now();
+    const stage = plan?.stages[index];
+    if (
+      !active ||
+      !plan ||
+      !g ||
+      !stage ||
+      g.index !== index ||
+      stage.speed !== sent.speed ||
+      stage.incline !== sent.incline ||
+      !last ||
+      !last.speedKmh ||
+      now - (last.speedAt ?? 0) > 5000 ||
+      now - (last.inclineAt ?? 0) > 5000
+    )
+      return waiting;
+    const fresh = pulseWindow(samples, this.stageSince, now - FRESH_WINDOW);
+    const features =
+      fresh.length >= REVIEW_READINGS
+        ? pulseFeatures(fresh, dailyTarget(plan, active.profile, active.hr))
+        : null;
+    if (!features || !allowedDecisions(features, this.load(plan, index, g, now)).includes(decision))
+      return waiting;
+    const note = reason ? ' · ' + reason : '';
+    const revised = revisedStage(stage, decision, last);
+    if (revised === stage) return 'IA · manter' + note;
+    const elapsed = Math.round(active.totals.movingMs / 1000);
+    // O ajuste de um bloco de esforço vale também para os blocos iguais que
+    // ainda virão: sem isso o próximo voltaria à carga que acabou de ser corrigida.
+    const stages = plan.stages.map((s, i) =>
+      i === index ||
+      (i > index &&
+        !stage.measure &&
+        !s.measure &&
+        s.speed === stage.speed &&
+        s.incline === stage.incline)
+        ? { ...s, speed: revised.speed, incline: revised.incline }
+        : s,
+    );
+    const next = {
+      ...active,
+      plan: { ...plan, stages },
+      changes: [
+        ...(active.changes ?? []),
+        { second: elapsed, stage: index, decision, bpm: features.median },
+      ],
+    };
+    const cue = currentCue(next.plan, elapsed);
+    if (!cue || cue.index !== index) return waiting;
+    saveWorkout(next);
+    this.lastChange = now;
+    this.reachedSince = null;
+    const guidance = advanceGuidance(
+      { ...g, adjusted: false },
+      { ...cue, measure: g.bpmRequestedAt !== null },
+      last,
+      now,
+    );
+    this.update({ active: next, guidance, minimizedCue: null });
+    return 'IA · ' + decision + note;
   }
 
   finish(reason: string) {
@@ -266,7 +450,21 @@ export class WorkoutSession {
       const history = this.state.history.filter(
         (h) => h.source === w.source && h.started < w.started,
       );
-      const done = { ...w, estimate: await assess(w, history) };
+      // Sessão curta ou sem leituras não vai à IA: não há o que ela avaliar.
+      const estimate = insufficient(w)
+        ? {
+            level: levels[0],
+            summary:
+              'Foram ' +
+              Math.floor(w.totals.movingMs / 60000) +
+              ' min em movimento e ' +
+              w.totals.bpmCount +
+              ' leituras de BPM. A avaliação precisa de pelo menos 3 minutos e 10 leituras.',
+          }
+        : await assess(w, history);
+      // Os dados podem ter sido apagados enquanto a IA respondia.
+      if (!this.state.history.some((h) => h.id === w.id)) return;
+      const done = { ...w, estimate };
       saveWorkout(done);
       this.update({ history: this.state.history.map((h) => (h.id === done.id ? done : h)) });
     } catch (e) {
@@ -275,4 +473,15 @@ export class WorkoutSession {
       this.update({ assessing: this.state.assessing.filter((id) => id !== w.id) });
     }
   }
+}
+
+/** O que o painel mostra quando as regras locais resolvem sem consultar a IA. */
+function localVerdict(f: Features, load: Load) {
+  const bpm = f.median + ' BPM';
+  if (f.position === 'na faixa') return 'Na faixa · ' + bpm;
+  if (f.position === 'acima') return 'Acima da faixa · ' + bpm + ' · carga já no mínimo';
+  if (load.easy) return 'Abaixo da faixa · ' + bpm + ' · etapa leve';
+  if (!load.reached) return 'Abaixo da faixa · ' + bpm + ' · ajuste a esteira aos alvos';
+  if (load.secondsAtLoad < STEADY_SECONDS) return 'Abaixo da faixa · ' + bpm + ' · estabilizando';
+  return 'Abaixo da faixa · ' + bpm + ' · carga já no máximo';
 }

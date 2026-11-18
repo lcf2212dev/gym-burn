@@ -6,15 +6,16 @@ import { UiButton } from '@/components/ui-button';
 import { Field, styles, WorkoutPage } from '@/components/workout-ui';
 import { useTreadmill } from '@/treadmill/treadmill-context';
 import { preparePlan, readPlan } from '@/workouts/storage';
-import { dailyTarget } from '@/workouts/adaptive';
 import { generatePlan } from '@/workouts/ai';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { goals, inRange, requestsPulse, type Goal, type Plan } from '@/workouts/model';
+import { dailyTarget, heartProfile } from '@/workouts/physiology';
 import { formatDecimal, formatDuration } from '@/utils/format';
 
 export default function Training() {
   const router = useRouter();
   const profile = useWorkout((s) => s.profile);
+  const history = useWorkout((s) => s.history);
   const session = useWorkoutSession();
   const source = useTreadmill((s) => (s.phase === 'connected' ? s.mode : 'ble'));
   const connected = useTreadmill((s) => s.phase === 'connected');
@@ -22,10 +23,12 @@ export default function Training() {
   const [minutes, setMinutes] = useState('45');
   const [plan, setPlan] = useState<Plan | null>(() => readPlan(source, profile));
   const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(1);
   const [error, setError] = useState('');
   if (!profile) return <Redirect href="/perfil" />;
 
-  const target = plan && dailyTarget(plan, profile);
+  const recent = history.filter((w) => w.source === source);
+  const target = plan && dailyTarget(plan, profile, heartProfile(profile, recent));
 
   async function generate() {
     const duration = Number(minutes);
@@ -35,10 +38,12 @@ export default function Training() {
       return;
     }
     setBusy(true);
+    setAttempt(1);
     setError('');
     try {
-      const recent = session.snapshot().history.filter((w) => w.source === source);
-      const generated = await generatePlan(profile, duration, goal, recent);
+      const generated = await generatePlan(profile, duration, goal, recent, {
+        onAttempt: setAttempt,
+      });
       preparePlan(source, profile, generated);
       setPlan(generated);
     } catch (e) {
@@ -70,9 +75,11 @@ export default function Training() {
                 {target.objective} · {target.low}–{target.high} BPM estimados
               </Text>
             )}
+            {!!plan.why && <Text style={styles.body}>{plan.why}</Text>}
             <Text style={styles.body}>
-              A IA revisa os alvos com os BPM recebidos durante o treino. Ajuste os alvos no painel
-              conforme seu conforto. O guia avança enquanto a lona está em movimento.
+              No primeiro minuto, com a lona ainda devagar, o guia pede seus batimentos: é a FC de
+              repouso de hoje. Depois a IA revisa os alvos quando os BPM saem da faixa. Ajuste a
+              esteira no painel conforme seu conforto.
             </Text>
           </Card>
           <UiButton
@@ -127,10 +134,21 @@ export default function Training() {
             onChangeText={setMinutes}
           />
           <UiButton
-            label={busy ? 'Preparando treino…' : 'Gerar treino com IA'}
+            label={
+              !busy
+                ? 'Gerar treino com IA'
+                : attempt > 1
+                  ? 'Preparando treino… tentativa ' + attempt
+                  : 'Preparando treino…'
+            }
             busy={busy}
             onPress={generate}
           />
+          {busy && (
+            <Text style={styles.body}>
+              A IA analisa seu histórico antes de responder. Pode levar até alguns minutos.
+            </Text>
+          )}
         </>
       )}
       {!!error && (

@@ -1,19 +1,23 @@
-import { dailyTarget, decisions, objectives, type Decision, type pulseWindow } from './adaptive';
-import type { Cue } from './guidance';
 import * as SecureStore from 'expo-secure-store';
+import { makePlan, type Estimate, type Goal, type Plan, type Profile, type Workout } from './model';
 import {
-  evidence,
-  goals,
-  levels,
-  makePlan,
-  type Goal,
-  type Profile,
-  type Workout,
-  type Estimate,
-} from './model';
+  assessBounds,
+  assessPrompt,
+  parseAssess,
+  parsePlan,
+  parseReview,
+  planPrompt,
+  progressionCeiling,
+  PROMPT_VERSION,
+  reviewPrompt,
+  type Prompt,
+  type ReviewInput,
+} from './prompts';
+import { saveCall } from './storage';
 
 const keyName = 'gym-burn.deepseek';
-export const hasApiKey = async () => !!(await SecureStore.getItemAsync(keyName));
+export const apiKey = () => SecureStore.getItemAsync(keyName);
+export const hasApiKey = async () => !!(await apiKey());
 export async function saveApiKey(value: string) {
   if (!/^sk-[A-Za-z0-9_-]{12,200}$/.test(value.trim()))
     throw new Error('Confira o formato da chave DeepSeek.');
@@ -22,49 +26,156 @@ export async function saveApiKey(value: string) {
   });
 }
 
-async function request(prompt: string, profile: Profile, data: object) {
-  const key = await SecureStore.getItemAsync(keyName);
-  if (!key) throw new Error('Configure a chave DeepSeek em Perfil.');
+export type Kind = 'plan' | 'review' | 'assess';
+
+// As três chamadas usam o mesmo modelo, sempre com raciocínio ligado. Muda o
+// esforço: `high` para montar o plano, `low` durante o treino (a resposta
+// precisa chegar enquanto as leituras ainda valem) e `max` na avaliação, que
+// roda depois do treino e pode demorar.
+//
+// Não vai `temperature`: a API da DeepSeek ignora esse parâmetro com raciocínio
+// ligado. O único controle de amostragem que vale nesse modo é `top_p`, aceito
+// de 0,95 a 1.
+const MODEL = 'deepseek-flash';
+const MAX_TOKENS = 393216; // o máximo aceito pela API
+const RETRIES = 3;
+const settings: Record<Kind, { effort: 'low' | 'high' | 'max'; timeoutMs: number }> = {
+  plan: { effort: 'high', timeoutMs: 300_000 },
+  review: { effort: 'low', timeoutMs: 300_000 },
+  assess: { effort: 'max', timeoutMs: 2_400_000 },
+};
+
+/** Erro que não muda ao repetir a chamada: chave, saldo ou requisição inválida. */
+class Fatal extends Error {}
+
+export type CallOptions = {
+  /** Cancela a chamada, inclusive as novas tentativas. */
+  signal?: AbortSignal;
+  /** Avisa a tentativa em curso, começando em 1. */
+  onAttempt?: (attempt: number, total: number) => void;
+  /** `false` nos cenários de diagnóstico, para não ocupar o diário dos treinos reais. */
+  journal?: boolean;
+};
+
+const wait = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+
+/** O objeto JSON da resposta, mesmo que venha cercado de texto ou de marcação. */
+export function extractJson(content: unknown): unknown {
+  if (typeof content !== 'string' || !content.trim())
+    throw new Error('A resposta da DeepSeek veio vazia.');
+  const start = content.indexOf('{');
+  const end = content.lastIndexOf('}');
+  try {
+    return JSON.parse(content.slice(start, end + 1));
+  } catch {
+    throw new Error('A resposta da DeepSeek veio incompleta.');
+  }
+}
+
+type Reply = { content: unknown; usage?: object };
+
+async function post(key: string, kind: Kind, prompt: Prompt, signal?: AbortSignal): Promise<Reply> {
+  const { effort, timeoutMs } = settings[kind];
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const cancel = () => controller.abort();
+  signal?.addEventListener('abort', cancel);
   try {
     const res = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
       body: JSON.stringify({
-        model: 'deepseek-flash',
-        thinking: { type: 'disabled' },
+        model: MODEL,
+        thinking: { type: 'enabled' },
+        reasoning_effort: effort,
+        top_p: 0.95,
         response_format: { type: 'json_object' },
-        max_tokens: 500,
+        max_tokens: MAX_TOKENS,
         messages: [
-          { role: 'system', content: prompt },
-          { role: 'user', content: JSON.stringify({ profile, ...data }) },
+          { role: 'system', content: prompt.system },
+          { role: 'user', content: JSON.stringify(prompt.user) },
         ],
       }),
     });
     if (!res.ok) {
-      if (res.status === 401) throw new Error('A DeepSeek recusou a chave. Confira em Perfil.');
-      if (res.status === 402) throw new Error('Saldo insuficiente na conta DeepSeek.');
-      throw new Error('DeepSeek indisponível (' + res.status + '). Tente novamente.');
+      if (res.status === 401) throw new Fatal('A DeepSeek recusou a chave. Confira em Perfil.');
+      if (res.status === 402) throw new Fatal('Saldo insuficiente na conta DeepSeek.');
+      const message = 'DeepSeek indisponível (' + res.status + '). Tente novamente.';
+      throw res.status === 400 || res.status === 422 ? new Fatal(message) : new Error(message);
     }
     const reply = await res.json();
-    try {
-      return JSON.parse(reply.choices[0].message.content);
-    } catch {
-      throw new Error('A resposta da DeepSeek veio incompleta. Tente novamente.');
-    }
+    const choice = reply?.choices?.[0];
+    if (choice?.finish_reason !== 'stop')
+      throw new Error('A DeepSeek interrompeu a resposta (' + choice?.finish_reason + ').');
+    return { content: choice.message?.content, usage: reply.usage };
   } catch (error) {
     if (controller.signal.aborted || error instanceof TypeError)
       throw new Error('Falha de conexão com a DeepSeek. Tente novamente.');
     throw error;
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', cancel);
   }
 }
 
-function recent(history: Workout[]) {
-  return history.slice(0, 5).map((w) => ({ ...evidence(w), estimate: w.estimate?.level ?? null }));
+function record(kind: Kind, entry: Record<string, unknown>, journal: boolean) {
+  const { user, ...brief } = entry;
+  console.log('[gymburn-ia] ' + JSON.stringify({ kind, ...brief }));
+  if (!journal) return;
+  try {
+    saveCall(kind, entry);
+  } catch {
+    // O diário é diagnóstico: uma falha ao gravar não pode derrubar a chamada.
+  }
+}
+
+/**
+ * Envia um prompt e devolve a resposta já validada por `parse`. Repete até 3
+ * vezes em falha de rede, erro do servidor, resposta vazia, cortada ou fora do
+ * formato; a doc da DeepSeek avisa que o modo JSON às vezes devolve conteúdo em
+ * branco. Cada tentativa vai para o diário.
+ */
+export async function callModel<T>(
+  kind: Kind,
+  prompt: Prompt,
+  parse: (json: unknown) => T,
+  { signal, onAttempt, journal = true }: CallOptions = {},
+): Promise<T> {
+  const key = await apiKey();
+  if (!key) throw new Error('Configure a chave DeepSeek em Perfil.');
+  let failure = new Error('Chamada cancelada.');
+  for (let attempt = 1; attempt <= RETRIES + 1 && !signal?.aborted; attempt++) {
+    if (attempt > 1) await wait(1000 * 2 ** (attempt - 1), signal);
+    if (signal?.aborted) break;
+    onAttempt?.(attempt, RETRIES + 1);
+    const started = Date.now();
+    const entry: Record<string, unknown> = {
+      version: PROMPT_VERSION,
+      effort: settings[kind].effort,
+      attempt,
+      user: prompt.user,
+    };
+    try {
+      const reply = await post(key, kind, prompt, signal);
+      Object.assign(entry, { content: reply.content, usage: reply.usage });
+      const value = parse(extractJson(reply.content));
+      record(kind, { ...entry, ms: Date.now() - started, ok: true }, journal);
+      return value;
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
+      record(kind, { ...entry, ms: Date.now() - started, ok: false, error: failure.message }, journal);
+      if (failure instanceof Fatal) break;
+    }
+  }
+  throw failure;
 }
 
 export async function generatePlan(
@@ -72,76 +183,40 @@ export async function generatePlan(
   minutes: number,
   goal: Goal | null,
   history: Workout[],
-) {
-  const choice = await request(
-    `Escolha um treino de esteira para hoje com base no perfil, histórico, objetivo e minutos.
-    Sem histórico, escolha caminhada confortável. Prefira mudanças pequenas e alvos conservadores.
-    Escolha também o objetivo fisiológico diário (objective) entre ${objectives.join(', ')}. Respeite o modo pedido, ou escolha entre ${goals.join(', ')}.
-    O app monta aquecimento, blocos e volta à calma. Retorne apenas json como
-    {"goal":"Intervalado","objective":"Base aeróbica","pace":4.5,"grade":1,"workMinutes":4,"recoveryMinutes":2}. pace é velocidade principal de 1 a 9 km/h em décimos;
-    grade é inclinação de 0 a 5% em passos de 0.5. Escolha a duração aproximada dos blocos principais (workMinutes: 1 a 20) e de recuperação (recoveryMinutes: 1 a 10) conforme a sessão. Não prometa perda de gordura.`,
-    profile,
-    { minutes, goal, recent: recent(history) },
+  options?: CallOptions,
+): Promise<Plan> {
+  const now = Date.now();
+  const choice = await callModel(
+    'plan',
+    planPrompt({ profile, minutes, goal, history, now }),
+    parsePlan,
+    options,
   );
+  // O teto de progressão vale mesmo que a IA peça mais.
+  const ceiling = progressionCeiling(profile, history, now);
+  if (choice.pace > ceiling.pace || choice.grade > ceiling.grade)
+    record(
+      'plan',
+      { note: 'Teto de progressão aplicado', asked: choice, ceiling },
+      options?.journal ?? true,
+    );
   const plan = makePlan(
-    goal ?? choice?.goal,
+    goal ?? choice.goal,
     minutes,
-    choice?.pace,
-    choice?.grade,
-    choice?.workMinutes,
-    choice?.recoveryMinutes,
+    Math.min(choice.pace, ceiling.pace),
+    Math.min(choice.grade, ceiling.grade),
+    choice.workMinutes,
+    choice.recoveryMinutes,
   );
-  if (!objectives.includes(choice?.objective))
-    throw new Error('Objetivo diário inválido. Gere o treino novamente.');
-  return { ...plan, objective: choice.objective } as typeof plan;
+  return { ...plan, objective: choice.objective, why: choice.why };
 }
 
-export async function assess(w: Workout, history: Workout[]): Promise<Estimate> {
-  const data = evidence(w);
-  const insufficient = data.bpmReadings < 3 || data.movingSeconds < 60;
-  const answer = await request(
-    `Estime qualitativamente o condicionamento observado nesta sessão de esteira em português do Brasil.
-    Use carga REAL, tempo em movimento, cobertura dos BPM e sessões anteriores. Não use o alvo como realizado.
-    Sem diagnóstico, VO2max ou inferência a partir de IMC. Não extrapole de dados esparsos.
-    Se insufficient for true, explique a falta de dados. Use apenas os níveis ${levels.join(', ')}.
-    Devolva json {"level":"Dados insuficientes","summary":"Uma ou duas frases sobre as medições."}.`,
-    w.profile,
-    { actual: data, insufficient, recent: recent(history) },
-  );
-  if (
-    !levels.includes(answer?.level) ||
-    typeof answer?.summary !== 'string' ||
-    !answer.summary.trim() ||
-    answer.summary.length > 1000
-  )
-    throw new Error('Avaliação incompleta. Tente novamente.');
-  return { level: insufficient ? levels[0] : answer.level, summary: answer.summary.trim() };
+/** `history` são as sessões anteriores da mesma origem, da mais nova para a mais antiga. */
+export function assess(w: Workout, history: Workout[], options?: CallOptions): Promise<Estimate> {
+  const input = { workout: w, history };
+  return callModel('assess', assessPrompt(input), parseAssess(assessBounds(input)), options);
 }
 
-export async function reviewIntensity(
-  w: Workout,
-  plan: NonNullable<Workout['plan']>,
-  cue: Cue,
-  readings: ReturnType<typeof pulseWindow>,
-): Promise<Decision> {
-  const reply = await request(
-    `Acompanhe este treino de esteira. Revise a carga da etapa atual conforme o objetivo diário,
-    a faixa orientativa de BPM, o perfil, a duração, os BPM recentes e a carga realmente realizada.
-    Acima da faixa prefira reduzir a carga. Na faixa mantenha. Abaixo dela só proponha aumento
-    se as leituras forem consistentes e a pessoa estiver cumprindo os alvos da etapa principal.
-    Preserve aquecimento, recuperação e volta à calma. A faixa é uma estimativa, não um limiar medido.
-    Escolha uma única decisão entre ${decisions.join(', ')}. Retorne json {"decision":"manter"}.`,
-    w.profile,
-    {
-      target: dailyTarget(plan, w.profile),
-      mode: plan.goal,
-      actual: evidence(w),
-      stage: cue.stage,
-      stageIndex: cue.index,
-      remainingSeconds: cue.left,
-      readings,
-    },
-  );
-  if (!decisions.includes(reply?.decision)) throw new Error('Resposta de ajuste inválida.');
-  return reply.decision;
+export function reviewIntensity(input: ReviewInput, options?: CallOptions) {
+  return callModel('review', reviewPrompt(input), parseReview(input.allowed), options);
 }
