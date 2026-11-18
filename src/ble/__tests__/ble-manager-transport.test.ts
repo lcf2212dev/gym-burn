@@ -34,7 +34,6 @@ jest.mock('react-native-ble-manager', () => {
       disconnect: jest.fn(),
       retrieveServices: jest.fn(),
       read: jest.fn(),
-      write: jest.fn(),
       startNotification: jest.fn(),
       stopNotification: jest.fn(),
       onDiscoverPeripheral: on('discover'),
@@ -64,7 +63,6 @@ type Mocked = jest.Mocked<
     | 'disconnect'
     | 'retrieveServices'
     | 'read'
-    | 'write'
     | 'startNotification'
     | 'stopNotification'
   >
@@ -105,7 +103,6 @@ beforeEach(() => {
   ble.stopScan.mockResolvedValue(undefined);
   ble.connect.mockResolvedValue(undefined);
   ble.disconnect.mockResolvedValue(undefined);
-  ble.write.mockResolvedValue(undefined);
   ble.startNotification.mockResolvedValue(undefined);
   ble.stopNotification.mockResolvedValue(undefined);
 });
@@ -433,11 +430,6 @@ describe('connect', () => {
         properties: { Notify: 'Notify' },
       },
       {
-        service: '00001826-0000-1000-8000-00805f9b34fb',
-        characteristic: '00002ad9-0000-1000-8000-00805f9b34fb',
-        properties: { Write: 'Write', Indicate: 'Indicate' },
-      },
-      {
         service: '1826',
         characteristic: '2acc',
         properties: { Read: 'Read', WriteWithoutResponse: 'WriteWithoutResponse' },
@@ -544,11 +536,6 @@ describe('BleConnection', () => {
       characteristics: [
         { service: '1826', characteristic: '2acd', properties: { Notify: 'Notify' } },
         {
-          service: FTMS_LONG,
-          characteristic: '00002ad9-0000-1000-8000-00805f9b34fb',
-          properties: { Write: 'Write', Indicate: 'Indicate' },
-        },
-        {
           service: '1826',
           characteristic: '2acc',
           properties: { Read: 'Read', WriteWithoutResponse: 'WriteWithoutResponse' },
@@ -568,27 +555,17 @@ describe('BleConnection', () => {
         {
           uuid: FTMS.treadmillData,
           canRead: false,
-          canWrite: false,
           canNotify: true,
           canIndicate: false,
         },
         {
-          uuid: FTMS.controlPoint,
-          canRead: false,
-          canWrite: true,
-          canNotify: false,
-          canIndicate: true,
-        },
-        {
           uuid: FTMS.feature,
           canRead: true,
-          // WriteWithoutResponse não conta como escrita com resposta.
-          canWrite: false,
           canNotify: false,
           canIndicate: false,
         },
       ]);
-      expect(await connection.getCharacteristics('1826')).toHaveLength(3);
+      expect(await connection.getCharacteristics('1826')).toHaveLength(2);
     });
 
     it('serviço inexistente devolve lista vazia', async () => {
@@ -596,7 +573,7 @@ describe('BleConnection', () => {
     });
   });
 
-  describe('read e write', () => {
+  describe('read', () => {
     it('lê como Uint8Array e passa UUIDs no formato curto', async () => {
       ble.read.mockResolvedValue([0x0d, 0x16]);
 
@@ -618,12 +595,6 @@ describe('BleConnection', () => {
       );
     });
 
-    it('escreve com resposta convertendo para number[] sem fatiar o comando', async () => {
-      await connection.write(FTMS.service, FTMS.controlPoint, Uint8Array.of(0x02, 0x64, 0x00));
-
-      expect(ble.write).toHaveBeenCalledWith(DEVICE_ID, '1826', '2ad9', [0x02, 0x64, 0x00], 20);
-    });
-
     it('embrulha erro de leitura', async () => {
       ble.read.mockRejectedValue('Device is not connected');
 
@@ -633,19 +604,6 @@ describe('BleConnection', () => {
 
       expect(error.message).toBe('Falha ao ler Fitness Machine Feature: Device is not connected');
       expect(error.cause).toBe('Device is not connected');
-    });
-
-    it('embrulha erro de escrita', async () => {
-      ble.write.mockRejectedValue('Write failed');
-
-      const error = (await connection
-        .write(FTMS.service, FTMS.controlPoint, Uint8Array.of(0x00))
-        .catch((e: unknown) => e)) as Error;
-
-      expect(error.message).toBe(
-        'Falha ao escrever em Fitness Machine Control Point: Write failed',
-      );
-      expect(error.cause).toBe('Write failed');
     });
   });
 
@@ -669,14 +627,14 @@ describe('BleConnection', () => {
       const onValue = jest.fn();
       let resolved = false;
 
-      const pending = connection.subscribe(FTMS.service, FTMS.controlPoint, onValue).then((s) => {
+      const pending = connection.subscribe(FTMS.service, FTMS.machineStatus, onValue).then((s) => {
         resolved = true;
         return s;
       });
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(ble.startNotification).toHaveBeenCalledWith(DEVICE_ID, '1826', '2ad9');
+      expect(ble.startNotification).toHaveBeenCalledWith(DEVICE_ID, '1826', '2ada');
       expect(resolved).toBe(false);
 
       confirm();
@@ -684,8 +642,8 @@ describe('BleConnection', () => {
       expect(resolved).toBe(true);
     });
 
-    it('característica só com indicate usa o mesmo startNotification', async () => {
-      await connection.subscribe(FTMS.service, FTMS.controlPoint, jest.fn());
+    it('qualquer característica notificável usa o mesmo startNotification', async () => {
+      await connection.subscribe(FTMS.service, FTMS.trainingStatus, jest.fn());
 
       expect(ble.startNotification).toHaveBeenCalledTimes(1);
     });
@@ -709,7 +667,7 @@ describe('BleConnection', () => {
 
     it('usa um único listener global por conexão', async () => {
       await connection.subscribe(FTMS.service, FTMS.treadmillData, jest.fn());
-      await connection.subscribe(FTMS.service, FTMS.controlPoint, jest.fn());
+      await connection.subscribe(FTMS.service, FTMS.machineStatus, jest.fn());
 
       expect(ble.__listenerCount('value')).toBe(1);
     });
@@ -756,14 +714,14 @@ describe('BleConnection', () => {
       const onValue = jest.fn();
 
       const error = (await connection
-        .subscribe(FTMS.service, FTMS.controlPoint, onValue)
+        .subscribe(FTMS.service, FTMS.machineStatus, onValue)
         .catch((e: unknown) => e)) as Error;
 
       expect(error.message).toBe(
-        'Falha ao ativar as notificações de Fitness Machine Control Point: Error writing descriptor status=5',
+        'Falha ao ativar as notificações de Fitness Machine Status: Error writing descriptor status=5',
       );
       expect(error.cause).toBe('Error writing descriptor status=5');
-      emitValue([1], { characteristic: '00002ad9-0000-1000-8000-00805f9b34fb' });
+      emitValue([1], { characteristic: '00002ada-0000-1000-8000-00805f9b34fb' });
       expect(onValue).not.toHaveBeenCalled();
     });
   });

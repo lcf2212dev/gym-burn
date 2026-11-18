@@ -137,8 +137,6 @@ function toCharacteristicInfo(characteristic: Characteristic): CharacteristicInf
   return {
     uuid: normalizeUuid(characteristic.characteristic),
     canRead: properties.Read !== undefined,
-    // Só escrita com resposta: o contrato usa GATT Write Characteristic Value.
-    canWrite: properties.Write !== undefined,
     canNotify: properties.Notify !== undefined,
     canIndicate: properties.Indicate !== undefined,
   };
@@ -230,22 +228,6 @@ function createConnection(
       }
     },
 
-    async write(serviceUuid, characteristicUuid, data) {
-      try {
-        await BleManager.write(
-          deviceId,
-          toNativeUuid(serviceUuid),
-          toNativeUuid(characteristicUuid),
-          Array.from(data),
-          // A biblioteca fatia escritas maiores que `maxByteSize` (padrão 20) em várias
-          // escritas; um comando do Control Point nunca pode ser partido.
-          Math.max(data.length, 20),
-        );
-      } catch (error) {
-        throw wrapError(`Falha ao escrever em ${characteristicName(characteristicUuid)}`, error);
-      }
-    },
-
     async subscribe(serviceUuid, characteristicUuid, onValue) {
       const key = characteristicKey(serviceUuid, characteristicUuid);
       const nativeService = toNativeUuid(serviceUuid);
@@ -271,7 +253,7 @@ function createConnection(
       };
 
       try {
-        // Vale para notify e para característica só com indicate (Control Point):
+        // Vale para notify e para característica só com indicate:
         // `Peripheral.java:730` e `getContext` em `SwiftBleManager.swift:320`.
         await BleManager.startNotification(deviceId, nativeService, nativeCharacteristic);
       } catch (error) {
@@ -371,7 +353,7 @@ export function createBleManagerTransport(): BleTransport {
       if (describeError(error).includes('No bluetooth support')) {
         throw new BleUnavailableError(
           'unsupported',
-          'Este aparelho não tem Bluetooth de baixa energia (BLE), necessário para controlar a esteira.',
+          'Este aparelho não tem Bluetooth de baixa energia (BLE), necessário para ler os dados da esteira.',
         );
       }
       throw wrapError('Falha ao iniciar o Bluetooth', error);
@@ -420,7 +402,7 @@ export function createBleManagerTransport(): BleTransport {
     if (state === BleState.Unsupported) {
       throw new BleUnavailableError(
         'unsupported',
-        'Este aparelho não tem Bluetooth de baixa energia (BLE), necessário para controlar a esteira.',
+        'Este aparelho não tem Bluetooth de baixa energia (BLE), necessário para ler os dados da esteira.',
       );
     }
     if (state === BleState.Unauthorized) {

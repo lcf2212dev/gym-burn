@@ -1,129 +1,197 @@
 import { useKeepAwake } from 'expo-keep-awake';
-import { useEffect } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { ActionButton } from '@/components/action-button';
 import { AmbientGlow } from '@/components/ambient-glow';
-import { BrandMark } from '@/components/brand-mark';
-import { ControlPanel } from '@/components/control-panel';
-import { GizwitsProbeCard } from '@/components/gizwits-probe-card';
-import { GizwitsProbeHintBanner } from '@/components/gizwits-probe-hint-banner';
-import { CopilotBanner } from '@/components/copilot-banner';
-import { MonitorPanel } from '@/components/monitor-panel';
-import { NoticeBanner } from '@/components/notice-banner';
-import { StaleDataNotice } from '@/components/stale-data-notice';
-import { Surface } from '@/components/surface';
-import { MaxContentWidth, Spacing, TitleType } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { Card, Kicker } from '@/components/card';
+import { ConsoleCard, DataFieldsCard, EquipmentCard } from '@/components/cockpit/info-cards';
+import { LiveChart } from '@/components/cockpit/live-chart';
+import { MetricGrid } from '@/components/cockpit/metric-grid';
+import { SpeedHero } from '@/components/cockpit/speed-hero';
+import { VitalsRow } from '@/components/cockpit/vitals-row';
 import {
-  correctInclinationPercent,
-  T600X_INCLINATION_RANGE,
-} from '@/treadmill/t600x';
+  BodyType,
+  Fonts,
+  LabelType,
+  MaxContentWidth,
+  Metric,
+  Neon,
+  Radius,
+  Spacing,
+  TitleType,
+  withAlpha,
+} from '@/constants/theme';
+import { useNow } from '@/hooks/use-now';
+import { T600X_SPEED_RANGE, looksLikeMatrixConsole } from '@/treadmill/t600x';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
 
+/** Depois disso sem pacote, a esteira "emudeceu" e a tela avisa. */
+const STALE_AFTER_MS = 5000;
+
+function StatusDot({ live }: { live: boolean }) {
+  const color = live ? '#3DE8A0' : '#FFC24B';
+  return (
+    <View style={styles.statusRow}>
+      <View style={[styles.statusDot, { backgroundColor: color }]} />
+      <Text style={[styles.statusText, { color }]}>{live ? 'conectado' : 'aguardando dados'}</Text>
+    </View>
+  );
+}
+
+function InlineNotice() {
+  const notice = useTreadmill((state) => state.notice);
+  const actions = useTreadmillActions();
+  if (!notice) {
+    return null;
+  }
+  const color =
+    notice.kind === 'error'
+      ? '#FF3B4E'
+      : notice.kind === 'warning'
+        ? '#FFC24B'
+        : notice.kind === 'success'
+          ? '#3DE8A0'
+          : Metric.incline;
+
+  return (
+    <View
+      style={[
+        styles.notice,
+        { borderColor: withAlpha(color, 0.4), backgroundColor: withAlpha(color, 0.1) },
+      ]}
+      accessibilityRole="alert">
+      <Text style={[styles.noticeText, { color }]}>{notice.message}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Fechar aviso"
+        onPress={actions.dismissNotice}
+        hitSlop={10}
+        style={styles.noticeClose}>
+        <Text style={[styles.noticeCloseText, { color }]}>×</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 /**
- * Painel depois de conectar: o copiloto diz o que fazer no topo, e logo abaixo
- * fica o monitoramento — velocidade, inclinação, batimentos e as demais
- * medidas. O app não tem botões de comando: quem controla a esteira é o painel.
+ * O cockpit: tudo o que a esteira informa, em camadas — o número que se lê de
+ * longe (velocidade), os dois que dizem como está o esforço (inclinação e
+ * batimentos), o gráfico dos últimos 60 s, a grade do treino e, no fim, a
+ * identidade do equipamento e a lista honesta do que o firmware manda ou não.
+ *
+ * O app não tem botão de comando: quem controla a lona é o painel da esteira.
  */
 export function DashboardScreen() {
   // A pessoa está correndo com o celular apoiado no painel: a tela não pode apagar.
   useKeepAwake();
 
-  const theme = useTheme();
-  const phase = useTreadmill((s) => s.phase);
-  const deviceName = useTreadmill((s) => s.device?.name ?? null);
-  const identityConfirmed = useTreadmill((s) => s.identityConfirmed);
-  const belt = useTreadmill((s) => s.belt);
-  const metrics = useTreadmill((s) => s.metrics);
-  const declaredInclinationRange = useTreadmill(
-    (s) => s.capabilities?.inclinationRange ?? T600X_INCLINATION_RANGE,
-  );
-  const gizwitsStatus = useTreadmill((s) => s.gizwitsProbe.status);
+  const now = useNow(1000);
+  const phase = useTreadmill((state) => state.phase);
+  const deviceName = useTreadmill((state) => state.device?.name ?? null);
+  const metrics = useTreadmill((state) => state.metrics);
+  const samples = useTreadmill((state) => state.samples);
+  const status = useTreadmill((state) => state.status);
+  const equipment = useTreadmill((state) => state.equipment);
+  const capabilities = useTreadmill((state) => state.capabilities);
+  const link = useTreadmill((state) => state.link);
   const actions = useTreadmillActions();
 
-  // O usuário tocou no nome da esteira dele para conectar: isso já é a
-  // confirmação. O estado da sessão guarda essa confirmação para a sonda.
-  useEffect(() => {
-    if (!identityConfirmed && phase === 'connected') {
-      actions.confirmIdentity();
-    }
-  }, [actions, identityConfirmed, phase]);
-
-  // Assim que a esteira está confirmada, o painel faz sozinho o teste do canal
-  // alternativo (Gizwits): assina o FFF4, pede “machine info” e mostra o
-  // resultado no cartão. Só roda uma vez por conexão.
-  useEffect(() => {
-    const readyForProbe =
-      gizwitsStatus === 'idle' || (gizwitsStatus === 'waitingBelt' && belt !== 'running');
-    if (identityConfirmed && readyForProbe) {
-      actions.runGizwitsProbe();
-    }
-  }, [actions, belt, gizwitsStatus, identityConfirmed]);
-
-  // O FTMS desta família informa a inclinação ~6,667× maior que o painel; a
-  // faixa declarada (0–50 %/3 %) é template do firmware e denuncia a escala.
-  const displayMetrics = {
-    ...metrics,
-    inclinationPercent: correctInclinationPercent(
-      metrics.inclinationPercent,
-      declaredInclinationRange,
-    ),
-  };
+  const speedRange = capabilities?.speedRange ?? T600X_SPEED_RANGE;
+  const silentForMs =
+    now !== null && link.lastPacketAt !== null ? Math.max(now - link.lastPacketAt, 0) : null;
+  const stale = silentForMs !== null && silentForMs > STALE_AFTER_MS;
+  const live = link.lastPacketAt !== null && !stale;
 
   const disconnecting = phase === 'disconnecting';
+  const heartSamples = samples
+    .map((sample) => sample.heartRateBpm)
+    .filter((value): value is number => value !== null)
+    .slice(-24);
 
   return (
     <SafeAreaView
       edges={['top', 'left', 'right']}
-      style={[styles.safe, { backgroundColor: theme.background }]}>
-      <AmbientGlow intensity={0.5} />
-      {/* Fora da rolagem: no topo, a ação pedida pelo teste (se houver) e a instrução do copiloto. */}
-      <GizwitsProbeHintBanner />
-      <CopilotBanner />
-      <ScrollView contentContainerStyle={styles.scroll}>
+      style={[styles.safe, { backgroundColor: '#06080D' }]}>
+      <AmbientGlow colors={[Neon.cyan, Neon.volt]} intensity={0.32} />
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        contentInsetAdjustmentBehavior="automatic">
         <View style={styles.content}>
           <View style={styles.header}>
-            <View style={styles.headerTop}>
-              <BrandMark size="sm" />
-              <ActionButton
-                variant="text"
-                label={disconnecting ? 'Desconectando…' : 'Desconectar'}
-                onPress={actions.disconnect}
-                disabled={disconnecting}
-              />
+            <View style={styles.headerText}>
+              <Kicker color={Metric.speed}>Gym Burn</Kicker>
+              <Text style={[styles.deviceName, TitleType]} numberOfLines={1} accessibilityRole="header">
+                {deviceName ?? 'Esteira'}
+              </Text>
+              <StatusDot live={live} />
             </View>
-            <Text
-              style={[styles.deviceName, TitleType, { color: theme.text }]}
-              numberOfLines={1}
-              accessibilityRole="header">
-              {deviceName ?? 'Esteira'}
-            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Desconectar da esteira"
+              onPress={actions.disconnect}
+              disabled={disconnecting}
+              hitSlop={8}
+              style={styles.disconnect}>
+              <Text style={styles.disconnectText}>
+                {disconnecting ? 'saindo…' : 'Desconectar'}
+              </Text>
+            </Pressable>
           </View>
 
-          {belt === 'safetyKey' ? (
-            <Surface accent={theme.noticeError} style={styles.safetyCard}>
-              <Text
-                accessibilityRole="alert"
-                style={[styles.safetyKeyText, { color: theme.noticeError }]}>
-                Lona parada pelo Emergency Stop ou pela chave de segurança. Libere o botão, recoloque
-                a chave e inicie pelo painel da esteira.
+          {status.stoppedBySafetyKey ? (
+            <View style={[styles.safety, { borderColor: withAlpha('#FF3B4E', 0.5) }]}>
+              <Text style={styles.safetyTitle}>Lona parada pela chave de segurança</Text>
+              <Text style={styles.safetyText}>
+                Recoloque a chave e inicie pelo painel da esteira. O app só lê os dados.
               </Text>
-            </Surface>
+            </View>
           ) : null}
-          <NoticeBanner />
-          <StaleDataNotice />
 
-          <MonitorPanel metrics={displayMetrics} />
+          <InlineNotice />
 
-          <ControlPanel />
+          {stale ? (
+            <View style={styles.stale}>
+              <Text style={styles.staleText}>
+                A esteira parou de enviar dados
+                {silentForMs !== null ? ` há ${Math.round(silentForMs / 1000)} s` : ''}. Fique
+                perto do painel ou reconecte.
+              </Text>
+            </View>
+          ) : null}
 
-          <GizwitsProbeCard />
+          <SpeedHero metrics={metrics} speedRange={speedRange} live={live} />
 
-          <Text style={[styles.footnote, { color: theme.textSecondary }]}>
-            Para parar ou mudar velocidade e inclinação, use o painel da esteira. O botão vermelho
-            (Emergency Stop) e a chave de segurança são a parada real.
+          <VitalsRow
+            inclinationPercent={metrics.inclinationPercent}
+            heartRateBpm={metrics.heartRateBpm}
+            heartSamples={heartSamples}
+          />
+
+          <LiveChart samples={samples} metrics={metrics} />
+
+          <MetricGrid metrics={metrics} />
+
+          <ConsoleCard status={status} />
+          <EquipmentCard equipment={equipment} capabilities={capabilities} />
+          <DataFieldsCard metrics={metrics} />
+
+          <Card style={styles.aboutCard}>
+            <Text style={styles.aboutTitle}>Só leitura, por decisão</Text>
+            <Text style={styles.aboutText}>
+              Esta esteira não aceita comandos de velocidade ou inclinação por Bluetooth: ela
+              informa os dados, e o painel continua sendo o controle. Para parar, use o botão
+              vermelho (Emergency Stop) e a chave de segurança.
+            </Text>
+            {looksLikeMatrixConsole(deviceName) ? (
+              <Text style={styles.aboutHint}>
+                Painel na tela de APP: segure o botão Bluetooth por 5 s.
+              </Text>
+            ) : null}
+          </Card>
+
+          <Text style={styles.footer}>
+            Gym Burn · monitor da esteira
           </Text>
         </View>
       </ScrollView>
@@ -137,9 +205,9 @@ const styles = StyleSheet.create({
   },
   scroll: {
     flexGrow: 1,
-    paddingHorizontal: Spacing.three,
+    paddingHorizontal: Spacing.four,
     paddingTop: Spacing.three,
-    paddingBottom: Spacing.four,
+    paddingBottom: Spacing.six,
   },
   content: {
     width: '100%',
@@ -148,29 +216,135 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
   },
   header: {
-    gap: Spacing.one,
-  },
-  headerTop: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: Spacing.two,
+    paddingTop: Spacing.one,
+  },
+  headerText: {
+    flexShrink: 1,
+    gap: 2,
   },
   deviceName: {
-    flexShrink: 1,
-    fontSize: 22,
-    lineHeight: 26,
+    fontSize: 26,
+    lineHeight: 30,
+    color: '#F3F7FF',
   },
-  safetyCard: {
-    paddingVertical: Spacing.two + Spacing.half,
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
   },
-  safetyKeyText: {
-    fontSize: 16,
-    lineHeight: 22,
-    fontWeight: 700,
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
-  footnote: {
+  statusText: {
+    ...LabelType,
+    fontSize: 10,
+    letterSpacing: 1.2,
+  },
+  disconnect: {
+    minHeight: 48,
+    justifyContent: 'center',
+    paddingLeft: Spacing.two,
+  },
+  disconnectText: {
+    fontFamily: Fonts.body,
     fontSize: 13,
-    lineHeight: 19,
+    color: '#9AA7B8',
+  },
+  safety: {
+    borderWidth: 1,
+    borderRadius: Radius.lg,
+    padding: Spacing.three,
+    backgroundColor: withAlpha('#FF3B4E', 0.1),
+    gap: 2,
+  },
+  safetyTitle: {
+    fontFamily: Fonts.body,
+    fontSize: 14,
+    lineHeight: 18,
+    color: '#FF5B6B',
+    fontWeight: '700',
+  },
+  safetyText: {
+    ...BodyType,
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#FF9AA5',
+  },
+  notice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    paddingLeft: Spacing.three,
+    paddingRight: Spacing.one,
+    paddingVertical: Spacing.two,
+  },
+  noticeText: {
+    flex: 1,
+    ...BodyType,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  noticeClose: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noticeCloseText: {
+    fontSize: 20,
+    lineHeight: 22,
+  },
+  stale: {
+    borderWidth: 1,
+    borderColor: withAlpha('#FFC24B', 0.4),
+    backgroundColor: withAlpha('#FFC24B', 0.1),
+    borderRadius: Radius.md,
+    padding: Spacing.three,
+  },
+  staleText: {
+    ...BodyType,
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#FFC24B',
+  },
+  aboutCard: {
+    gap: Spacing.one,
+  },
+  aboutTitle: {
+    fontFamily: Fonts.body,
+    fontSize: 13,
+    lineHeight: 18,
+    color: '#F3F7FF',
+    fontWeight: '700',
+  },
+  aboutText: {
+    ...BodyType,
+    fontSize: 12,
+    lineHeight: 17,
+    color: '#9AA7B8',
+  },
+  aboutHint: {
+    ...BodyType,
+    fontSize: 11,
+    lineHeight: 16,
+    color: Metric.speed,
+    marginTop: 2,
+  },
+  footer: {
+    ...LabelType,
+    fontSize: 9,
+    letterSpacing: 1.4,
+    textAlign: 'center',
+    color: '#5C687A',
+    marginTop: Spacing.two,
   },
 });

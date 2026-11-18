@@ -5,6 +5,9 @@ import type { FtmsAdvertisement } from '@/ftms';
  * a real (`ble-manager-transport.ts`) e a esteira simulada do modo
  * demonstração e dos testes (`src/simulator`).
  *
+ * O contrato é só de leitura: o app não manda comando para a esteira, então
+ * não existe escrita de característica (nem GATT write, nem Control Point).
+ *
  * UUIDs entram e saem em qualquer formato aceito por `normalizeUuid`; quem
  * compara é responsável por normalizar.
  */
@@ -34,9 +37,8 @@ export interface ScannedDevice {
   /** Service Data do FTMS decodificado, quando o anúncio traz. */
   ftms: FtmsAdvertisement | null;
   /**
-   * O anúncio em texto (serviços, Service Data, dados do fabricante), só para o
-   * registro: se a esteira não for reconhecida, é por aqui que se vê como ela
-   * se anuncia.
+   * O anúncio em texto (serviços, Service Data, dados do fabricante). Fica
+   * disponível para a tela de detalhes mostrar como a esteira se anuncia.
    */
   advertisement?: string | null;
 }
@@ -44,7 +46,6 @@ export interface ScannedDevice {
 export interface CharacteristicInfo {
   uuid: string;
   canRead: boolean;
-  canWrite: boolean;
   canNotify: boolean;
   canIndicate: boolean;
 }
@@ -62,7 +63,7 @@ export interface BleConnection {
   readonly deviceId: string;
   readonly name: string | null;
 
-  /** Tudo o que o equipamento expõe, para o diagnóstico. */
+  /** Tudo o que o equipamento expõe. */
   getServices(): Promise<ServiceInfo[]>;
 
   /** Características de um serviço; lista vazia se o equipamento não tem o serviço. */
@@ -70,13 +71,10 @@ export interface BleConnection {
 
   read(serviceUuid: string, characteristicUuid: string): Promise<Uint8Array>;
 
-  /** Escrita com resposta (GATT Write Characteristic Value). */
-  write(serviceUuid: string, characteristicUuid: string, data: Uint8Array): Promise<void>;
-
   /**
    * Habilita notify ou indicate e entrega cada valor recebido. A promise só
-   * resolve depois que o equipamento confirmou a habilitação — o Control Point
-   * recusa escritas antes disso.
+   * resolve depois que o equipamento confirmou a habilitação — a primeira
+   * notificação não se perde.
    */
   subscribe(
     serviceUuid: string,

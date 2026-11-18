@@ -11,6 +11,8 @@ import {
   formatPace,
   formatSigned,
   formatTrimmed,
+  signalLabel,
+  signalLevel,
 } from '../format';
 
 describe('formatDecimal', () => {
@@ -115,5 +117,36 @@ describe('formatHex32', () => {
   it('mostra 8 dígitos em maiúsculas, inclusive com o bit 31 ligado', () => {
     expect(formatHex32(0x1a)).toBe('0x0000001A');
     expect(formatHex32(0x80000001)).toBe('0x80000001');
+  });
+});
+
+describe('signalLevel', () => {
+  it('acende as quatro barras para sinal forte', () => {
+    expect(signalLevel(-40)).toBe(4);
+    expect(signalLevel(-60)).toBe(4);
+  });
+
+  it('vai perdendo barras com a distância', () => {
+    expect(signalLevel(-65)).toBe(3);
+    expect(signalLevel(-70)).toBe(3);
+    expect(signalLevel(-75)).toBe(2);
+    expect(signalLevel(-80)).toBe(2);
+    expect(signalLevel(-81)).toBe(1);
+    expect(signalLevel(-95)).toBe(1);
+  });
+
+  it('sem RSSI não acende nenhuma barra', () => {
+    expect(signalLevel(null)).toBe(0);
+    expect(signalLevel(Number.NaN)).toBe(0);
+  });
+});
+
+describe('signalLabel', () => {
+  it('descreve o sinal em palavras, sem depender de cor', () => {
+    expect(signalLabel(4)).toBe('Sinal forte');
+    expect(signalLabel(3)).toBe('Sinal forte');
+    expect(signalLabel(2)).toBe('Sinal médio');
+    expect(signalLabel(1)).toBe('Sinal fraco');
+    expect(signalLabel(0)).toBe('Sinal desconhecido');
   });
 });

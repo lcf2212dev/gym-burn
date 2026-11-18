@@ -36,27 +36,9 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-example
-
 # generated native folders
 /ios
 /android
 
-# Python
-__pycache__/
-*.pyc
-
-# Material local de engenharia reversa (APKs de terceiros e descompilados)
-/gymburn-re/
-
-# Logs coletados do aparelho (contêm MACs de dispositivos BLE)
-/gymburn-logs/
-
-# Artefatos de execução do app / capturas
+# Artefatos locais de execução / capturas de tela
 /.phone/
-
-# Ponte BLE (app Android separado)
-bridge-app/build/
-bridge-app/app/build/
-bridge-app/.gradle/
-bridge-app/local.properties

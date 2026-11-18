@@ -2,7 +2,7 @@
   "expo": {
     "name": "Gym Burn",
     "slug": "gym-burn",
-    "version": "1.3.8",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "gymburn",
@@ -22,7 +22,7 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.gymburn.app",
       "userInterfaceStyle": "dark",
-      "versionCode": 12
+      "versionCode": 13
     },
     "plugins": [
       "expo-router",
@@ -39,10 +39,9 @@
         {
           "neverForLocation": true,
           "isBleRequired": true,
-          "bluetoothAlwaysPermission": "O Gym Burn usa o Bluetooth para ler os dados da esteira e ajustar velocidade e inclinação."
+          "bluetoothAlwaysPermission": "O Gym Burn usa o Bluetooth para ler os dados da esteira."
         }
-      ],
-      "expo-sharing"
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

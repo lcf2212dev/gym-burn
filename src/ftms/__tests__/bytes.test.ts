@@ -61,7 +61,7 @@ describe('utf8Decode', () => {
 describe('UUIDs', () => {
   it('expande UUIDs de 16 bits', () => {
     expect(uuid16(0x1826)).toBe('00001826-0000-1000-8000-00805f9b34fb');
-    expect(FTMS.controlPoint).toBe('00002ad9-0000-1000-8000-00805f9b34fb');
+    expect(FTMS.machineStatus).toBe('00002ada-0000-1000-8000-00805f9b34fb');
   });
 
   it('normaliza os formatos que cada plataforma devolve', () => {
@@ -71,7 +71,7 @@ describe('UUIDs', () => {
     expect(normalizeUuid('00001826')).toBe(full);
     expect(normalizeUuid('00001826-0000-1000-8000-00805F9B34FB')).toBe(full);
     expect(sameUuid('2ACD', FTMS.treadmillData)).toBe(true);
-    expect(sameUuid('2ACD', FTMS.controlPoint)).toBe(false);
+    expect(sameUuid('2ACD', FTMS.machineStatus)).toBe(false);
   });
 
   it('encurta para exibição só os UUIDs do Bluetooth SIG', () => {
@@ -83,7 +83,7 @@ describe('UUIDs', () => {
   });
 
   it('dá nome às características conhecidas', () => {
-    expect(characteristicName('2AD9')).toBe('Fitness Machine Control Point');
+    expect(characteristicName('2ACD')).toBe('Treadmill Data');
     expect(characteristicName('FFF1')).toBe('0000fff1-0000-1000-8000-00805f9b34fb');
   });
 });

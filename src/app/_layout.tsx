@@ -9,7 +9,6 @@ import * as SystemUI from 'expo-system-ui';
 import { useEffect, useState } from 'react';
 
 import { createAppServices } from '@/app-services';
-import { RecorderProvider } from '@/logging/recorder-context';
 import { Colors, Neon } from '@/constants/theme';
 import { TreadmillProvider } from '@/treadmill/treadmill-context';
 
@@ -36,7 +35,7 @@ const navigationTheme = {
 };
 
 export default function RootLayout() {
-  // Um gravador e uma sessão durante toda a vida do app.
+  // Uma sessão durante toda a vida do app.
   const [services] = useState(createAppServices);
   // Importa só os pesos usados, não a família inteira.
   const [fontsLoaded, fontError] = useFonts({
@@ -58,14 +57,12 @@ export default function RootLayout() {
   }
 
   return (
-    <RecorderProvider store={services.recorder}>
-      <TreadmillProvider store={services.session}>
-        {/* O esquema é fixo no escuro (ver `use-color-scheme`). */}
-        <ThemeProvider value={navigationTheme}>
-          <StatusBar style="light" />
-          <Stack screenOptions={{ headerShown: false }} />
-        </ThemeProvider>
-      </TreadmillProvider>
-    </RecorderProvider>
+    <TreadmillProvider store={services.session}>
+      {/* O esquema é fixo no escuro (ver `use-color-scheme`). */}
+      <ThemeProvider value={navigationTheme}>
+        <StatusBar style="light" />
+        <Stack screenOptions={{ headerShown: false }} />
+      </ThemeProvider>
+    </TreadmillProvider>
   );
 }

@@ -26,17 +26,16 @@ describe('decodeDeviceInformationText', () => {
     expect(decodeDeviceInformationText(Uint8Array.of(0, 0, 0))).toBe('');
   });
 
-  it('escapa controle e não ASCII: o registro é uma linha por evento', () => {
-    expect(decodeDeviceInformationText(Uint8Array.of(0x41, 0x0a, 0x0d, 0x42))).toBe('A\\x0A\\x0DB');
-    expect(decodeDeviceInformationText(Uint8Array.of(0x4d, 0xc2, 0xae))).toBe('M\\xC2\\xAE');
-  });
-
-  it('escapa a própria barra invertida, para o escape não ser ambíguo', () => {
-    expect(decodeDeviceInformationText(ascii('a\\b'))).toBe('a\\x5Cb');
-  });
-
-  it('escapa aspas e "=", para o valor não fechar o texto nem imitar a coluna hex=', () => {
-    expect(decodeDeviceInformationText(ascii('T6"  hex=AA'))).toBe('T6\\x22  hex\\x3DAA');
+  it('decodifica UTF-8 (o GSS manda estas características em UTF-8)', () => {
+    // "Matrix®" e "Inclinação"
+    expect(decodeDeviceInformationText(Uint8Array.of(0x4d, 0x61, 0x74, 0x72, 0x69, 0x78, 0xc2, 0xae))).toBe(
+      'Matrix®',
+    );
+    expect(
+      decodeDeviceInformationText(
+        Uint8Array.of(0x49, 0x6e, 0x63, 0x6c, 0x69, 0x6e, 0x61, 0xc3, 0xa7, 0xc3, 0xa3, 0x6f),
+      ),
+    ).toBe('Inclinação');
   });
 });
 

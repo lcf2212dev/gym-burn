@@ -12,6 +12,13 @@ export const T600X_SPEED_RANGE: RangeInfo = {
   source: 'assumed',
 };
 
+export const T600X_INCLINATION_RANGE: RangeInfo = {
+  min: 0,
+  max: 15,
+  step: 0.5,
+  source: 'assumed',
+};
+
 /**
  * Nomes com que consoles da Matrix e da Vision se anunciam, segundo capturas de
  * scanner BLE publicadas por donos desses aparelhos: `CTM` + número de série
@@ -22,13 +29,6 @@ export const T600X_SPEED_RANGE: RangeInfo = {
 export function looksLikeMatrixConsole(name: string | null): boolean {
   return name !== null && /^(CTM|MX-TM|MATRIX)/i.test(name.trim());
 }
-
-export const T600X_INCLINATION_RANGE: RangeInfo = {
-  min: 0,
-  max: 15,
-  step: 0.5,
-  source: 'assumed',
-};
 
 /**
  * Fator de conversão do contador interno de inclinação desta família de firmware
@@ -49,16 +49,4 @@ export function correctInclinationPercent(percent: number | null, range: RangeIn
   if (!implausible) return percent;
   const corrected = percent * T600X_INCLINATION_READING_FACTOR;
   return Math.min(Math.max(corrected, 0), T600X_INCLINATION_RANGE.max);
-}
-
-/**
- * Faixa plausível para comandos de inclinação. O FTMS da T600X declara 0–50 % com
- * passo 3 % (constante de template do firmware), mas a mecânica é 0–15 % com
- * 0,5 %: quantizar um comando real pela faixa declarada daria saltos e alvos que
- * a máquina não tem. Uma faixa declarada dentro da ficha é respeitada.
- */
-export function plausibleInclinationRange(range: RangeInfo): RangeInfo {
-  const implausible =
-    range.max > T600X_INCLINATION_RANGE.max || range.step > T600X_INCLINATION_RANGE.step;
-  return implausible ? T600X_INCLINATION_RANGE : range;
 }

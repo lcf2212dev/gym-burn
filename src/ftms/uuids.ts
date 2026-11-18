@@ -32,7 +32,11 @@ export function sameUuid(a: string, b: string): boolean {
   return normalizeUuid(a) === normalizeUuid(b);
 }
 
-/** Fitness Machine Service e as características usadas por uma esteira. */
+/**
+ * Fitness Machine Service e as características que uma esteira expõe. O Control
+ * Point (0x2AD9) não está aqui de propósito: este app só lê a esteira, e
+ * nenhuma característica de comando é assinada nem escrita.
+ */
 export const FTMS = {
   service: uuid16(0x1826),
   feature: uuid16(0x2acc),
@@ -40,7 +44,6 @@ export const FTMS = {
   trainingStatus: uuid16(0x2ad3),
   supportedSpeedRange: uuid16(0x2ad4),
   supportedInclinationRange: uuid16(0x2ad5),
-  controlPoint: uuid16(0x2ad9),
   machineStatus: uuid16(0x2ada),
 } as const;
 
@@ -50,7 +53,6 @@ const CHARACTERISTIC_NAMES: Record<string, string> = {
   [FTMS.trainingStatus]: 'Training Status',
   [FTMS.supportedSpeedRange]: 'Supported Speed Range',
   [FTMS.supportedInclinationRange]: 'Supported Inclination Range',
-  [FTMS.controlPoint]: 'Fitness Machine Control Point',
   [FTMS.machineStatus]: 'Fitness Machine Status',
   [uuid16(0x2ace)]: 'Cross Trainer Data',
   [uuid16(0x2acf)]: 'Step Climber Data',

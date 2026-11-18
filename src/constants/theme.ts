@@ -1,36 +1,40 @@
 import { Platform, type TextStyle } from 'react-native';
 
 /**
- * Tema do Gym Burn: "carbono + neon".
+ * Identidade visual do Gym Burn: "cockpit de academia".
  *
- * Um único tema, escuro. O app é usado apoiado no painel de uma esteira, com a
- * academia mal iluminada, então a tela é um console: fundo quase preto,
- * superfícies de grafite, contorno fino e neon reservado ao que importa —
- * ação principal, números do treino e estados.
+ * O app é usado com o celular apoiado no painel da esteira, na academia mal
+ * iluminada. A tela é um painel de instrumentos: fundo quase preto, cartões de
+ * vidro escuro com contorno fino, e cor só onde há dado — velocidade, inclinação
+ * e batimentos têm cor própria e constante, para o olho aprender onde olhar.
  *
  * Regras:
- * - `text` é conteúdo, `textSecondary` é apoio, `textMuted` é só decoração.
- *   O texto de leitura nunca usa neon puro em tamanho pequeno.
- * - Neon pode ser fundo de botão (com texto escuro), contorno, traço ou
- *   número grande — nunca corpo de texto.
- * - A cor tem significado fixo: volt = agir/iniciar, ciano = inclinação,
- *   âmbar = atenção/pausa, vermelho = parar/erro, menta = sucesso.
+ * - `text` é conteúdo; `textSecondary` é apoio; `textMuted` é só o que não veio.
+ * - Cor saturada é para número grande, medidor, gráfico e estado — nunca para
+ *   corpo de texto pequeno.
+ * - Cada série do gráfico usa a mesma cor do seu cartão. Não troque os papéis.
  */
 const Carbon = {
-  text: '#F4F8FF',
-  textSecondary: '#9CABC0',
-  textMuted: '#66758A',
-  background: '#070A10',
-  backgroundElement: '#0D131C',
-  backgroundSelected: '#1A2433',
-  border: '#243141',
-  surfaceRaised: '#121A25',
+  text: '#F3F7FF',
+  textSecondary: '#9AA7B8',
+  textMuted: '#5C687A',
+  /** Fundo da janela. */
+  background: '#06080D',
+  /** Fundo de cartão. */
+  backgroundElement: '#0B0F16',
+  /** Cartão acima de cartão. */
+  surfaceRaised: '#121823',
+  /** Poço: gráfico, medidor, barras. */
   surfaceSunken: '#04060A',
-  /** Tudo que é inclinação: número, medidor e botões. */
-  incline: '#35E8FF',
+  backgroundSelected: '#1A2433',
+  border: '#222B38',
+  /** Contorno de cartão em destaque (hero). */
+  borderStrong: '#2E3A4B',
+  /** Inclinação: número, medidor e série. */
+  incline: '#3DDBFF',
   noticeError: '#FF5B6B',
   noticeWarning: '#FFC24B',
-  noticeSuccess: '#45F0A8',
+  noticeSuccess: '#3DE8A0',
 } as const;
 
 export const Colors = {
@@ -42,68 +46,64 @@ export const Colors = {
 export type ThemeColor = keyof typeof Carbon;
 
 /**
- * Acentos neon. Cada um tem um papel no app; não troque os papéis, troque a
- * matiz se precisar (todos foram escolhidos para contraste sobre `background`).
+ * Cor de cada grandeza. É o que amarra o cartão, o número e a série do gráfico:
+ * velocidade é volt, inclinação é ciano, batimentos são rosa.
  */
+export const Metric = {
+  speed: '#C8FF3D',
+  incline: '#3DDBFF',
+  heart: '#FF4D6D',
+  distance: '#8B7CFF',
+  energy: '#FFB020',
+  time: '#DCE6F5',
+} as const;
+
+export type MetricKey = keyof typeof Metric;
+
+/** Acentos de interface: estado, ação e alerta. */
 export const Neon = {
-  /** Ação principal, início da lona, velocidade. */
-  volt: '#C6FF3D',
-  /** Inclinação, dados vindos da esteira. */
-  cyan: '#35E8FF',
-  /** Destaque raro: roteiro, diagnóstico. */
+  /** Ação principal e identidade da marca: lima. */
+  volt: Metric.speed,
+  cyan: Metric.incline,
+  /** Destaque raro: demonstração, detalhes. */
   magenta: '#FF3D9A',
-  /** Atenção, pausa. */
-  amber: '#FFC24B',
-  /** Parar, erro. */
+  amber: Metric.energy,
   red: '#FF3B4E',
-  /** Confirmação, sucesso. */
-  mint: '#45F0A8',
-  /** Apoio secundário: roteiro, tags. */
-  violet: '#9B8CFF',
+  mint: Carbon.noticeSuccess,
+  violet: Metric.distance,
 } as const;
 
-/**
- * Cores das ações da lona: são as cores que o usuário já conhece dos botões
- * físicos da esteira. `on*` é a cor do texto sobre cada uma.
- */
-export const ActionColors = {
-  go: Neon.volt,
-  onGo: '#0A1004',
-  pause: Neon.amber,
-  onPause: '#1A1200',
-  stop: Neon.red,
-  onStop: '#120306',
+/** Cor do texto sobre um fundo saturado. */
+export const OnAccent = '#080B0F';
+
+/** Opacidades padrão de superfícies de vidro. */
+export const Glass = {
+  /** Fundo de cartão comum. */
+  card: 'rgba(18, 24, 35, 0.72)',
+  /** Fundo do cartão principal. */
+  hero: 'rgba(20, 27, 39, 0.86)',
+  /** Fundo de poço (gráfico, medidor). */
+  well: 'rgba(4, 6, 10, 0.66)',
 } as const;
-
-/**
- * Escala de esforço do medidor de velocidade, da caminhada ao tiro. A cor é
- * escolhida pela posição da velocidade dentro da faixa da esteira.
- */
-export const SpeedHeat = [Neon.cyan, Neon.volt, Neon.amber, Neon.red] as const;
-
-/** Cor da escala de esforço para uma fração (0 a 1) da faixa de velocidade. */
-export function speedHeatColor(fraction: number): string {
-  const clamped = Math.min(Math.max(fraction, 0), 1);
-  const index = Math.min(Math.floor(clamped * SpeedHeat.length), SpeedHeat.length - 1);
-  return SpeedHeat[index];
-}
 
 export const Fonts = {
-  /** Algarismos condensados, como os de placar e número de peito; carregada em `_layout.tsx`. */
+  /** Algarismos condensados, como os de placar; carregada em `_layout.tsx`. */
   numeral: 'BarlowCondensed_600SemiBold',
-  /** Títulos e rótulos de ação: a voz da marca. */
+  /** Títulos: a voz da marca. */
   display: 'BarlowCondensed_700Bold',
   /** Kickers, tags e micro-rótulos em caixa alta. */
   label: 'BarlowCondensed_500Medium',
+  /** Corpo de texto: fonte do sistema (Roboto no Android), para leitura. */
+  body: Platform.select({ ios: 'System', default: 'sans-serif' }),
   mono: Platform.select({ ios: 'ui-monospace', default: 'monospace' }),
 } as const;
 
 /** Rótulo miúdo em caixa alta, o "kicker" das seções. */
 export const LabelType: TextStyle = {
   fontFamily: Fonts.label,
-  fontSize: 12,
-  lineHeight: 16,
-  letterSpacing: 1.8,
+  fontSize: 11,
+  lineHeight: 14,
+  letterSpacing: 1.6,
   textTransform: 'uppercase',
 };
 
@@ -116,7 +116,14 @@ export const NumeralType: TextStyle = {
 /** Título de tela na fonte de display, com um respiro entre as letras. */
 export const TitleType: TextStyle = {
   fontFamily: Fonts.display,
-  letterSpacing: 0.4,
+  letterSpacing: 0.2,
+};
+
+/** Corpo de leitura. */
+export const BodyType: TextStyle = {
+  fontFamily: Fonts.body,
+  fontSize: 14,
+  lineHeight: 20,
 };
 
 /** Adiciona transparência a uma cor `#RRGGBB` (as cores do tema são todas hex). */
@@ -137,7 +144,7 @@ export function withAlpha(color: string, alpha: number): string {
  * (`textShadow*` no Android e no iOS); use com parcimônia: é o que dá o efeito
  * de letreiro sem precisar de gradiente.
  */
-export function neonGlow(color: string, radius = 24, opacity = 0.4): TextStyle {
+export function neonGlow(color: string, radius = 20, opacity = 0.45): TextStyle {
   return {
     textShadowColor: withAlpha(color, opacity),
     textShadowOffset: { width: 0, height: 0 },
@@ -148,8 +155,10 @@ export function neonGlow(color: string, radius = 24, opacity = 0.4): TextStyle {
 export const Radius = {
   sm: 10,
   md: 14,
-  lg: 18,
-  xl: 24,
+  lg: 20,
+  xl: 26,
+  /** Cartão principal: canto bem arredondado, cara de painel. */
+  hero: 30,
   pill: 999,
 } as const;
 
@@ -157,19 +166,20 @@ export const Spacing = {
   half: 2,
   one: 4,
   two: 8,
-  three: 16,
-  four: 24,
-  five: 32,
-  six: 64,
+  three: 12,
+  four: 16,
+  five: 24,
+  six: 32,
+  seven: 48,
 } as const;
 
-/** Menor alvo de toque: o usuário está correndo, não parado. */
-export const MinTouchTarget = 56;
+/** Altura mínima de alvo de toque: o usuário está ofegante, não parado. */
+export const MinTouchTarget = 48;
 
 export const MaxContentWidth = 560;
 
-/** Altura dos botões da lona no rodapé do painel; Parar é o mais largo deles. */
-export const StopButtonHeight = 76;
+/** Altura reservada do gráfico ao vivo, para a tela não pular quando chega dado. */
+export const ChartHeight = 132;
 
-/** Opacidade de botões desabilitados (o estado precisa ser lido, não sumir). */
-export const DisabledOpacity = 0.42;
+/** Quantas amostras o gráfico mostra (1 por segundo ≈ 1 minuto). */
+export const ChartSampleCount = 60;

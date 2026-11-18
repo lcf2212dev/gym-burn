@@ -1,14 +1,12 @@
 import { createContext, useContext, useSyncExternalStore, type ReactNode } from 'react';
 
-import type { ProbeApi, TreadmillActions, TreadmillSnapshot } from './types';
+import type { TreadmillActions, TreadmillSnapshot } from './types';
 
-/** O que a interface precisa de uma sessão: estado observável e ações. */
+/** O que a interface precisa de uma sessão: estado observável e ações de leitura. */
 export interface TreadmillStore {
   subscribe(listener: () => void): () => void;
   getSnapshot(): TreadmillSnapshot;
   readonly actions: TreadmillActions;
-  /** Ferramenta de diagnóstico: lê e escreve características fora do FTMS. */
-  readonly probe: ProbeApi;
 }
 
 const TreadmillContext = createContext<TreadmillStore | null>(null);
@@ -46,9 +44,4 @@ export function useTreadmill<T>(selector: (snapshot: TreadmillSnapshot) => T): T
 /** Ações da sessão; o objeto é o mesmo durante toda a vida do app. */
 export function useTreadmillActions(): TreadmillActions {
   return useStore().actions;
-}
-
-/** A sonda GATT da conexão atual (ver ProbeApi). */
-export function useProbe(): ProbeApi {
-  return useStore().probe;
 }

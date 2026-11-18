@@ -1,57 +1,91 @@
 import { StyleSheet, View, type ViewProps } from 'react-native';
 
-import { Radius, Spacing, withAlpha } from '@/constants/theme';
+import { Glass, Radius, Spacing, withAlpha } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
-export type SurfaceTone = 'default' | 'raised' | 'sunken';
+export type SurfaceTone = 'default' | 'raised' | 'sunken' | 'hero';
 
 export interface SurfaceProps extends ViewProps {
-  /** Altura da superfície: `raised` se aproxima do usuário, `sunken` afunda. */
+  /** Altura da superfície: `raised`/`hero` se aproximam, `sunken` afunda. */
   tone?: SurfaceTone;
-  /** Barra de acento na borda esquerda (avisos, estados, destaque). */
+  /**
+   * Cor do halo em volta do cartão (zona de destaque: radar, esteira
+   * conectando). Um cartão comum não tem halo: o brilho é reservado ao foco.
+   */
+  glow?: string | null;
+  /** Barra de acento na borda esquerda (avisos, estados). */
   accent?: string | null;
-  /** Só o contorno, sem preenchimento: listas e blocos leves. */
+  /** Só o contorno, sem preenchimento de vidro. */
   plain?: boolean;
   /** Padding interno padrão; desligue para listas que desenham as próprias linhas. */
   padded?: boolean;
+  /** Raio do canto; por padrão `lg` e, no tom `hero`, o raio de painel. */
+  radius?: number;
 }
 
 /**
- * A superfície padrão do app: um cartão de grafite com contorno fino, canto
- * arredondado e um fio de luz no topo. O acento é uma barra interna (não uma
- * borda lateral), para o traço não deformar o raio do canto.
+ * O vidro escuro do app: preenchimento translúcido, contorno fino e um fio de
+ * luz no topo. `overflow: hidden` mantém o acento e o fio dentro do canto
+ * arredondado; o halo é desenhado pela própria sombra da View.
  */
 export function Surface({
   tone = 'default',
+  glow = null,
   accent = null,
   plain = false,
   padded = true,
+  radius,
   style,
   children,
   ...rest
 }: SurfaceProps) {
   const theme = useTheme();
   const backgrounds: Record<SurfaceTone, string> = {
-    default: theme.backgroundElement,
-    raised: theme.surfaceRaised,
-    sunken: theme.surfaceSunken,
+    default: Glass.card,
+    raised: Glass.hero,
+    sunken: Glass.well,
+    hero: Glass.hero,
   };
+  const borders: Record<SurfaceTone, string> = {
+    default: theme.border,
+    raised: theme.border,
+    sunken: theme.border,
+    hero: theme.borderStrong,
+  };
+  const resolvedRadius = radius ?? (tone === 'hero' ? Radius.hero : Radius.lg);
 
   return (
     <View
       style={[
         styles.base,
-        padded && styles.padded,
         {
+          borderRadius: resolvedRadius,
           backgroundColor: plain ? 'transparent' : backgrounds[tone],
-          borderColor: accent ? withAlpha(accent, 0.3) : theme.border,
+          borderColor: glow ? withAlpha(glow, 0.34) : borders[tone],
         },
+        glow
+          ? {
+              boxShadow: `0px 0px 26px 0px ${withAlpha(glow, 0.18)}, 0px 12px 44px 0px ${withAlpha(glow, 0.1)}`,
+            }
+          : null,
+        padded && styles.padded,
         style,
       ]}
       {...rest}>
-      {/* Fio de luz no topo: dá volume ao cartão sem sombra. */}
-      <View style={[styles.gloss, { backgroundColor: withAlpha(theme.text, 0.05) }]} />
-      {accent ? <View style={[styles.accentBar, { backgroundColor: accent }]} /> : null}
+      {/* Fio de luz no topo: dá volume ao vidro sem depender de gradiente. */}
+      <View
+        pointerEvents="none"
+        style={[
+          styles.gloss,
+          { backgroundColor: withAlpha(glow ?? theme.text, glow ? 0.42 : 0.06) },
+        ]}
+      />
+      {accent ? (
+        <View
+          pointerEvents="none"
+          style={[styles.accentBar, { backgroundColor: accent }]}
+        />
+      ) : null}
       {children}
     </View>
   );
@@ -59,25 +93,24 @@ export function Surface({
 
 const styles = StyleSheet.create({
   base: {
-    borderRadius: Radius.lg,
     borderWidth: 1,
     overflow: 'hidden',
   },
   padded: {
-    padding: Spacing.three,
+    padding: Spacing.four,
   },
   gloss: {
     position: 'absolute',
     top: 0,
-    left: 14,
-    right: 14,
+    left: 18,
+    right: 18,
     height: 1,
   },
   accentBar: {
     position: 'absolute',
     left: 0,
-    top: 14,
-    bottom: 14,
+    top: 16,
+    bottom: 16,
     width: 3,
     borderTopRightRadius: 2,
     borderBottomRightRadius: 2,

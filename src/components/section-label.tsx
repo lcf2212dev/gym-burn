@@ -7,7 +7,7 @@ import { useTheme } from '@/hooks/use-theme';
 export interface SectionLabelProps {
   label: string;
   accent?: string;
-  /** Conteúdo alinhado à direita: uma tag, um valor, um botão. */
+  /** Conteúdo alinhado à direita: uma tag, uma contagem, uma ação. */
   right?: ReactNode;
   style?: StyleProp<ViewStyle>;
 }
@@ -35,9 +35,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
+    minHeight: 18,
   },
   bar: {
-    width: 14,
+    width: 18,
     height: 2,
     borderRadius: 1,
   },
@@ -46,5 +47,6 @@ const styles = StyleSheet.create({
   },
   right: {
     marginLeft: 'auto',
+    flexShrink: 0,
   },
 });

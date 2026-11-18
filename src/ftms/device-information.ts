@@ -1,3 +1,4 @@
+import { utf8Decode } from './bytes';
 import { uuid16 } from './uuids';
 
 /**
@@ -32,26 +33,13 @@ export const DEVICE_INFORMATION_FIELDS: readonly DeviceInformationField[] = [
   { uuid: uuid16(0x2a50), name: 'PnP ID', text: false },
 ];
 
-/** ASCII imprimível que mesmo assim é escapado: `"`, `=` e `\`. */
-const ESCAPED_ASCII: readonly number[] = [0x22, 0x3d, 0x5c];
-
 /**
- * Texto de uma característica do Device Information para o registro. Termina
- * no primeiro byte nulo (preenchimento de string em C) e perde os espaços do
- * fim. Tudo o que não é ASCII imprimível vira `\xNN`, e também a barra invertida,
- * as aspas e o `=`: o registro é uma linha por evento, o texto vai entre aspas
- * seguido de `hex=`, e o valor vem de um aparelho de terceiros, então ele não
- * pode fechar as aspas nem imitar essa coluna. O hexadecimal original segue ao
- * lado no registro, então nada se perde.
+ * Texto de uma característica do Device Information para exibição: termina no
+ * primeiro byte nulo (preenchimento de string em C), perde os espaços do fim e
+ * decodifica os octetos como UTF-8, como o GATT Specification Supplement manda
+ * para estas características.
  */
 export function decodeDeviceInformationText(bytes: Uint8Array): string {
   const end = bytes.indexOf(0);
-  let text = '';
-  for (const byte of end === -1 ? bytes : bytes.subarray(0, end)) {
-    const printable = byte >= 0x20 && byte <= 0x7e && !ESCAPED_ASCII.includes(byte);
-    text += printable
-      ? String.fromCharCode(byte)
-      : `\\x${byte.toString(16).toUpperCase().padStart(2, '0')}`;
-  }
-  return text.trimEnd();
+  return utf8Decode(end === -1 ? bytes : bytes.subarray(0, end)).trimEnd();
 }

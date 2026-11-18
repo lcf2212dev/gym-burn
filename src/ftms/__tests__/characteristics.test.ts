@@ -125,10 +125,21 @@ describe('parseMachineStatus', () => {
   });
 
   it('lê os novos alvos de velocidade e inclinação', () => {
-    expect(parseMachineStatus(hexToBytes('05 1A 04'))).toEqual({
+    // O firmware desta família manda a velocidade alvo 16× acima da especificação:
+    // raw 8000 = 5,0 km/h (raw/100 daria 80 km/h). Ver o comentário do parser.
+    expect(parseMachineStatus(hexToBytes('05 40 1F'))).toEqual({
       type: 'targetSpeedChanged',
-      speedKmh: 10.5,
+      speedKmh: 5,
     });
+    expect(parseMachineStatus(hexToBytes('05 80 3E'))).toEqual({
+      type: 'targetSpeedChanged',
+      speedKmh: 10,
+    });
+    expect(parseMachineStatus(hexToBytes('05 00 00'))).toEqual({
+      type: 'targetSpeedChanged',
+      speedKmh: 0,
+    });
+    // A inclinação não tem o desvio: 0,1 % por unidade, com sinal.
     expect(parseMachineStatus(hexToBytes('06 19 00'))).toEqual({
       type: 'targetInclineChanged',
       inclinationPercent: 2.5,

@@ -93,3 +93,46 @@ export function formatClock(timestampMs: number): string {
 export function formatHex32(value: number): string {
   return `0x${(value >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
 }
+
+/**
+ * Quantas barras de sinal acender: 0 (o rádio não informou) a 4 (forte).
+ *
+ * Os limites são de proximidade — o celular fica apoiado no painel da esteira —,
+ * então um anúncio a −60 dBm é o esperado e abaixo de −80 dBm já é distância
+ * ou corpo no meio do caminho.
+ */
+export type SignalLevel = 0 | 1 | 2 | 3 | 4;
+
+export function signalLevel(rssi: number | null): SignalLevel {
+  if (rssi === null || !Number.isFinite(rssi)) {
+    return 0;
+  }
+  if (rssi >= -60) {
+    return 4;
+  }
+  if (rssi >= -70) {
+    return 3;
+  }
+  if (rssi >= -80) {
+    return 2;
+  }
+  return 1;
+}
+
+/**
+ * Rótulo do sinal para acessibilidade e para a linha de apoio do aparelho.
+ * Três palavras para quatro barras: 4 e 3 são "forte", 2 é "médio", 1 é "fraco".
+ */
+export function signalLabel(level: SignalLevel): string {
+  switch (level) {
+    case 4:
+    case 3:
+      return 'Sinal forte';
+    case 2:
+      return 'Sinal médio';
+    case 1:
+      return 'Sinal fraco';
+    default:
+      return 'Sinal desconhecido';
+  }
+}

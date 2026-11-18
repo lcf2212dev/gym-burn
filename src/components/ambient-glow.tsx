@@ -4,7 +4,7 @@ import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { Neon, withAlpha } from '@/constants/theme';
 
 export interface AmbientGlowProps {
-  /** Duas cores de halo: a de cima (canto superior direito) e a de baixo. */
+  /** Dois halos: o de cima (canto superior) e o de baixo (canto oposto). */
   colors?: readonly [string, string];
   /** 0 desliga, 1 é o padrão; use menos em telas densas. */
   intensity?: number;
@@ -12,31 +12,26 @@ export interface AmbientGlowProps {
 }
 
 /**
- * Fundo de ambiente: dois halos de neon muito discretos que tiram o preto
- * chapado do fundo sem competir com o conteúdo. O React Native não tem
- * gradiente radial sem dependência nativa, então o halo é a soma de muitas
- * camadas concêntricas com o mesmo alfa baixíssimo — visualmente contínuo, sem
- * os degraus de um punhado de círculos.
+ * Fundo de ambiente: halos de neon muito discretos que tiram o preto chapado
+ * sem competir com o conteúdo. O React Native não tem gradiente radial sem
+ * dependência nativa, então cada halo é a soma de camadas concêntricas com o
+ * mesmo alfa baixíssimo — visualmente contínuo, sem os degraus de um punhado de
+ * círculos.
  *
- * É decorativo: `pointerEvents="none"` e nenhum efeito no layout.
+ * É decorativo: `pointerEvents="none"`, nenhum efeito no layout e rasterizado
+ * para não repintar quando a tela anima.
  */
-function AmbientGlowBase({
-  colors = [Neon.cyan, Neon.cyan],
-  intensity = 1,
-  style,
-}: AmbientGlowProps) {
+function AmbientGlowBase({ colors = [Neon.cyan, Neon.volt], intensity = 1, style }: AmbientGlowProps) {
   return (
     <View
       pointerEvents="none"
-      // O halo é só decoração estática: rasterizar evita repintar 44 camadas
-      // a cada leitura da esteira (o painel re-renderiza em tempo real).
       renderToHardwareTextureAndroid
       shouldRasterizeIOS
       style={[StyleSheet.absoluteFill, styles.clip, style]}>
-      {/* Um foco frio no alto e outro no canto oposto: a tela ganha volume sem
-          perder o carbono como fundo. */}
-      <Halo color={colors[0]} size={820} x={-240} y={-560} intensity={intensity} />
-      <Halo color={colors[1]} size={880} x={-140} y={420} intensity={intensity * 0.6} />
+      {/* Foco frio atrás do topo (marca e título) e um segundo, mais discreto,
+          embaixo — a tela ganha profundidade e continua carbono. */}
+      <Halo color={colors[0]} size={780} x={-250} y={-460} intensity={intensity * 1.1} />
+      <Halo color={colors[1]} size={860} x={-190} y={430} intensity={intensity * 0.62} />
     </View>
   );
 }

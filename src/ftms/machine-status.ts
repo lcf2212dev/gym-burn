@@ -24,6 +24,17 @@ const OP = {
   controlPermissionLost: 0xff,
 } as const;
 
+/**
+ * Campo de velocidade alvo do firmware desta família (Matrix/Vision T600X).
+ *
+ * A especificação manda o campo em 0,01 km/h (raw/100), mas este firmware o
+ * grava 16× acima: uma lona a 5,0 km/h chega como raw 8000 — que lido pela
+ * especificação daria 80 km/h. O divisor abaixo (100 × 16 = 1600) é a correção
+ * desse desvio, confirmada nas capturas desta T600X. O campo de inclinação
+ * (0x06) não tem o problema: raw/10 já entrega o percentual.
+ */
+const FIRMWARE_SPEED_SCALE = 1600;
+
 export function parseMachineStatus(bytes: Uint8Array): MachineStatusEvent {
   if (bytes.length < 1) {
     throw new FtmsParseError('Fitness Machine Status vazio');
@@ -44,7 +55,7 @@ export function parseMachineStatus(bytes: Uint8Array): MachineStatusEvent {
       return { type: 'startedOrResumedByUser' };
     case OP.targetSpeedChanged:
       if (reader.canRead(2)) {
-        return { type: 'targetSpeedChanged', speedKmh: reader.u16() / 100 };
+        return { type: 'targetSpeedChanged', speedKmh: reader.u16() / FIRMWARE_SPEED_SCALE };
       }
       break;
     case OP.targetInclineChanged:

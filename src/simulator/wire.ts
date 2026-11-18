@@ -55,6 +55,7 @@ export const TREADMILL_FLAG = {
   instantaneousPace: 1 << 5,
   expendedEnergy: 1 << 7,
   heartRate: 1 << 8,
+  metabolicEquivalent: 1 << 9,
   elapsedTime: 1 << 10,
 } as const;
 
@@ -65,13 +66,8 @@ export const MACHINE_FEATURE_BIT = {
   pace: 5,
   expendedEnergy: 9,
   heartRate: 10,
+  metabolicEquivalent: 11,
   elapsedTime: 12,
-} as const;
-
-/** Bits do campo Target Setting Features (tabela 4.4) que o simulador liga. */
-export const TARGET_SETTING_BIT = {
-  speed: 0,
-  inclination: 1,
 } as const;
 
 /** Op codes do Fitness Machine Status (tabela 4.26). */
@@ -93,13 +89,15 @@ export const TRAINING_STATUS_CODE = {
 } as const;
 
 /** Foto do estado físico que vira um registro de Treadmill Data. */
-export interface TreadmillSnapshot {
+export interface TreadmillReading {
   speedKmh: number;
   distanceM: number;
   inclinationPercent: number;
   energyKcal: number;
   energyPerMinuteKcal: number;
   heartRateBpm: number;
+  /** METs calculados pelo console, como o firmware da T600X manda. */
+  metabolicEquivalent: number;
   elapsedS: number;
 }
 
@@ -120,42 +118,69 @@ function writePace(writer: ByteWriter, value: number, width: 1 | 2): void {
  * vai dividido usando o bit More Data (a 1ª parte não leva velocidade).
  */
 export function buildTreadmillData(
-  snapshot: TreadmillSnapshot,
+  reading: TreadmillReading,
   paceWidth: 0 | 1 | 2,
   split: boolean,
 ): Uint8Array[] {
   const F = TREADMILL_FLAG;
-  const rampDeg = (Math.atan(snapshot.inclinationPercent / 100) * 180) / Math.PI;
-  const pace = paceWidth === 0 ? 0 : encodePace(snapshot.speedKmh, paceWidth);
+  const rampDeg = (Math.atan(reading.inclinationPercent / 100) * 180) / Math.PI;
+  const pace = paceWidth === 0 ? 0 : encodePace(reading.speedKmh, paceWidth);
   const paceFlag = paceWidth === 0 ? 0 : F.instantaneousPace;
 
-  const writeDistance = (w: ByteWriter) => w.u24(snapshot.distanceM);
+  const writeDistance = (w: ByteWriter) => w.u24(reading.distanceM);
   const writeInclination = (w: ByteWriter) =>
-    w.s16(snapshot.inclinationPercent * 10).s16(rampDeg * 10);
+    w.s16(reading.inclinationPercent * 10).s16(rampDeg * 10);
   const writeEnergy = (w: ByteWriter) =>
     w
-      .u16(snapshot.energyKcal)
-      .u16(snapshot.energyPerMinuteKcal * 60)
-      .u8(snapshot.energyPerMinuteKcal);
+      .u16(reading.energyKcal)
+      .u16(reading.energyPerMinuteKcal * 60)
+      .u8(reading.energyPerMinuteKcal);
 
   if (!split) {
-    const flags = F.totalDistance | F.inclination | paceFlag | F.expendedEnergy | F.heartRate | F.elapsedTime;
-    const w = new ByteWriter().u16(flags).u16(snapshot.speedKmh * 100);
+    const flags =
+      F.totalDistance |
+      F.inclination |
+      paceFlag |
+      F.expendedEnergy |
+      F.heartRate |
+      F.metabolicEquivalent |
+      F.elapsedTime;
+    const w = new ByteWriter().u16(flags).u16(reading.speedKmh * 100);
     writeDistance(w);
     writeInclination(w);
     if (paceWidth !== 0) writePace(w, pace, paceWidth);
     writeEnergy(w);
-    w.u8(snapshot.heartRateBpm).u16(snapshot.elapsedS);
+    w.u8(reading.heartRateBpm).u8(reading.metabolicEquivalent * 10).u16(reading.elapsedS);
     return [w.finish()];
   }
 
-  const first = new ByteWriter().u16(F.moreData | F.totalDistance | F.inclination | F.expendedEnergy);
+  const first = new ByteWriter().u16(
+    F.moreData | F.totalDistance | F.inclination | F.expendedEnergy,
+  );
   writeDistance(first);
   writeInclination(first);
   writeEnergy(first);
 
-  const second = new ByteWriter().u16(paceFlag | F.heartRate | F.elapsedTime).u16(snapshot.speedKmh * 100);
+  const second = new ByteWriter().u16(paceFlag | F.heartRate | F.elapsedTime).u16(
+    reading.speedKmh * 100,
+  );
   if (paceWidth !== 0) writePace(second, pace, paceWidth);
-  second.u8(snapshot.heartRateBpm).u16(snapshot.elapsedS);
+  second.u8(reading.heartRateBpm).u8(reading.metabolicEquivalent * 10).u16(reading.elapsedS);
   return [first.finish(), second.finish()];
+}
+
+/**
+ * Fitness Machine Status de "velocidade alvo alterada" como o firmware desta
+ * família manda: o campo de 0,01 km/h da especificação vem multiplicado por 16
+ * (5,0 km/h → raw 8000). O parser de `@/ftms` corrige esse desvio.
+ */
+export function machineStatusTargetSpeed(kmh: number): Uint8Array {
+  const raw = clampRound(kmh * 1600, 0, 0xffff);
+  return Uint8Array.of(STATUS_OP.targetSpeedChanged, raw & 0xff, raw >> 8);
+}
+
+/** Fitness Machine Status de "inclinação alvo alterada" (0,1 %, com sinal). */
+export function machineStatusTargetInclination(percent: number): Uint8Array {
+  const raw = clampRound(percent * 10, -0x8000, 0x7fff) & 0xffff;
+  return Uint8Array.of(STATUS_OP.targetInclinationChanged, raw & 0xff, raw >> 8);
 }

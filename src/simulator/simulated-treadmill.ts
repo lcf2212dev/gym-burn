@@ -6,18 +6,40 @@ import type {
   ScannedDevice,
   ServiceInfo,
 } from '@/ble/transport';
-import { ControlPointOp, ControlPointResult, FTMS, sameUuid } from '@/ftms';
+import { DEVICE_INFORMATION_SERVICE, FTMS, sameUuid, uuid16 } from '@/ftms';
 
 import {
-  ByteWriter,
   buildTreadmillData,
+  ByteWriter,
   MACHINE_FEATURE_BIT,
+  machineStatusTargetInclination,
+  machineStatusTargetSpeed,
   STATUS_OP,
-  TARGET_SETTING_BIT,
   TRAINING_STATUS_CODE,
 } from './wire';
 
 export const SIMULATED_DEVICE_ID = 'esteira-simulada';
+
+/**
+ * Identidade do módulo BLE que a esteira simulada anuncia no Device Information
+ * (0x180A), igual à da T600X real: o modelo vem como placeholder do firmware.
+ */
+const DEVICE_INFORMATION: Readonly<Record<string, string>> = {
+  [uuid16(0x2a29)]: 'WiLinktech',
+  [uuid16(0x2a24)]: '000000',
+  [uuid16(0x2a25)]: 'WLT8258',
+  [uuid16(0x2a26)]: 'V10.23.17',
+  [uuid16(0x2a28)]: 'V100.0.0',
+};
+
+/** Texto como o firmware manda: ASCII e preenchido com zeros até 10 octetos. */
+function asciiPadded(text: string): Uint8Array {
+  const bytes = new Uint8Array(Math.max(10, text.length));
+  for (let index = 0; index < text.length; index += 1) {
+    bytes[index] = text.charCodeAt(index) & 0xff;
+  }
+  return bytes;
+}
 
 interface Range {
   min: number;
@@ -29,18 +51,18 @@ export interface SimulatedTreadmillOptions {
   name?: string;
   /** Intervalo das notificações de Treadmill Data (e do passo da física). */
   tickMs?: number;
-  /** Atraso da indication do Control Point. */
-  responseDelayMs?: number;
   scanDelayMs?: number;
   connectDelayMs?: number;
-  /** `false`: esteira que só transmite dados (sem Control Point nem Machine Status). */
-  hasControlPoint?: boolean;
-  /** `false`: Request Control responde Control Not Permitted. */
-  grantControl?: boolean;
-  /** `true`: aplica o comando mas nunca envia a indication. */
-  muteControlPoint?: boolean;
-  /** Envia Machine Status também para mudanças pedidas pelo próprio cliente. */
-  notifyStatusToCommander?: boolean;
+  /**
+   * A lona começa a andar sozinha alguns instantes depois de conectar, como se
+   * alguém estivesse usando o console. É o que faz o modo demonstração mostrar
+   * dados vivos. Os testes que querem comandar o console passam `false`.
+   */
+  autoStart?: boolean;
+  /** Velocidade que o `autoStart` mantém enquanto ninguém mexe no console. */
+  autoStartSpeedKmh?: number;
+  /** Inclinação que o `autoStart` aplica (o console de verdade costuma andar em 1,5 %). */
+  autoStartInclinePercent?: number;
   /** 0: sem campos de ritmo; 1 ou 2: largura em octetos do Instantaneous Pace. */
   paceFieldWidth?: 0 | 1 | 2;
   /** Cada registro de Treadmill Data vai em duas notificações (bit More Data). */
@@ -58,13 +80,11 @@ type Resolved = Required<SimulatedTreadmillOptions>;
 const DEFAULTS: Resolved = {
   name: 'Esteira simulada',
   tickMs: 1000,
-  responseDelayMs: 40,
   scanDelayMs: 300,
   connectDelayMs: 200,
-  hasControlPoint: true,
-  grantControl: true,
-  muteControlPoint: false,
-  notifyStatusToCommander: true,
+  autoStart: true,
+  autoStartSpeedKmh: 5,
+  autoStartInclinePercent: 1.5,
   paceFieldWidth: 0,
   splitRecords: false,
   exposeRanges: true,
@@ -80,15 +100,13 @@ const RESTING_HEART_RATE = 70;
 const MAX_HEART_RATE = 185;
 
 type BeltState = 'stopped' | 'running' | 'paused';
-type Origin = 'client' | 'console';
 
-/** Características notificáveis/indicáveis que aceitam `subscribe`. */
-type Channel = 'treadmillData' | 'trainingStatus' | 'controlPoint' | 'machineStatus';
+/** Características notificáveis que aceitam `subscribe`. */
+type Channel = 'treadmillData' | 'trainingStatus' | 'machineStatus';
 
 const CHANNEL_UUID: Record<Channel, string> = {
   treadmillData: FTMS.treadmillData,
   trainingStatus: FTMS.trainingStatus,
-  controlPoint: FTMS.controlPoint,
   machineStatus: FTMS.machineStatus,
 };
 
@@ -100,39 +118,30 @@ function bytesOf(...values: number[]): Uint8Array {
   return Uint8Array.from(values);
 }
 
-/** Lê uint16/sint16 little-endian de um parâmetro do Control Point. */
-function readU16(data: Uint8Array, offset: number): number {
-  return data[offset] | (data[offset + 1] << 8);
-}
-
-function readS16(data: Uint8Array, offset: number): number {
-  const raw = readU16(data, offset);
-  return raw >= 0x8000 ? raw - 0x10000 : raw;
-}
-
 /**
- * Uma conexão GATT com a esteira. Guarda todo o estado do treino, então uma
- * nova conexão sempre começa do zero.
+ * Uma conexão GATT com a esteira simulada. Guarda todo o estado do treino, então
+ * uma nova conexão sempre começa do zero.
+ *
+ * A simulação representa uma esteira em uso: o console (as ações `console*`) é
+ * quem liga, desliga e muda velocidade/inclinação — o app nunca escreve nada.
  */
 class SimulatedConnection implements BleConnection {
   readonly deviceId = SIMULATED_DEVICE_ID;
   readonly name: string;
 
   private closed = false;
+  private autoStarted = false;
   private readonly disconnectListeners = new Set<() => void>();
   private readonly subscribers: Record<Channel, Set<(data: Uint8Array) => void>> = {
     treadmillData: new Set(),
     trainingStatus: new Set(),
-    controlPoint: new Set(),
     machineStatus: new Set(),
   };
 
   private tickTimer: ReturnType<typeof setInterval> | null = null;
-  private responseTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Estado do treino (ponto flutuante; arredonda-se só ao codificar).
   private belt: BeltState = 'stopped';
-  private hasControl = false;
   private speedKmh = 0;
   private targetSpeedKmh = 0;
   private inclinationPercent = 0;
@@ -154,24 +163,32 @@ class SimulatedConnection implements BleConnection {
   // --- BleConnection -------------------------------------------------------
 
   async getServices(): Promise<ServiceInfo[]> {
-    return [{ uuid: FTMS.service, characteristics: await this.getCharacteristics(FTMS.service) }];
+    return [
+      { uuid: FTMS.service, characteristics: await this.getCharacteristics(FTMS.service) },
+      {
+        uuid: DEVICE_INFORMATION_SERVICE,
+        characteristics: await this.getCharacteristics(DEVICE_INFORMATION_SERVICE),
+      },
+    ];
   }
 
   async getCharacteristics(serviceUuid: string): Promise<CharacteristicInfo[]> {
     this.assertOpen();
-    if (!sameUuid(serviceUuid, FTMS.service)) return [];
-    const { hasControlPoint, exposeRanges } = this.options;
     const info = (
       uuid: string,
-      props: Partial<Omit<CharacteristicInfo, 'uuid'>>,
+      props: Partial<Omit<CharacteristicInfo, 'uuid'>> = {},
     ): CharacteristicInfo => ({
       uuid,
       canRead: false,
-      canWrite: false,
       canNotify: false,
       canIndicate: false,
       ...props,
     });
+    if (sameUuid(serviceUuid, DEVICE_INFORMATION_SERVICE)) {
+      return Object.keys(DEVICE_INFORMATION).map((uuid) => info(uuid, { canRead: true }));
+    }
+    if (!sameUuid(serviceUuid, FTMS.service)) return [];
+    const { exposeRanges } = this.options;
     return [
       info(FTMS.feature, { canRead: true }),
       info(FTMS.treadmillData, { canNotify: true }),
@@ -182,17 +199,18 @@ class SimulatedConnection implements BleConnection {
             info(FTMS.supportedInclinationRange, { canRead: true }),
           ]
         : []),
-      ...(hasControlPoint
-        ? [
-            info(FTMS.controlPoint, { canWrite: true, canIndicate: true }),
-            info(FTMS.machineStatus, { canNotify: true }),
-          ]
-        : []),
+      info(FTMS.machineStatus, { canNotify: true }),
     ];
   }
 
   async read(serviceUuid: string, characteristicUuid: string): Promise<Uint8Array> {
     this.assertOpen();
+    if (sameUuid(serviceUuid, DEVICE_INFORMATION_SERVICE)) {
+      const value = Object.entries(DEVICE_INFORMATION).find(([uuid]) =>
+        sameUuid(uuid, characteristicUuid),
+      )?.[1];
+      if (value !== undefined) return asciiPadded(value);
+    }
     if (sameUuid(serviceUuid, FTMS.service)) {
       const { exposeRanges, speedRange, inclinationRange } = this.options;
       if (sameUuid(characteristicUuid, FTMS.feature)) return this.encodeFeature();
@@ -215,38 +233,6 @@ class SimulatedConnection implements BleConnection {
     throw new Error(`Característica ${characteristicUuid} não existe ou não permite leitura`);
   }
 
-  async write(serviceUuid: string, characteristicUuid: string, data: Uint8Array): Promise<void> {
-    this.assertOpen();
-    if (
-      !this.options.hasControlPoint ||
-      !sameUuid(serviceUuid, FTMS.service) ||
-      !sameUuid(characteristicUuid, FTMS.controlPoint)
-    ) {
-      throw new Error(`Característica ${characteristicUuid} não permite escrita`);
-    }
-    // Erro ATT "CCCD Improperly Configured".
-    if (this.subscribers.controlPoint.size === 0) {
-      throw new Error('CCCD Improperly Configured: assine as indications do Control Point antes');
-    }
-    // Erro ATT "Procedure Already In Progress".
-    if (this.responseTimer !== null) {
-      throw new Error('Procedure Already In Progress: aguarde a resposta do comando anterior');
-    }
-    if (data.length < 1) {
-      throw new Error('Escrita vazia no Control Point');
-    }
-
-    const request = data[0];
-    const result = this.execute(Uint8Array.from(data));
-    // O procedimento só termina depois de `responseDelayMs`, com ou sem indication.
-    this.responseTimer = setTimeout(() => {
-      this.responseTimer = null;
-      if (!this.options.muteControlPoint) {
-        this.emit('controlPoint', bytesOf(ControlPointOp.ResponseCode, request, result));
-      }
-    }, this.options.responseDelayMs);
-  }
-
   async subscribe(
     serviceUuid: string,
     characteristicUuid: string,
@@ -255,9 +241,7 @@ class SimulatedConnection implements BleConnection {
     this.assertOpen();
     const channel = (Object.keys(CHANNEL_UUID) as Channel[]).find(
       (key) =>
-        sameUuid(serviceUuid, FTMS.service) &&
-        sameUuid(characteristicUuid, CHANNEL_UUID[key]) &&
-        (this.options.hasControlPoint || (key !== 'controlPoint' && key !== 'machineStatus')),
+        sameUuid(serviceUuid, FTMS.service) && sameUuid(characteristicUuid, CHANNEL_UUID[key]),
     );
     if (!channel) {
       throw new Error(`Característica ${characteristicUuid} não permite notify nem indicate`);
@@ -277,39 +261,38 @@ class SimulatedConnection implements BleConnection {
   }
 
   // --- Mãos no console ------------------------------------------------------
+  //
+  // O app não chama nada disto: são as ações de quem está usando a esteira. A
+  // demonstração usa o `autoStart`; os testes usam estas ações para provocar
+  // eventos reais (alguém mexe no console) e verificar o que a sessão exibe.
 
   consoleStart(): void {
-    this.start('console');
+    this.start();
   }
 
   consoleStop(): void {
-    if (this.belt !== 'stopped') this.stopOrPause('stop', 'console');
+    if (this.belt !== 'stopped') this.stopOrPause('stop');
   }
 
   consolePause(): void {
-    if (this.belt === 'running') this.stopOrPause('pause', 'console');
+    if (this.belt === 'running') this.stopOrPause('pause');
   }
 
   consoleSetSpeed(kmh: number): void {
     const { min, max } = this.options.speedRange;
-    this.setTargetSpeed(Math.min(max, Math.max(min, kmh)), 'console');
+    this.setTargetSpeed(Math.min(max, Math.max(min, kmh)));
   }
 
   consoleSetInclination(percent: number): void {
     const { min, max } = this.options.inclinationRange;
-    this.setTargetInclination(Math.min(max, Math.max(min, percent)), 'console');
+    this.setTargetInclination(Math.min(max, Math.max(min, percent)));
   }
 
   pullSafetyKey(): void {
     this.belt = 'stopped';
     this.targetSpeedKmh = 0;
-    this.notifyStatus(bytesOf(STATUS_OP.stoppedBySafetyKey), 'console');
+    this.notifyStatus(bytesOf(STATUS_OP.stoppedBySafetyKey));
     this.syncTrainingStatus();
-  }
-
-  revokeControl(): void {
-    this.hasControl = false;
-    this.notifyStatus(bytesOf(STATUS_OP.controlLost), 'console');
   }
 
   /** Queda de link: os ouvintes de `onDisconnect` são chamados uma vez. */
@@ -331,9 +314,7 @@ class SimulatedConnection implements BleConnection {
     if (this.closed) return;
     this.closed = true;
     if (this.tickTimer !== null) clearInterval(this.tickTimer);
-    if (this.responseTimer !== null) clearTimeout(this.responseTimer);
     this.tickTimer = null;
-    this.responseTimer = null;
     Object.values(this.subscribers).forEach((set) => set.clear());
     this.disconnectListeners.clear();
     this.onClosed();
@@ -345,10 +326,7 @@ class SimulatedConnection implements BleConnection {
     [...this.subscribers[channel]].forEach((listener) => listener(data.slice()));
   }
 
-  /** Machine Status só existe com Control Point; do cliente, só se configurado. */
-  private notifyStatus(data: Uint8Array, origin: Origin): void {
-    if (!this.options.hasControlPoint) return;
-    if (origin === 'client' && !this.options.notifyStatusToCommander) return;
+  private notifyStatus(data: Uint8Array): void {
     this.emit('machineStatus', data);
   }
 
@@ -359,12 +337,11 @@ class SimulatedConnection implements BleConnection {
       (1 << B.inclination) |
       (1 << B.expendedEnergy) |
       (1 << B.heartRate) |
+      (1 << B.metabolicEquivalent) |
       (1 << B.elapsedTime);
     if (this.options.paceFieldWidth > 0) machine |= 1 << B.pace;
-    const targets = this.options.hasControlPoint
-      ? (1 << TARGET_SETTING_BIT.speed) | (1 << TARGET_SETTING_BIT.inclination)
-      : 0;
-    return new ByteWriter().u32(machine).u32(targets).finish();
+    // Sem Control Point: a esteira não aceita nenhum alvo, como a T600X real.
+    return new ByteWriter().u32(machine).u32(0).finish();
   }
 
   private encodeTrainingStatus(): Uint8Array {
@@ -384,117 +361,55 @@ class SimulatedConnection implements BleConnection {
     this.emit('trainingStatus', this.encodeTrainingStatus());
   }
 
-  // --- Ações compartilhadas entre cliente e console ----------------------------
+  // --- Ações do console -------------------------------------------------------
 
-  private start(origin: Origin): boolean {
-    if (this.belt === 'running') return false;
+  private start(): void {
+    if (this.belt === 'running') return;
     this.belt = 'running';
     if (this.targetSpeedKmh < this.options.speedRange.min) {
       this.targetSpeedKmh = this.options.speedRange.min;
     }
-    this.notifyStatus(bytesOf(STATUS_OP.startedOrResumed), origin);
+    this.notifyStatus(bytesOf(STATUS_OP.startedOrResumed));
     this.syncTrainingStatus();
-    return true;
   }
 
-  private stopOrPause(kind: 'stop' | 'pause', origin: Origin): void {
+  private stopOrPause(kind: 'stop' | 'pause'): void {
     if (kind === 'stop') {
       this.belt = 'stopped';
       this.targetSpeedKmh = 0;
     } else {
       this.belt = 'paused';
     }
-    this.notifyStatus(bytesOf(STATUS_OP.stoppedOrPaused, kind === 'stop' ? 1 : 2), origin);
+    this.notifyStatus(bytesOf(STATUS_OP.stoppedOrPaused, kind === 'stop' ? 1 : 2));
     this.syncTrainingStatus();
   }
 
-  private setTargetSpeed(kmh: number, origin: Origin): void {
+  private setTargetSpeed(kmh: number): void {
     this.targetSpeedKmh = kmh;
-    const raw = toRaw(kmh, 100);
-    this.notifyStatus(bytesOf(STATUS_OP.targetSpeedChanged, raw & 0xff, raw >> 8), origin);
+    this.notifyStatus(machineStatusTargetSpeed(kmh));
   }
 
-  private setTargetInclination(percent: number, origin: Origin): void {
+  private setTargetInclination(percent: number): void {
     this.targetInclinationPercent = percent;
-    const raw = toRaw(percent, 10) & 0xffff;
-    this.notifyStatus(
-      bytesOf(STATUS_OP.targetInclinationChanged, raw & 0xff, raw >> 8),
-      origin,
-    );
-  }
-
-  private reset(): void {
-    this.belt = 'stopped';
-    this.hasControl = false;
-    this.targetSpeedKmh = 0;
-    this.targetInclinationPercent = 0;
-    this.distanceM = 0;
-    this.elapsedS = 0;
-    this.energyKcal = 0;
-    this.notifyStatus(bytesOf(STATUS_OP.reset), 'client');
-    this.syncTrainingStatus();
-  }
-
-  // --- Control Point ---------------------------------------------------------------
-
-  /** Decodifica e aplica o comando; devolve o result code da indication. */
-  private execute(data: Uint8Array): number {
-    const R = ControlPointResult;
-    const op = data[0];
-
-    if (op === ControlPointOp.RequestControl) {
-      if (!this.options.grantControl) return R.ControlNotPermitted;
-      this.hasControl = true;
-      return R.Success;
-    }
-    if (!this.hasControl) return R.ControlNotPermitted;
-
-    switch (op) {
-      case ControlPointOp.Reset:
-        this.reset();
-        return R.Success;
-
-      case ControlPointOp.SetTargetSpeed: {
-        const { min, max } = this.options.speedRange;
-        if (data.length !== 3) return R.InvalidParameter;
-        const raw = readU16(data, 1);
-        if (raw < toRaw(min, 100) || raw > toRaw(max, 100)) return R.InvalidParameter;
-        this.setTargetSpeed(raw / 100, 'client');
-        return R.Success;
-      }
-
-      case ControlPointOp.SetTargetInclination: {
-        const { min, max } = this.options.inclinationRange;
-        if (data.length !== 3) return R.InvalidParameter;
-        const raw = readS16(data, 1);
-        if (raw < toRaw(min, 10) || raw > toRaw(max, 10)) return R.InvalidParameter;
-        this.setTargetInclination(raw / 10, 'client');
-        return R.Success;
-      }
-
-      case ControlPointOp.StartOrResume:
-        return this.start('client') ? R.Success : R.OperationFailed;
-
-      case ControlPointOp.StopOrPause: {
-        if (data.length !== 2 || (data[1] !== 1 && data[1] !== 2)) return R.InvalidParameter;
-        if (data[1] === 1) {
-          if (this.belt === 'stopped') return R.OperationFailed;
-          this.stopOrPause('stop', 'client');
-        } else {
-          if (this.belt !== 'running') return R.OperationFailed;
-          this.stopOrPause('pause', 'client');
-        }
-        return R.Success;
-      }
-
-      default:
-        return R.OpCodeNotSupported;
-    }
+    this.notifyStatus(machineStatusTargetInclination(percent));
   }
 
   // --- Física ----------------------------------------------------------------------
 
   private tick(): void {
+    if (this.options.autoStart && !this.autoStarted) {
+      this.autoStarted = true;
+      this.belt = 'running';
+      const { min, max } = this.options.speedRange;
+      this.targetSpeedKmh = Math.min(max, Math.max(min, this.options.autoStartSpeedKmh));
+      const incline = this.options.inclinationRange;
+      this.targetInclinationPercent = Math.min(
+        incline.max,
+        Math.max(incline.min, this.options.autoStartInclinePercent),
+      );
+      this.notifyStatus(bytesOf(STATUS_OP.startedOrResumed));
+      this.syncTrainingStatus();
+    }
     const dt = this.options.tickMs / 1000;
     this.stepPhysics(dt);
     if (this.subscribers.treadmillData.size === 0) return;
@@ -509,12 +424,26 @@ class SimulatedConnection implements BleConnection {
         energyKcal: this.energyKcal,
         energyPerMinuteKcal: energyPerMinute,
         heartRateBpm: this.heartRateBpm,
+        metabolicEquivalent: this.metabolicEquivalent(),
         elapsedS: this.elapsedS,
       },
       this.options.paceFieldWidth,
       this.options.splitRecords,
     );
     records.forEach((record) => this.emit('treadmillData', record));
+  }
+
+  /**
+   * METs como o console desta família calcula: equação de caminhada da ACSM
+   * (VO2 = 0,1·S + 1,8·S·G + 3,5, S em m/min) dividida por 3,5. Com a lona
+   * parada dá 1,0 MET, o mesmo que o firmware real envia.
+   */
+  private metabolicEquivalent(): number {
+    if (this.speedKmh <= 0) return 1;
+    const metersPerMin = (this.speedKmh / 3.6) * 60;
+    const grade = this.inclinationPercent / 100;
+    const vo2 = 0.1 * metersPerMin + 1.8 * metersPerMin * grade + 3.5;
+    return Math.max(1, Math.round((vo2 / 3.5) * 10) / 10);
   }
 
   /** Fórmula ACSM de corrida: VO2 = 0,2·S + 0,9·S·G + 3,5, com S em m/min. */
@@ -630,10 +559,6 @@ export class SimulatedTreadmillTransport implements BleTransport {
 
   pullSafetyKey(): void {
     this.active?.pullSafetyKey();
-  }
-
-  revokeControl(): void {
-    this.active?.revokeControl();
   }
 
   dropLink(): void {
