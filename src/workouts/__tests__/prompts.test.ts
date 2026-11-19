@@ -149,12 +149,18 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
     structure: 'Contínuo: 5 min aquecendo, 35 min na faixa, 5 min desaquecendo',
     minutes: 45,
     zone: { objective: 'Base aeróbica', low: 117, high: 135 },
-    aimBpm: 123,
+    // O alvo é o teto da faixa, e de 3 bpm abaixo dele até ele a carga já acertou.
+    aim: { bpm: 135, low: 132, high: 135 },
   });
   expect(data(vo2, []).session).toMatchObject({
     structure: '10 min aquecendo, 4 × 4 min com 3 min leves, 7 min desaquecendo',
     zone: { objective: 'VO₂máx', low: 162, high: 171 },
-    aimBpm: 165,
+    aim: { bpm: 171, low: 168, high: 171 },
+  });
+  // Em recuperação a faixa é um teto: a conta busca o terço de baixo, e a faixa inteira serve.
+  expect(data(week[3].session!, []).session).toMatchObject({
+    zone: { objective: 'Recuperação', low: 90, high: 108 },
+    aim: { bpm: 96, low: 90, high: 108 },
   });
   expect(user.hr).toEqual({ restBpm: null, maxBpm: 180, maxSource: 'idade' });
   expect(user.loads[0]).toEqual({ pace: 3, grade: 0, mets: 2.4 });
@@ -164,47 +170,52 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   expect(system).toContain('json');
 });
 
-it('a conta do plano repete a carga que ficou na faixa e recalcula pela reta de FC por MET', () => {
-  // Sem nenhuma sessão: 1 + (123 − 70) ÷ 15 = 4,5 METs, e 6 km/h a 1% custa 4,4.
-  expect(planProcedure(data(base, []))).toEqual({ pace: 6, grade: 1, repeat: false });
-  // Mesma sessão com 126 BPM, dentro de 117–135: repete os alvos em que ela terminou.
-  expect(planProcedure(data(base, [done(2)]))).toEqual({ pace: 6, grade: 2, repeat: true });
-  // 105 BPM a 4,9 METs, sem repouso: 15 bpm por MET, alvo de 6,1 METs.
-  expect(planProcedure(data(base, [done(2, 105, 95)]))).toEqual({ pace: 6, grade: 4, repeat: false });
-  // Com repouso de 70 a reta é da própria pessoa: 9 bpm por MET, alvo de 6,9 METs.
+it('a conta do plano repete a carga que ficou junto do teto da faixa e recalcula pela reta de FC por MET', () => {
+  // Sem nenhuma sessão: 1 + (135 − 70) ÷ 15 = 5,3 METs, e 6 km/h a 2,5% custa 5,1.
+  expect(planProcedure(data(base, []))).toEqual({ pace: 6, grade: 2.5, repeat: false });
+  // Mesma sessão com 133 BPM, a 2 do teto de 135: repete os alvos em que ela terminou.
+  expect(planProcedure(data(base, [done(2, 133)]))).toEqual({ pace: 6, grade: 2, repeat: true });
+  // 126 BPM está na faixa, mas 9 abaixo do teto: a 15 bpm por MET, o alvo sobe de 4,9 para 5,5 METs.
+  expect(planProcedure(data(base, [done(2)]))).toEqual({ pace: 6, grade: 3, repeat: false });
+  // 105 BPM a 4,9 METs, sem repouso: 15 bpm por MET, alvo de 6,9 METs.
+  expect(planProcedure(data(base, [done(2, 105, 95)]))).toEqual({ pace: 6, grade: 6, repeat: false });
+  // Com repouso de 70 a reta é da própria pessoa: 9 bpm por MET, alvo de 8,2 METs.
   const rested = (restBpm: number) => [{ ...done(2, 105, 95), restBpm }];
-  expect(planProcedure(data(base, rested(85)))).toMatchObject({ pace: 6, grade: 6 });
+  expect(planProcedure(data(base, rested(85)))).toMatchObject({ pace: 6, grade: 8 });
   // Uma reta fora de 8 a 25 bpm por MET é leitura ruim: vale 15.
-  expect(planProcedure(data(base, rested(115)))).toMatchObject({ pace: 6, grade: 4 });
-  // Acima da faixa (151 BPM): alvo de 3,0 METs, e a carga recua para a caminhada plana.
-  expect(planProcedure(data(base, [done(2, 151, 130)]))).toMatchObject({ pace: 4, grade: 0 });
-  // Primeiro VO₂máx, com pontos de 4,9 METs (126) e 3,1 METs (100): 14 bpm por MET, alvo de 7,6 METs.
+  expect(planProcedure(data(base, rested(115)))).toMatchObject({ pace: 6, grade: 6 });
+  // Acima da faixa (151 BPM): alvo de 3,8 METs, e a carga recua para a caminhada plana.
+  expect(planProcedure(data(base, [done(2, 151, 130)]))).toMatchObject({ pace: 5.5, grade: 0 });
+  // Primeiro VO₂máx, com pontos de 4,9 METs (126) e 3,1 METs (100): 14 bpm por MET, alvo de 8,0 METs.
   const two = [done(1), done(2, 100, 92, planAt(4.5, 0))];
-  expect(planProcedure(data(vo2, two))).toEqual({ pace: 6, grade: 7, repeat: false });
+  expect(planProcedure(data(vo2, two))).toEqual({ pace: 6, grade: 8, repeat: false });
   // Registro antigo só conta quando não há outro.
   const old = { ...done(1, 150, 130), log: undefined, changes: undefined, hr: undefined };
-  expect(planProcedure(data(base, [old, done(2)]))).toEqual({ pace: 6, grade: 2, repeat: true });
+  expect(planProcedure(data(base, [old, done(2, 133)]))).toEqual({ pace: 6, grade: 2, repeat: true });
+  // Em recuperação a faixa inteira serve: 100 BPM, dentro de 90–108, repete a carga.
+  const easy = done(2, 100, 92, { ...planAt(4.5, 0), goal: 'Recuperação ativa', objective: 'Recuperação', zone: zones['Recuperação'] });
+  expect(planProcedure(data(week[3].session!, [easy]))).toEqual({ pace: 4.5, grade: 0, repeat: true });
 });
 
 it('confere a resposta do plano com a conta do app, aceitando número em texto', () => {
-  // A conta dá 6 km/h a 4%.
+  // A conta dá 6 km/h a 6%.
   const parse = parsePlan(data(base, [done(2, 105, 95)]));
-  expect(parse({ why: ' 105 BPM a 4,9 METs. ', pace: '6,0', grade: 4 })).toEqual({
+  expect(parse({ why: ' 105 BPM a 4,9 METs. ', pace: '6,0', grade: 6 })).toEqual({
     why: '105 BPM a 4,9 METs.',
     pace: 6,
-    grade: 4,
+    grade: 6,
   });
   // A linha vizinha da escada passa: é um arredondamento no meio da conta.
-  expect(parse({ pace: 6, grade: 3.5 }).grade).toBe(3.5);
-  expect(parse({ pace: 6, grade: 4.5 }).grade).toBe(4.5);
+  expect(parse({ pace: 6, grade: 5.5 }).grade).toBe(5.5);
+  expect(parse({ pace: 6, grade: 6.5 }).grade).toBe(6.5);
   // Mais longe que isso é erro de conta: a chamada é repetida.
-  expect(() => parse({ pace: 6, grade: 5 })).toThrow();
+  expect(() => parse({ pace: 6, grade: 7 })).toThrow();
   expect(() => parse({ pace: 9, grade: 1 })).toThrow();
   expect(() => parse({ pace: 40, grade: 1 })).toThrow();
   expect(() => parse({ pace: 6 })).toThrow();
   expect(() => parse(null)).toThrow();
   // A repetição da sessão anterior tem de ser exata.
-  const repeat = parsePlan(data(base, [done(2)]));
+  const repeat = parsePlan(data(base, [done(2, 133)]));
   expect(repeat({ pace: 6, grade: 2 })).toMatchObject({ pace: 6, grade: 2 });
   expect(() => repeat({ pace: 6, grade: 2.5 })).toThrow();
 });
@@ -242,7 +253,7 @@ it('a revisão envia leituras relativas, o resumo já calculado e só aceita dec
       secondsAtLoad: 300,
       laterBlocks: 0,
     },
-    bpm: { count: 4, median: 149, position: 'acima', marginBpm: 14 },
+    bpm: { count: 4, median: 149, position: 'acima', marginBpm: 14, belowTopBpm: -14 },
     readings: [{ secondsAgo: 3, bpm: 148 }, { secondsAgo: 2 }, { secondsAgo: 1 }, { secondsAgo: 0, bpm: 150 }],
     session: { goal: 'Base aeróbica', changes: [{ decision: 'reduzir inclinação', bpm: 146 }] },
     profile: { age: 40 },

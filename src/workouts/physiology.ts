@@ -1,7 +1,9 @@
 import {
+  energyCost,
   HILL_TOP_PERCENT,
   MAX_SPEED_KMH,
   median,
+  metabolicCost,
   RUN_FROM_KMH,
   validBpm,
   WALK_TOP_KMH,
@@ -9,6 +11,7 @@ import {
   type Plan,
   type Profile,
   type Workout,
+  type Zone,
 } from './model';
 
 export type Pulse = { at: number; bpm: number };
@@ -146,19 +149,57 @@ export function dailyTarget(plan: Plan | null, profile: Profile, hr?: HeartProfi
   };
 }
 
+/** Quantos bpm abaixo do teto da faixa ainda contam como estar no alvo. */
+export const AIM_SPAN_BPM = 3;
+
 /**
- * Custo metabólico de uma carga, em METs (1 MET é o repouso), pelas equações do
- * ACSM: caminhada abaixo de 7 km/h, corrida a partir daí. A frequência cardíaca
- * sobe quase em linha reta com ele, o que permite comparar cargas diferentes.
+ * Onde o BPM dos blocos de esforço deve ficar dentro da faixa do dia. A pessoa
+ * treina no alto da faixa: a conta do plano busca o teto (`bpm`), e de 3 bpm
+ * abaixo dele até ele (`low` a `high`) a carga já está certa. Em dia de
+ * recuperação a faixa é um teto a não passar: a conta busca o terço de baixo e
+ * a faixa inteira serve.
+ */
+export function aimBand(zone: Zone, objective: string) {
+  if (objective.startsWith('Recuperação'))
+    return { bpm: zone.low + Math.round((zone.high - zone.low) / 3), low: zone.low, high: zone.high };
+  return { bpm: zone.high, low: zone.high - AIM_SPAN_BPM, high: zone.high };
+}
+
+/**
+ * Custo metabólico de uma carga, em METs com uma casa decimal, pelas equações
+ * do ACSM: caminhada abaixo de 7 km/h, corrida a partir daí. A frequência
+ * cardíaca sobe quase em linha reta com ele, o que permite comparar cargas
+ * diferentes.
  */
 export function mets(kmh: number, inclinePercent: number) {
-  const perMinute = (kmh * 1000) / 60;
-  const grade = inclinePercent / 100;
-  const oxygen =
-    kmh >= RUN_FROM_KMH
-      ? 0.2 * perMinute + 0.9 * perMinute * grade + 3.5
-      : 0.1 * perMinute + 1.8 * perMinute * grade + 3.5;
-  return Math.round((oxygen / 3.5) * 10) / 10;
+  return Math.round(metabolicCost(kmh, inclinePercent) * 10) / 10;
+}
+
+/**
+ * kcal por minuto a 1 MET, por kg de peso: 3,5 ml de oxigênio por kg por
+ * minuto, a 5 kcal por litro.
+ */
+const KCAL_PER_MET_MINUTE_KG = 0.0175;
+
+/**
+ * Estimativa das kcal gastas na sessão: o custo metabólico da carga medida a
+ * cada segundo (velocidade e inclinação) vezes o peso do perfil. É a conta do
+ * painel da esteira, feita com o peso da pessoa, e inclui o gasto de repouso
+ * do período. A frequência cardíaca não entra: com a carga medida, ela não
+ * melhora a estimativa. `null` sem tempo em movimento.
+ */
+export function energyKcal(w: Workout) {
+  const t = w.totals;
+  if (!t.movingMs) return null;
+  // Os registros mais antigos não têm a soma segundo a segundo: a conta sai da
+  // carga média de cada etapa, ou da sessão inteira.
+  const average = (p: { ms: number; distanceM: number; inclineMs: number; inclineDurationMs: number }) =>
+    energyCost((p.distanceM * 3600) / p.ms, p.inclineDurationMs ? p.inclineMs / p.inclineDurationMs : 0) * p.ms;
+  const logs = (w.log ?? []).filter((l) => l?.ms > 0);
+  const metMs =
+    t.metMs ??
+    (logs.length ? logs.reduce((n, l) => n + average(l), 0) : average({ ...t, ms: t.movingMs }));
+  return Math.round((metMs / 60000) * KCAL_PER_MET_MINUTE_KG * w.profile.weightKg);
 }
 
 /**

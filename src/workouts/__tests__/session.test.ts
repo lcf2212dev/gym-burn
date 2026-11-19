@@ -108,6 +108,8 @@ it('encerra o guia uma vez, guarda o treino e não consulta a IA sem leituras', 
   expect(saveWorkout).toHaveBeenCalledWith(
     expect.objectContaining({ estimate: null, reason: 'Duração concluída' }),
   );
+  // 5 min a 5 km/h no plano custam 3,38 METs: 16,9 MET·min × 0,0175 × 75 kg.
+  expect(session.snapshot().coach).toBe('Treino encerrado · cerca de 22 kcal');
   await flush();
   expect(assess).not.toHaveBeenCalled();
   expect(session.snapshot().history[0].estimate?.level).toBe('Dados insuficientes');
@@ -170,6 +172,7 @@ it('pede os batimentos de novo a cada 3 minutos dentro da mesma etapa', () => {
   walk(1, 5, null, 1);
   const first = guidance().bpmRequestedAt;
   expect(first).not.toBeNull();
+  jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'manter', reason: '' });
   walk(6, 5, 110, 1);
   expect(guidance()).toMatchObject({ bpmRequestedAt: first, bpmReceived: true });
   walk(179, 5, null, 1);
@@ -177,11 +180,51 @@ it('pede os batimentos de novo a cada 3 minutos dentro da mesma etapa', () => {
   walk(1, 5, null, 1);
   expect(guidance()).toMatchObject({ index: 1, bpmCount: 0, bpmReceived: false });
   expect(guidance().bpmRequestedAt).toBe(first! + 186000);
-  // Leituras na faixa: o guia confirma sem consultar a IA.
+  expect(reviewIntensity).toHaveBeenCalledTimes(1);
+  // Cada leitura abaixo do teto da faixa vai à IA, mesmo dentro dela.
   walk(6, 5, 110, 1);
   expect(guidance().bpmReceived).toBe(true);
-  expect(session.snapshot().coach).toBe('Na faixa · 110 BPM');
+  expect(reviewIntensity).toHaveBeenCalledTimes(2);
+});
+
+it('dentro da faixa e longe do teto consulta a IA e sobe a carga; junto do teto ela mantém', async () => {
+  const { session, walk } = setup();
+  jest
+    .mocked(reviewIntensity)
+    .mockResolvedValueOnce({ decision: 'aumentar velocidade', reason: '10 bpm abaixo do teto' })
+    .mockResolvedValue({ decision: 'manter', reason: '2 bpm abaixo do teto' });
+  // Aquecimento de 120 s e um bloco de esforço de 6 min a 5 km/h e 1%, com a faixa de 101 a 120 BPM.
+  session.start(continuous());
+  walk(121, 4);
+  // Com os alvos atingidos há menos de 2 minutos a FC ainda não estabilizou: resolve sem a IA.
+  walk(60, 5, null, 1);
+  walk(6, 5, 110, 1);
+  expect(session.snapshot().coach).toBe('10 bpm abaixo do teto · 110 BPM · estabilizando');
   expect(reviewIntensity).not.toHaveBeenCalled();
+  walk(60, 5, null, 1);
+  walk(6, 5, 110, 1);
+  expect(reviewIntensity).toHaveBeenCalledTimes(1);
+  expect(jest.mocked(reviewIntensity).mock.calls[0][0]).toMatchObject({
+    index: 1,
+    allowed: ['manter', 'aumentar velocidade'],
+    features: { median: 110, position: 'na faixa', belowTop: 10 },
+  });
+  await flush();
+  expect(session.snapshot().coach).toBe('IA · aumentar velocidade · 10 bpm abaixo do teto');
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1 });
+  expect(session.snapshot().active?.changes).toEqual([
+    expect.objectContaining({ stage: 1, decision: 'aumentar velocidade', bpm: 110 }),
+  ]);
+  // Na carga nova há 2 minutos e a 2 bpm do teto: a leitura vai à IA, que mantém.
+  walk(125, 5.2, null, 1);
+  walk(6, 5.2, 118, 1);
+  expect(reviewIntensity).toHaveBeenCalledTimes(2);
+  expect(jest.mocked(reviewIntensity).mock.calls[1][0]).toMatchObject({
+    features: { median: 118, belowTop: 2 },
+  });
+  await flush();
+  expect(session.snapshot().coach).toBe('IA · manter · 2 bpm abaixo do teto');
+  expect(session.snapshot().active?.plan?.stages[1].speed).toBe(5.2);
 });
 
 it('resolve sem a IA o que não tem escolha: etapa leve abaixo da faixa e BPM na faixa', () => {
@@ -193,6 +236,26 @@ it('resolve sem a IA o que não tem escolha: etapa leve abaixo da faixa e BPM na
   walk(25, 4);
   walk(8, 4, 112);
   expect(session.snapshot().coach).toBe('Na faixa · 112 BPM');
+  // No bloco de esforço, exatamente no teto da faixa (120 BPM) não há o que decidir.
+  walk(80, 4);
+  walk(100, 5, null, 1);
+  walk(8, 5, 120, 1);
+  expect(session.snapshot().guidance?.index).toBe(1);
+  expect(session.snapshot().coach).toBe('No teto da faixa · 120 BPM');
+  expect(reviewIntensity).not.toHaveBeenCalled();
+});
+
+it('em dia de recuperação a faixa é teto: abaixo dela a carga não sobe', () => {
+  const { session, walk } = setup();
+  // Faixa de 50–60% da FC máxima: 92 a 110 BPM aos 36 anos.
+  session.start({ ...continuous(), objective: 'Recuperação', zone: [50, 60] });
+  walk(121, 4);
+  walk(120, 5, null, 1);
+  walk(8, 5, 85, 1);
+  expect(session.snapshot().coach).toBe('Abaixo do teto · 85 BPM');
+  walk(30, 5, null, 1);
+  walk(8, 5, 100, 1);
+  expect(session.snapshot().coach).toBe('Na faixa · 100 BPM');
   expect(reviewIntensity).not.toHaveBeenCalled();
 });
 
