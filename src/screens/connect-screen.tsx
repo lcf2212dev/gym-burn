@@ -69,7 +69,6 @@ export function ConnectScreen() {
   const candidates = devices.filter(
     (found) => found.advertisesFtms || looksLikeMatrixConsole(found.name),
   );
-  const hiddenDevices = devices.length - candidates.length;
 
   // A sessão ordena a lista pelo RSSI a cada anúncio, e o sinal oscila: o item
   // fugiria debaixo do dedo. Aqui a ordem é estável (FTMS primeiro, depois id),
@@ -90,8 +89,12 @@ export function ConnectScreen() {
   }, [actions, phase, scan]);
 
   const version = Constants.expoConfig?.version ?? null;
+  const footnote = (version ? 'versão ' + version : 'gym burn') + ' · somente leitura';
   const scanning = scan !== 'idle';
   const connecting = phase === 'connecting';
+  // Com a lista de esteiras na tela o rodapé fica embaixo dela; no palco da
+  // busca, que ocupa a tela até o fim, a mesma linha vai dentro do cartão.
+  const staged = connecting || visibleDevices.length === 0;
   const connectingName = device?.name ?? null;
   const hasFtms = visibleDevices.some((found) => found.advertisesFtms);
 
@@ -100,7 +103,9 @@ export function ConnectScreen() {
   const bannerNotice: Notice | null = notice && notice.kind !== 'info' ? notice : null;
 
   return (
-    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.safe, { backgroundColor: theme.background }]}>
+    <SafeAreaView
+      edges={['top', 'left', 'right', 'bottom']}
+      style={[styles.safe, { backgroundColor: theme.background }]}>
       <AmbientGlow colors={[Neon.cyan, Neon.violet]} intensity={0.6} />
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -135,6 +140,7 @@ export function ConnectScreen() {
               detail="Conectando e lendo os dados da esteira. Mantenha o celular perto do painel."
               color={Neon.volt}
               active
+              footnote={footnote}
             />
           ) : visibleDevices.length === 0 ? (
             <ScanStage
@@ -142,13 +148,12 @@ export function ConnectScreen() {
               detail={
                 scanning
                   ? 'Deixe o celular perto do painel. A esteira precisa estar no modo APP.'
-                  : hiddenDevices > 0
-                    ? `Vimos ${hiddenDevices} ${hiddenDevices === 1 ? 'aparelho' : 'aparelhos'} Bluetooth por perto, mas nenhum anuncia o perfil de esteira (FTMS). Confira se o painel está no modo APP.`
-                    : 'Confira se o painel está no modo APP e se o Bluetooth do celular está ligado.'
+                  : 'Confira se o painel está no modo APP e se o Bluetooth do celular está ligado.'
               }
               color={Neon.cyan}
               active={scanning}
               action={scanning ? undefined : { label: 'Procurar de novo', onPress: actions.startScan }}
+              footnote={footnote}
             />
           ) : (
             <View style={styles.devices}>
@@ -195,15 +200,11 @@ export function ConnectScreen() {
             </View>
           )}
 
-          <View style={styles.footer}>
-            <Text style={[styles.footerText, LabelType, { color: theme.textMuted }]}>
-              {version ? `versão ${version}` : 'gym burn'}
+          {staged ? null : (
+            <Text style={[styles.footnote, styles.footer, LabelType, { color: theme.textMuted }]}>
+              {footnote}
             </Text>
-            <View style={[styles.footerDot, { backgroundColor: theme.textMuted }]} />
-            <Text style={[styles.footerText, LabelType, { color: theme.textMuted }]}>
-              somente leitura
-            </Text>
-          </View>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -216,6 +217,8 @@ interface ScanStageProps {
   color: string;
   active: boolean;
   action?: { label: string; onPress: () => void };
+  /** Linha discreta no pé do cartão. */
+  footnote: string;
 }
 
 /**
@@ -232,8 +235,11 @@ function compareDevices(a: ScannedDevice, b: ScannedDevice): number {
   return a.id < b.id ? -1 : 1;
 }
 
-/** O palco da busca: radar, o que está acontecendo e, se parado, o botão. */
-function ScanStage({ title, detail, color, active, action }: ScanStageProps) {
+/**
+ * O palco da busca: radar, o que está acontecendo e, se parado, o botão. Ocupa
+ * a altura que sobra da tela, com o conteúdo no centro.
+ */
+function ScanStage({ title, detail, color, active, action, footnote }: ScanStageProps) {
   const theme = useTheme();
 
   return (
@@ -254,6 +260,9 @@ function ScanStage({ title, detail, color, active, action }: ScanStageProps) {
           accessibilityLabel="Procurar esteiras de novo"
         />
       ) : null}
+      <Text style={[styles.footnote, styles.stageFootnote, LabelType, { color: theme.textMuted }]}>
+        {footnote}
+      </Text>
     </Surface>
   );
 }
@@ -404,13 +413,15 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
   },
+  // A mesma folga do painel do treino até a área segura de baixo.
   scroll: {
     flexGrow: 1,
     paddingHorizontal: Spacing.three,
     paddingTop: Spacing.three,
-    paddingBottom: Spacing.five,
+    paddingBottom: Spacing.two,
   },
   content: {
+    flexGrow: 1,
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
@@ -428,9 +439,22 @@ const styles = StyleSheet.create({
     maxWidth: 340,
   },
   stage: {
+    flexGrow: 1,
     alignItems: 'center',
+    justifyContent: 'center',
     gap: Spacing.three,
-    paddingVertical: Spacing.five,
+    paddingVertical: Spacing.six,
+  },
+  stageFootnote: {
+    position: 'absolute',
+    bottom: Spacing.three,
+    left: 0,
+    right: 0,
+  },
+  footnote: {
+    fontSize: 10,
+    lineHeight: 13,
+    textAlign: 'center',
   },
   stageTitle: {
     fontSize: 28,
@@ -479,19 +503,6 @@ const styles = StyleSheet.create({
     marginTop: Spacing.two,
   },
   footer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.two,
-    paddingVertical: Spacing.four,
-  },
-  footerText: {
-    fontSize: 10,
-    lineHeight: 13,
-  },
-  footerDot: {
-    width: 3,
-    height: 3,
-    borderRadius: 1.5,
+    paddingVertical: Spacing.three,
   },
 });
