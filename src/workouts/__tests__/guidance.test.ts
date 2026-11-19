@@ -1,9 +1,11 @@
-import { advanceGuidance, pendingAction, PULSE_READINGS } from '../guidance';
+import { advanceGuidance, pendingAction, PULSE_READINGS, type Guidance } from '../guidance';
 import { allowedDecisions, pulseFeatures, pulseWindow, revisedStage } from '../adaptive';
-import { makePlan, currentCue } from '../model';
+import { currentCue, PULSE_INTERVAL_SECONDS } from '../model';
+import { sessionPlan, week } from '../week';
 import type { TreadmillSample } from '@/treadmill/types';
 
-const plan = makePlan('Resistência', 45, 5, 1.5);
+// Base aeróbica a 5 km/h e 1,5%: aquecimento a 4 km/h e o bloco de esforço na etapa 1.
+const plan = sessionPlan(week[1].session!, 5, 1.5);
 // A primeira etapa pede a FC de repouso logo de início; os testes de ajuste usam a etapa sem esse pedido.
 const cue = { ...currentCue(plan, 0)!, measure: false };
 const sample = (
@@ -52,6 +54,36 @@ it('o aviso de batimentos só fecha depois das leituras válidas novas que a rev
     expect(progress?.bpmCount).toBe(i);
     expect(pendingAction(progress) === 'bpm').toBe(i < PULSE_READINGS);
   }
+});
+
+it('atendido o pedido, volta a pedir os batimentos 3 minutos depois, enquanto couber na etapa', () => {
+  // Etapa de 700 s com um segundo por amostra: o relógio anda junto com `into`.
+  let g: Guidance | null = null;
+  const tick = (into: number, bpm: number | null = null) => {
+    const at = { ...cue, index: 1, into, left: 700 - into, measure: into >= 120 };
+    g = advanceGuidance(g, at, sample(into * 1000, undefined, undefined, bpm), into * 1000);
+  };
+  const hold = (from: number) => {
+    for (let s = from + 1; s <= from + PULSE_READINGS; s++) tick(s, 110);
+  };
+  for (let s = 0; s <= 120; s++) tick(s);
+  expect(g).toMatchObject({ bpmRequestedAt: 120000, bpmReceived: false });
+  hold(120);
+  expect(g).toMatchObject({ bpmCount: PULSE_READINGS, bpmReceived: true });
+  // Leituras que continuam chegando não reabrem nem adiam o próximo pedido.
+  for (let s = 127; s < 126 + PULSE_INTERVAL_SECONDS; s++) tick(s, s < 140 ? 110 : null);
+  expect(pendingAction(g)).toBeNull();
+  tick(126 + PULSE_INTERVAL_SECONDS);
+  expect(pendingAction(g)).toBe('bpm');
+  expect(g).toMatchObject({ bpmRequestedAt: 306000, bpmCount: 0, bpmReceived: false });
+  // Sem resposta, o pedido continua o mesmo: não abre outro por cima.
+  for (let s = 307; s <= 500; s++) tick(s);
+  expect(g).toMatchObject({ bpmRequestedAt: 306000, bpmReceived: false });
+  hold(500);
+  expect(pendingAction(g)).toBeNull();
+  // O seguinte cairia aos 686 s, com 14 s de etapa: não dá tempo de ler, então não abre.
+  for (let s = 507; s < 700; s++) tick(s);
+  expect(g).toMatchObject({ bpmRequestedAt: 306000, bpmReceived: true });
 });
 
 it('o pedido da FC de repouso caduca quando a janela fecha sem leitura', () => {
@@ -108,23 +140,30 @@ it('resume as leituras em mediana, tendência e posição na faixa', () => {
   expect(pulseFeatures([], zone)).toBeNull();
 });
 
-it('só oferece à IA as decisões que cabem na etapa', () => {
+it('só oferece à IA as decisões que cabem na etapa, já escolhendo entre velocidade e inclinação', () => {
   const features = (bpm: number) =>
     pulseFeatures(pulseWindow(pulses(0, [bpm, bpm, bpm, bpm, bpm, bpm]), 0, 0), zone)!;
   const load = { stage: work, easy: false, reached: true, secondsAtLoad: 300 };
-  expect(allowedDecisions(features(110), load)).toEqual(['manter']);
-  expect(allowedDecisions(features(130), load)).toEqual(['manter', 'reduzir velocidade', 'reduzir inclinação']);
-  expect(allowedDecisions(features(130), { ...load, stage: { ...work, incline: 0 } })).toEqual([
-    'manter',
-    'reduzir velocidade',
-  ]);
-  expect(allowedDecisions(features(90), load)).toEqual(['manter', 'aumentar velocidade', 'aumentar inclinação']);
+  const at = (speed: number, incline: number) => ({ ...load, stage: { ...work, speed, incline } });
+  const [below, inside, above] = [features(90), features(110), features(130)];
+  expect(allowedDecisions(inside, load)).toEqual(['manter']);
+  // Caminhada abaixo de 6 km/h: sobe pela velocidade e alivia primeiro a rampa.
+  expect(allowedDecisions(below, load)).toEqual(['manter', 'aumentar velocidade']);
+  expect(allowedDecisions(above, load)).toEqual(['manter', 'reduzir inclinação']);
+  expect(allowedDecisions(above, at(5, 0))).toEqual(['manter', 'reduzir velocidade']);
+  // De 6 km/h até a corrida a carga sobe pela rampa, até 8%.
+  expect(allowedDecisions(below, at(6, 2))).toEqual(['manter', 'aumentar inclinação']);
+  expect(allowedDecisions(below, at(6, 8))).toEqual(['manter', 'aumentar velocidade']);
+  // Correndo, tudo é pela velocidade, sem o teto antigo de 9 km/h.
+  expect(allowedDecisions(below, at(12, 1))).toEqual(['manter', 'aumentar velocidade']);
+  expect(allowedDecisions(above, at(12, 1))).toEqual(['manter', 'reduzir velocidade']);
+  expect(allowedDecisions(below, at(22, 1))).toEqual(['manter']);
   // Abaixo da faixa a carga só sobe em etapa principal, nos alvos, com a FC já estabilizada.
-  expect(allowedDecisions(features(90), { ...load, easy: true })).toEqual(['manter']);
-  expect(allowedDecisions(features(90), { ...load, reached: false })).toEqual(['manter']);
-  expect(allowedDecisions(features(90), { ...load, secondsAtLoad: 60 })).toEqual(['manter']);
+  expect(allowedDecisions(below, { ...load, easy: true })).toEqual(['manter']);
+  expect(allowedDecisions(below, { ...load, reached: false })).toEqual(['manter']);
+  expect(allowedDecisions(below, { ...load, secondsAtLoad: 60 })).toEqual(['manter']);
   // Aliviar é possível em qualquer etapa.
-  expect(allowedDecisions(features(130), { ...load, easy: true, secondsAtLoad: 0 })).toContain('reduzir velocidade');
+  expect(allowedDecisions(above, { ...load, easy: true, secondsAtLoad: 0 })).toContain('reduzir inclinação');
 });
 
 it('aplica a decisão em passos pequenos sem pedir aumento no painel ao aliviar', () => {
@@ -138,4 +177,10 @@ it('aplica a decisão em passos pequenos sem pedir aumento no painel ao aliviar'
   expect(revisedStage(work, 'reduzir velocidade', sample(4, 4.5, 1)).speed).toBe(4.2);
   // Sem inclinação para tirar, a redução vai para a velocidade.
   expect(revisedStage({ ...work, incline: 0 }, 'reduzir inclinação', sample(4, work.speed, 0)).speed).toBe(4.7);
+  // Os alvos vão até o que a esteira alcança, e param ali.
+  const fast = { ...work, speed: 12, incline: 14.5 };
+  expect(revisedStage(fast, 'aumentar velocidade', sample(4, 12, 14.5)).speed).toBe(12.2);
+  expect(revisedStage(fast, 'aumentar inclinação', sample(4, 12, 14.5)).incline).toBe(15);
+  const top = { ...work, speed: 22, incline: 15 };
+  expect(revisedStage(top, 'aumentar velocidade', sample(4, 22, 15))).toBe(top);
 });

@@ -1,7 +1,8 @@
 import { StyleSheet, Text, View } from 'react-native';
 
 import { Card } from '@/components/card';
-import { Fonts, LabelType, Metric, NumeralType, Spacing, withAlpha } from '@/constants/theme';
+import { IconLabel, type IconName } from '@/components/cockpit/icon-label';
+import { Colors, Fonts, Metric, NumeralType } from '@/constants/theme';
 import type { TreadmillMetrics } from '@/treadmill/types';
 import {
   formatDecimal,
@@ -12,21 +13,32 @@ import {
 } from '@/utils/format';
 
 interface Tile {
+  icon: IconName;
   label: string;
   value: string;
   unit: string;
   color: string;
   empty: boolean;
+  /** Linha pequena abaixo do valor, para um número que só dá contexto. */
+  note?: string;
 }
 
 /**
- * Monta os cartões do treino. Só aparecem os campos que a esteira realmente
- * enviou: um cartão com "—" no meio de números firmes parece defeito, não
- * ausência de dado — a lista completa, com o que não veio, fica em "Dados".
+ * Monta as células do treino. As seis primeiras aparecem sempre; as demais só
+ * quando a esteira envia o campo: uma célula com "—" no meio de números firmes
+ * parece defeito, não ausência de dado.
  */
 function buildTiles(metrics: TreadmillMetrics): Tile[] {
+  // Esta esteira não envia a velocidade média: o app calcula pela distância e
+  // pelo tempo que ela informa.
+  const average =
+    metrics.averageSpeedKmh ??
+    (metrics.distanceM !== null && metrics.elapsedTimeS
+      ? (metrics.distanceM / metrics.elapsedTimeS) * 3.6
+      : null);
   const tiles: Tile[] = [
     {
+      icon: 'timer',
       label: 'Tempo',
       value: formatDuration(metrics.elapsedTimeS),
       unit: '',
@@ -34,6 +46,7 @@ function buildTiles(metrics: TreadmillMetrics): Tile[] {
       empty: metrics.elapsedTimeS === null,
     },
     {
+      icon: 'route',
       label: 'Distância',
       value: formatKilometers(metrics.distanceM),
       unit: 'km',
@@ -41,51 +54,47 @@ function buildTiles(metrics: TreadmillMetrics): Tile[] {
       empty: metrics.distanceM === null,
     },
     {
+      icon: 'flame',
       label: 'Calorias',
       value: formatInteger(metrics.totalEnergyKcal),
       unit: 'kcal',
       color: Metric.energy,
       empty: metrics.totalEnergyKcal === null,
+      // O gasto por hora dá o ritmo da queima sem pedir uma célula só para ele.
+      note:
+        metrics.energyPerHourKcal === null
+          ? undefined
+          : formatInteger(metrics.energyPerHourKcal) + ' kcal/h',
     },
     {
+      icon: 'footprints',
       label: 'Ritmo',
       value: formatPace(metrics.speedKmh),
-      unit: 'min/km',
+      unit: '/km',
       color: Metric.speed,
       empty: metrics.speedKmh === null || metrics.speedKmh < 1,
     },
     {
+      icon: 'circle-gauge',
       label: 'Média',
-      value: formatDecimal(metrics.averageSpeedKmh, 1),
+      value: formatDecimal(average, 1),
       unit: 'km/h',
       color: Metric.speed,
-      empty: metrics.averageSpeedKmh === null,
+      empty: average === null,
     },
     {
+      icon: 'zap',
       label: 'MET',
       value: formatDecimal(metrics.metabolicEquivalent, 1),
       unit: '',
       color: Metric.energy,
       empty: metrics.metabolicEquivalent === null,
     },
-    {
-      label: 'Energia',
-      value: formatInteger(metrics.energyPerHourKcal),
-      unit: 'kcal/h',
-      color: Metric.energy,
-      empty: metrics.energyPerHourKcal === null,
-    },
-    {
-      label: 'Por minuto',
-      value: formatInteger(metrics.energyPerMinuteKcal),
-      unit: 'kcal/min',
-      color: Metric.energy,
-      empty: metrics.energyPerMinuteKcal === null,
-    },
   ];
 
   if (metrics.positiveElevationGainM !== null) {
     tiles.push({
+      icon: 'mountain',
       label: 'Subida',
       value: formatDecimal(metrics.positiveElevationGainM, 1),
       unit: 'm',
@@ -95,6 +104,7 @@ function buildTiles(metrics: TreadmillMetrics): Tile[] {
   }
   if (metrics.remainingTimeS !== null) {
     tiles.push({
+      icon: 'clock',
       label: 'Restante',
       value: formatDuration(metrics.remainingTimeS),
       unit: '',
@@ -104,6 +114,7 @@ function buildTiles(metrics: TreadmillMetrics): Tile[] {
   }
   if (metrics.powerOutputW !== null) {
     tiles.push({
+      icon: 'power',
       label: 'Potência',
       value: formatInteger(metrics.powerOutputW),
       unit: 'W',
@@ -113,6 +124,7 @@ function buildTiles(metrics: TreadmillMetrics): Tile[] {
   }
   if (metrics.forceOnBeltN !== null) {
     tiles.push({
+      icon: 'dumbbell',
       label: 'Força',
       value: formatInteger(metrics.forceOnBeltN),
       unit: 'N',
@@ -124,82 +136,98 @@ function buildTiles(metrics: TreadmillMetrics): Tile[] {
   return tiles;
 }
 
-/** Grade de números do treino: o "painel de instrumentos" abaixo do gráfico. */
+const COLUMNS = 3;
+
+/**
+ * Os números do treino num cartão só, em linhas de três: menos caixas na tela
+ * do que um cartão por número, e o olho acha cada um sempre no mesmo lugar.
+ */
 export function MetricGrid({ metrics }: { metrics: TreadmillMetrics }) {
   const tiles = buildTiles(metrics);
+  const rows = Array.from({ length: Math.ceil(tiles.length / COLUMNS) }, (_, row) =>
+    tiles.slice(row * COLUMNS, (row + 1) * COLUMNS),
+  );
 
   return (
-    <View style={styles.grid}>
-      {tiles.map((tile) => (
-        <Card
-          key={tile.label}
-          padded={false}
-          style={styles.tile}
-          accent={tile.empty ? undefined : tile.color}>
-          <Text style={[styles.label, LabelType]} numberOfLines={1}>
-            {tile.label}
-          </Text>
-          <View style={styles.valueRow}>
-            <Text
-              style={[
-                styles.value,
-                NumeralType,
-                { color: tile.empty ? '#90A0B5' : tile.color },
-              ]}
-              numberOfLines={1}
-              adjustsFontSizeToFit
-              minimumFontScale={0.65}>
-              {tile.value}
-            </Text>
-            {tile.unit ? (
-              <Text style={styles.unit} numberOfLines={1}>
-                {tile.unit}
-              </Text>
-            ) : null}
-          </View>
-        </Card>
+    <Card padded={false} style={styles.card}>
+      {rows.map((row, r) => (
+        <View key={r} style={[styles.row, r > 0 && styles.rowDivider]}>
+          {Array.from({ length: COLUMNS }, (_, c) => {
+            const tile = row[c];
+            return (
+              <View
+                key={c}
+                style={[styles.cell, c > 0 && styles.cellDivider]}
+                accessible={!!tile}
+                accessibilityLabel={
+                  tile
+                    ? tile.label + ' ' + tile.value + ' ' + (tile.unit === '/km' ? 'minutos por quilômetro' : tile.unit)
+                    : undefined
+                }>
+                {tile && (
+                  <>
+                    <IconLabel
+                      icon={tile.icon}
+                      label={tile.label}
+                      color={tile.empty ? '#90A0B5' : tile.color}
+                    />
+                    <View style={styles.valueRow}>
+                      <Text
+                        style={[
+                          styles.value,
+                          NumeralType,
+                          { color: tile.empty ? '#90A0B5' : tile.color },
+                        ]}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.65}>
+                        {tile.value}
+                      </Text>
+                      {tile.unit ? (
+                        <Text style={styles.unit} numberOfLines={1}>
+                          {tile.unit}
+                        </Text>
+                      ) : null}
+                    </View>
+                    {!!tile.note && (
+                      <Text style={styles.note} numberOfLines={1}>
+                        {tile.note}
+                      </Text>
+                    )}
+                  </>
+                )}
+              </View>
+            );
+          })}
+        </View>
       ))}
-    </View>
+    </Card>
   );
 }
 
 const styles = StyleSheet.create({
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 5,
-  },
-  tile: {
-    width: '32%',
-    paddingHorizontal: Spacing.two + 2,
-    paddingVertical: 5,
-    minHeight: 49,
-    justifyContent: 'space-between',
-    backgroundColor: withAlpha('#121823', 0.6),
-  },
-  label: {
-    fontSize: 11,
-    lineHeight: 12,
-    letterSpacing: 1,
-    color: '#9AA7B8',
-  },
+  card: { paddingVertical: 2 },
+  row: { flexDirection: 'row', paddingVertical: 9 },
+  rowDivider: { borderTopWidth: 1, borderColor: Colors.dark.border },
+  cell: { flex: 1, paddingHorizontal: 14, gap: 4 },
+  cellDivider: { borderLeftWidth: 1, borderColor: Colors.dark.border },
   valueRow: {
     flexDirection: 'row',
     alignItems: 'baseline',
-    gap: 3,
-    marginTop: 1,
+    gap: 4,
   },
   value: {
     fontFamily: Fonts.numeral,
-    fontSize: 23,
-    lineHeight: 27,
+    fontSize: 26,
+    lineHeight: 30,
     letterSpacing: -0.3,
     flexShrink: 1,
   },
+  // Quem encolhe quando falta espaço é o valor, nunca a unidade.
   unit: {
     fontFamily: Fonts.body,
-    fontSize: 11,
+    fontSize: 12,
     color: '#90A0B5',
-    flexShrink: 1,
   },
+  note: { fontSize: 11, color: '#90A0B5' },
 });

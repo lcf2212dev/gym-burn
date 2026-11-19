@@ -1,17 +1,22 @@
 import type { Objective } from './adaptive';
 import type { SessionMode, TreadmillSample } from '@/treadmill/types';
 
-export const goals = [
-  'Intervalado',
-  'Recuperação ativa',
-  'Queima de gordura',
-  'Resistência',
-  'Caminhada inclinada',
-] as const;
+/** As sessões do plano semanal. */
+export const goals = ['Base aeróbica', 'VO₂máx', 'Recuperação ativa', 'Limiar'] as const;
 export type Goal = (typeof goals)[number];
-export const activities = ['Sedentário', 'Ativo', 'Treinado'] as const;
-export type Activity = (typeof activities)[number];
-export type Profile = { age: number; weightKg: number; heightCm: number; activity?: Activity };
+export type Profile = { age: number; weightKg: number; heightCm: number };
+
+/**
+ * O app não impõe teto de carga: os alvos só ficam dentro do que a esteira
+ * alcança (Matrix T600X: 22 km/h e 15%).
+ */
+export const MAX_SPEED_KMH = 22;
+export const MAX_INCLINE_PERCENT = 15;
+// A escada de carga: a caminhada sobe pela velocidade até 6 km/h, depois pela
+// inclinação até 8%, e a partir de 7 km/h a pessoa corre.
+export const WALK_TOP_KMH = 6;
+export const HILL_TOP_PERCENT = 8;
+export const RUN_FROM_KMH = 7;
 export type Stage = {
   name: string;
   speed: number;
@@ -20,7 +25,13 @@ export type Stage = {
   measure: boolean;
 };
 export type Plan = {
+  /** Nome da faixa de intensidade dos blocos de esforço. */
   objective?: Objective;
+  /**
+   * Faixa dos blocos de esforço, em % da FC máxima. Não existe nos planos
+   * anteriores ao plano semanal, que usam as faixas antigas pelo nome.
+   */
+  zone?: [number, number];
   goal: Goal;
   minutes: number;
   stages: Stage[];
@@ -57,6 +68,8 @@ export type StageLog = {
   /** Maior mediana de 3 leituras seguidas: um pico que não depende de uma leitura solta. */
   top: number;
 };
+/** Soma e quantidade das leituras de BPM de um minuto de treino em movimento. */
+export type MinuteBeats = [sum: number, count: number];
 /** Ajuste de carga aplicado durante o treino. */
 export type Change = { second: number; stage: number; decision: string; bpm: number };
 export type Workout = {
@@ -75,6 +88,8 @@ export type Workout = {
   hr?: HeartProfile;
   log?: StageLog[];
   changes?: Change[];
+  /** As leituras de BPM minuto a minuto, para a linha do tempo do treino. */
+  beats?: MinuteBeats[];
 };
 export const levels = [
   'Dados insuficientes',
@@ -97,83 +112,66 @@ export function validProfile(p: Profile) {
     Number.isInteger(p.age) &&
     inRange(p.age, 1, 120) &&
     inRange(p.weightKg, 10, 500) &&
-    inRange(p.heightCm, 50, 250) &&
-    (p.activity === undefined || activities.includes(p.activity))
+    inRange(p.heightCm, 50, 250)
   );
 }
 
-// A IA seleciona objetivo e alvos. O app distribui os blocos para garantir a
-// duração solicitada e reservar transições de entrada e saída em todos os modos.
-export function makePlan(
-  goal: Goal,
-  minutes: number,
-  pace: number,
-  grade: number,
-  workMinutes = 5,
-  recoveryMinutes = 2,
-): Plan {
+/** Minutos de cada parte da sessão: aquecimento, repetições de esforço com trecho leve, desaquecimento. */
+export type Structure = {
+  warmup: number;
+  reps: number;
+  work: number;
+  recovery: number;
+  cooldown: number;
+};
+
+// A estrutura vem do plano semanal; a IA escolhe só a carga dos blocos de
+// esforço. Os trechos leves ficam em ritmo de caminhada, sem inclinação.
+export function makePlan(goal: Goal, structure: Structure, pace: number, grade: number): Plan {
+  const { warmup, reps, work, recovery, cooldown } = structure;
   if (
     !goals.includes(goal) ||
-    !Number.isInteger(minutes) ||
-    !inRange(minutes, 5, 180) ||
-    !inRange(workMinutes, 1, 20) ||
-    !inRange(recoveryMinutes, 1, 10) ||
-    !inRange(pace, 1, 9) ||
-    !inRange(grade, 0, 5)
+    !Number.isInteger(reps) ||
+    !inRange(reps, 1, 30) ||
+    !inRange(work, 0.5, 180) ||
+    ![warmup, recovery, cooldown].every((minutes) => inRange(minutes, 0, 60)) ||
+    !inRange(pace, 1, MAX_SPEED_KMH) ||
+    !inRange(grade, 0, MAX_INCLINE_PERCENT)
   )
     throw new Error('A IA retornou alvos fora da faixa do guia.');
-  const recovery = goal === 'Recuperação ativa';
-  const speed = Math.round(Math.min(pace, recovery ? 4.5 : 9) * 10) / 10;
-  const incline = Math.round(Math.min(grade, recovery ? 1 : 5) * 2) / 2;
-  const easy = Math.min(speed, 4, Math.round(speed * 0.8 * 10) / 10);
-  const steps: Omit<Stage, 'seconds'>[] = [];
-  const add = (name: string, target: number, slope: number, measure = false) =>
-    steps.push({ name, speed: Math.max(1, target), incline: slope, measure });
-  add('Aquecimento', easy, 0, true);
-  const warmup = Math.min(5, minutes / 5);
-  const mainMinutes = minutes - warmup * 2;
-  const rounds = Math.max(
-    1,
-    Math.min(30, Math.round(mainMinutes / (workMinutes + recoveryMinutes))),
-  );
-  for (let i = 0; i < rounds; i++) {
-    add(goal === 'Intervalado' ? 'Intervalo de esforço' : goal, speed, incline);
-    if (goal === 'Intervalado' || i < rounds - 1) {
-      add('Recuperação', easy, 0, true);
-    }
+  const speed = Math.round(pace * 10) / 10;
+  const incline = Math.round(grade * 2) / 2;
+  const easy = Math.max(1, Math.min(speed, 4, Math.round(speed * 0.8 * 10) / 10));
+  const stages: Stage[] = [];
+  const add = (name: string, minutes: number, measure: boolean) => {
+    const seconds = Math.round(minutes * 60);
+    if (seconds > 0)
+      stages.push({ name, speed: measure ? easy : speed, incline: measure ? 0 : incline, seconds, measure });
+  };
+  add('Aquecimento', warmup, true);
+  for (let i = 0; i < reps; i++) {
+    add(reps > 1 ? goal + ' ' + (i + 1) + '/' + reps : goal, work, false);
+    add('Recuperação', recovery, true);
   }
-  add('Volta à calma', easy, 0, true);
-  const mainWeights = steps.slice(1, -1).map((s) => (s.measure ? recoveryMinutes : workMinutes));
-  const mainTotal = mainWeights.reduce((a, b) => a + b, 0);
-  const weights = [warmup, ...mainWeights.map((w) => (w * mainMinutes) / mainTotal), warmup];
-  const sum = weights.reduce((a, b) => a + b, 0);
-  let accumulated = 0;
-  let prev = 0;
-  const stages = steps.map((step, i) => {
-    accumulated += weights[i];
-    const end = Math.round((minutes * 60 * accumulated) / sum);
-    const seconds = end - prev;
-    prev = end;
-    return { ...step, seconds };
-  });
-  return { goal, minutes, stages };
-}
-
-// Em blocos de caminhada também cabe uma leitura durante o esforço principal.
-export function requestsPulse(stage: Stage) {
-  return stage.measure || stage.speed <= 5;
+  add('Volta à calma', cooldown, true);
+  return { goal, minutes: stages.reduce((n, stage) => n + stage.seconds, 0) / 60, stages };
 }
 
 /** Por quanto tempo, no início do treino, uma leitura ainda conta como FC de repouso. */
 export const REST_WINDOW_SECONDS = 90;
+/** Tempo entre uma leitura de BPM atendida e o pedido seguinte na mesma etapa. */
+export const PULSE_INTERVAL_SECONDS = 180;
 
+// Diz se a etapa aceita um pedido de leitura neste segundo; quem repete o
+// pedido a cada 3 minutos é o guia (`advanceGuidance`). O pedido vale em
+// qualquer velocidade: as faixas do plano dependem da leitura também correndo.
 // A frequência cardíaca leva de 2 a 3 minutos para acompanhar uma mudança de
-// carga. O pedido de leitura espera 60 s nas etapas leves e 120 s nas
+// carga. O primeiro pedido espera 60 s nas etapas leves e 120 s nas
 // principais. A primeira etapa pede logo no início: é a FC de repouso do dia,
-// e o pedido vale só enquanto essa janela estiver aberta.
+// e esse pedido vale só enquanto a janela estiver aberta. Depois dela, a
+// etapa volta a aceitar leitura aos 3 minutos.
 function pulseDue(index: number, stage: Stage, into: number) {
-  if (!requestsPulse(stage)) return false;
-  if (index === 0) return into < REST_WINDOW_SECONDS;
+  if (index === 0) return into < REST_WINDOW_SECONDS || into >= PULSE_INTERVAL_SECONDS;
   return into >= Math.min(stage.measure ? 60 : 120, Math.floor(stage.seconds / 2));
 }
 
@@ -302,6 +300,26 @@ export function logStage(
     early: into >= 45 && into <= 90 && l.early.length < 10 ? [...l.early, s.bpm] : l.early,
     top: tail.length >= 3 ? Math.max(l.top, median(tail.slice(-3))) : l.top,
   };
+}
+
+/**
+ * Soma a leitura de BPM desta amostra ao minuto em que o treino está.
+ * `elapsed` são os segundos já feitos em movimento.
+ */
+export function logBeats(
+  beats: MinuteBeats[] | undefined,
+  sample: TreadmillSample,
+  previous: TreadmillSample | null,
+  elapsed: number,
+): MinuteBeats[] {
+  const bpm = step(sample, previous)?.bpm ?? null;
+  if (bpm === null) return beats ?? [];
+  const minute = Math.floor(elapsed / 60);
+  // Os minutos sem leitura ficam zerados: uma lista com buracos não sobrevive ao banco.
+  return Array.from({ length: Math.max(beats?.length ?? 0, minute + 1) }, (_, i): MinuteBeats => {
+    const [sum, count] = beats?.[i] ?? [0, 0];
+    return i === minute ? [sum + bpm, count + 1] : [sum, count];
+  });
 }
 
 /** Sessão longa o bastante para entrar no histórico enviado à IA. */

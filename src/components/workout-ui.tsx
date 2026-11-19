@@ -13,19 +13,30 @@ import type { ReactNode } from 'react';
 import { Colors, MaxContentWidth, Neon, TitleType } from '@/constants/theme';
 
 const colors = Colors.dark;
+/**
+ * Página rolável das telas de treino. `footer` fica preso no rodapé, com
+ * margem própria: é onde vai a ação principal, para a tela não terminar com o
+ * conteúdo encostado na borda.
+ */
 export function WorkoutPage({
   title,
   children,
   back = true,
+  footer,
 }: {
   title: string;
   children: ReactNode;
   back?: boolean;
+  footer?: ReactNode;
 }) {
   const router = useRouter();
   return (
     <SafeAreaView style={styles.page}>
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        style={styles.fill}
+        // Com rodapé fixo, a folga do fim da página é a dele.
+        contentContainerStyle={[styles.scroll, !!footer && styles.scrollAboveFooter]}
+        keyboardShouldPersistTaps="handled">
         {back && (
           <Pressable
             accessibilityRole="button"
@@ -39,6 +50,7 @@ export function WorkoutPage({
         </Text>
         {children}
       </ScrollView>
+      {!!footer && <View style={styles.footer}>{footer}</View>}
     </SafeAreaView>
   );
 }
@@ -75,6 +87,19 @@ export function WorkoutLinks() {
 
 export const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: colors.background },
+  fill: { flex: 1 },
+  scrollAboveFooter: { paddingBottom: 16 },
+  footer: {
+    width: '100%',
+    alignSelf: 'center',
+    maxWidth: MaxContentWidth,
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: 18,
+    gap: 10,
+    borderTopWidth: 1,
+    borderColor: colors.border,
+  },
   scroll: {
     width: '100%',
     alignSelf: 'center',

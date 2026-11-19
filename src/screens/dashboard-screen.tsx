@@ -1,3 +1,4 @@
+import { Lucide } from '@react-native-vector-icons/lucide';
 import { useState } from 'react';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -6,12 +7,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AmbientGlow } from '@/components/ambient-glow';
 import { Card, Kicker } from '@/components/card';
 import { ConsoleCard, DataFieldsCard, EquipmentCard } from '@/components/cockpit/info-cards';
-import { LiveChart } from '@/components/cockpit/live-chart';
 import { MetricGrid } from '@/components/cockpit/metric-grid';
 import { SpeedHero } from '@/components/cockpit/speed-hero';
 import { TrainingCard } from '@/components/cockpit/training-card';
-import { WorkoutLinks } from '@/components/workout-ui';
 import { VitalsRow } from '@/components/cockpit/vitals-row';
+import { ZoneCard } from '@/components/cockpit/zone-card';
 import {
   BodyType,
   Fonts,
@@ -77,10 +77,10 @@ function InlineNotice() {
 }
 
 /**
- * O cockpit: tudo o que a esteira informa, em camadas — o número que se lê de
- * longe (velocidade), os dois que dizem como está o esforço (inclinação e
- * batimentos), o gráfico dos últimos 60 s, a grade do treino e, no fim, a
- * identidade do equipamento e a lista honesta do que o firmware manda ou não.
+ * O cockpit: o guia do treino, os três números que se leem de longe
+ * (velocidade, inclinação e batimentos), a grade do treino e a faixa de
+ * frequência cardíaca. Um toque longo no nome da esteira abre a identidade do
+ * equipamento e a lista honesta do que o firmware manda ou não.
  *
  * O app não tem botão de comando: quem controla a lona é o painel da esteira.
  */
@@ -93,7 +93,6 @@ export function DashboardScreen() {
   const phase = useTreadmill((state) => state.phase);
   const deviceName = useTreadmill((state) => state.device?.name ?? null);
   const metrics = useTreadmill((state) => state.metrics);
-  const samples = useTreadmill((state) => state.samples);
   const status = useTreadmill((state) => state.status);
   const equipment = useTreadmill((state) => state.equipment);
   const capabilities = useTreadmill((state) => state.capabilities);
@@ -118,25 +117,31 @@ export function DashboardScreen() {
         contentInsetAdjustmentBehavior="automatic">
         <View style={styles.content}>
           <View style={styles.header}>
-            <View style={styles.headerText}>
+            <Pressable
+              accessibilityRole="header"
+              accessibilityHint="Toque longo abre os dados da esteira"
+              onLongPress={() => setDetails(true)}
+              style={styles.headerText}>
               <Kicker color={Metric.speed}>Gym Burn</Kicker>
-              <Text
-                style={[styles.deviceName, TitleType]}
-                numberOfLines={1}
-                accessibilityRole="header">
+              <Text style={[styles.deviceName, TitleType]} numberOfLines={1}>
                 {deviceName ?? 'Esteira'}
               </Text>
-              <StatusDot live={live} />
-            </View>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Desconectar da esteira"
-              onPress={actions.disconnect}
-              disabled={disconnecting}
-              hitSlop={8}
-              style={styles.disconnect}>
-              <Text style={styles.disconnectText}>{disconnecting ? 'saindo…' : 'Desconectar'}</Text>
             </Pressable>
+            <View style={styles.headerSide}>
+              <StatusDot live={live} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Desconectar da esteira"
+                onPress={actions.disconnect}
+                disabled={disconnecting}
+                hitSlop={8}
+                style={styles.disconnect}>
+                <Lucide name="unplug" size={13} color="#C5CFDC" />
+                <Text style={styles.disconnectText}>
+                  {disconnecting ? 'Saindo…' : 'Desconectar'}
+                </Text>
+              </Pressable>
+            </View>
           </View>
 
           {status.stoppedBySafetyKey ? (
@@ -163,9 +168,9 @@ export function DashboardScreen() {
           {!details ? (
             <>
               <TrainingCard />
-              <VitalsRow metrics={metrics} samples={samples} />
+              <VitalsRow metrics={metrics} />
               <MetricGrid metrics={metrics} />
-              <LiveChart samples={samples} metrics={metrics} />
+              <ZoneCard />
             </>
           ) : (
             <>
@@ -199,17 +204,6 @@ export function DashboardScreen() {
               </Card>
             </>
           )}
-          <View style={styles.navigation}>
-            <WorkoutLinks />
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => setDetails(!details)}
-              style={styles.navButton}>
-              <Text style={styles.navText}>
-                {details ? 'Voltar ao painel' : 'Dados da esteira'}
-              </Text>
-            </Pressable>
-          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -224,17 +218,23 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.one,
-    paddingBottom: Spacing.one,
+    paddingBottom: Spacing.two,
   },
+  // Quatro blocos com folga entre eles: guia, números de relance, métricas e
+  // zonas. Os três primeiros têm altura fixa; o das zonas fica com o que sobra
+  // da tela, para o painel caber inteiro sem rolar.
   content: {
+    flexGrow: 1,
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
-    gap: 7,
+    gap: 10,
   },
+  // Duas colunas com as mesmas duas linhas: a marca com o estado da conexão,
+  // o nome da esteira com o botão de sair.
   header: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'stretch',
     justifyContent: 'space-between',
     gap: Spacing.two,
     paddingTop: Spacing.one,
@@ -242,6 +242,10 @@ const styles = StyleSheet.create({
   headerText: {
     flexShrink: 1,
     gap: 2,
+  },
+  headerSide: {
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
   },
   deviceName: {
     fontSize: 26,
@@ -252,7 +256,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: 2,
   },
   statusDot: {
     width: 6,
@@ -265,14 +268,19 @@ const styles = StyleSheet.create({
     letterSpacing: 1.2,
   },
   disconnect: {
-    minHeight: 48,
-    justifyContent: 'center',
-    paddingLeft: Spacing.two,
+    height: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderRadius: Radius.pill,
+    borderColor: withAlpha('#9AA7B8', 0.35),
   },
   disconnectText: {
     fontFamily: Fonts.body,
-    fontSize: 13,
-    color: '#9AA7B8',
+    fontSize: 12,
+    color: '#C5CFDC',
   },
   safety: {
     borderWidth: 1,
@@ -355,12 +363,6 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     color: Metric.speed,
     marginTop: 2,
-  },
-  navigation: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
   },
   navButton: { minHeight: 44, justifyContent: 'center' },
   navText: { color: Neon.cyan, fontSize: 15 },

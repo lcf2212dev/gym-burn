@@ -1,7 +1,18 @@
 import type { TreadmillSample } from '@/treadmill/types';
-import { median, validBpm, type Stage, type Zone } from './model';
+import {
+  HILL_TOP_PERCENT,
+  MAX_INCLINE_PERCENT,
+  MAX_SPEED_KMH,
+  median,
+  RUN_FROM_KMH,
+  validBpm,
+  WALK_TOP_KMH,
+  type Stage,
+  type Zone,
+} from './model';
 
-export const objectives = ['Recuperação leve', 'Base aeróbica', 'Resistência moderada'] as const;
+/** As intensidades do plano semanal; cada uma tem a sua faixa de FC. */
+export const objectives = ['Recuperação', 'Base aeróbica', 'Limiar', 'VO₂máx'] as const;
 export type Objective = (typeof objectives)[number];
 export const decisions = [
   'manter',
@@ -86,7 +97,7 @@ export function pulseFeatures(readings: Reading[], zone: Zone): Features | null 
 
 export type Load = {
   stage: Stage;
-  /** Aquecimento, recuperação, volta à calma e todo o modo de recuperação ativa. */
+  /** Aquecimento, recuperação, volta à calma e toda sessão de recuperação. */
   easy: boolean;
   /** A esteira está nos dois alvos da etapa. */
   reached: boolean;
@@ -96,27 +107,28 @@ export type Load = {
 /**
  * Decisões que fazem sentido agora. Quando só resta "manter", a IA não é
  * consultada. A carga sobe apenas em etapa principal, com os alvos atingidos
- * há tempo suficiente; aliviar é possível em qualquer etapa.
+ * há tempo suficiente; aliviar é possível em qualquer etapa. Entre velocidade
+ * e inclinação quem escolhe é o app, pela mesma escada de cargas do plano:
+ * caminhada sobe pela velocidade até 6 km/h, daí pela rampa até 8%, e correndo
+ * (7 km/h ou mais) volta a ser pela velocidade.
  */
 export function allowedDecisions(features: Features, load: Load): Decision[] {
   const { stage } = load;
-  if (features.position === 'acima')
-    return [
-      'manter',
-      ...(stage.speed > 1 ? (['reduzir velocidade'] as const) : []),
-      ...(stage.incline >= 0.5 ? (['reduzir inclinação'] as const) : []),
-    ];
+  const running = stage.speed >= RUN_FROM_KMH;
+  if (features.position === 'acima') {
+    if (stage.incline >= 0.5 && !running) return ['manter', 'reduzir inclinação'];
+    return stage.speed > 1 ? ['manter', 'reduzir velocidade'] : ['manter'];
+  }
   if (
     features.position === 'abaixo' &&
     !load.easy &&
     load.reached &&
     load.secondsAtLoad >= STEADY_SECONDS
-  )
-    return [
-      'manter',
-      ...(stage.speed < 9 ? (['aumentar velocidade'] as const) : []),
-      ...(stage.incline < 5 ? (['aumentar inclinação'] as const) : []),
-    ];
+  ) {
+    if (stage.speed >= WALK_TOP_KMH && !running && stage.incline < HILL_TOP_PERCENT)
+      return ['manter', 'aumentar inclinação'];
+    return stage.speed < MAX_SPEED_KMH ? ['manter', 'aumentar velocidade'] : ['manter'];
+  }
   return ['manter'];
 }
 
@@ -140,7 +152,7 @@ export function revisedStage(stage: Stage, choice: Decision, measured: Treadmill
   } else if (choice === 'aumentar velocidade') speed += 0.2;
   else incline += 0.5;
 
-  speed = Math.min(9, Math.max(1, Math.round(speed * 10) / 10));
-  incline = Math.min(5, Math.max(0, Math.round(incline * 2) / 2));
+  speed = Math.min(MAX_SPEED_KMH, Math.max(1, Math.round(speed * 10) / 10));
+  incline = Math.min(MAX_INCLINE_PERCENT, Math.max(0, Math.round(incline * 2) / 2));
   return speed === stage.speed && incline === stage.incline ? stage : { ...stage, speed, incline };
 }

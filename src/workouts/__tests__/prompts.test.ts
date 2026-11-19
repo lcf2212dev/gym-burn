@@ -1,9 +1,8 @@
 import type { TreadmillSample } from '@/treadmill/types';
-import { decisions, objectives, pulseFeatures, type Reading } from '../adaptive';
+import { decisions, pulseFeatures, type Reading } from '../adaptive';
 import {
   accumulate,
   currentCue,
-  goals,
   levels,
   logStage,
   makePlan,
@@ -22,15 +21,19 @@ import {
   parseAssess,
   parsePlan,
   parseReview,
+  planProcedure,
   planPrompt,
-  progressionCeiling,
   reviewPrompt,
   summarize,
 } from '../prompts';
+import { week, zones, type Session } from '../week';
 
-const profile: Profile = { age: 40, weightKg: 78, heightCm: 175, activity: 'Ativo' };
+// 40 anos: FC máxima estimada de 180. Base aeróbica de 117 a 135 BPM, VO₂máx de 162 a 171.
+const profile: Profile = { age: 40, weightKg: 78, heightCm: 175 };
 const DAY = 86400000;
 const NOW = 1_800_000_000_000;
+const base = week[1].session!;
+const vo2 = week[2].session!;
 
 // Passa um plano inteiro pelas mesmas funções que a sessão usa, um segundo por amostra.
 function simulate(
@@ -65,8 +68,14 @@ function simulate(
   return { ...w, started, log, ended: started + w.totals.movingMs, reason: 'Duração concluída' };
 }
 
-// 30 min: aquecimento 300 s, esforço 545 s, recuperação 109 s, esforço 546 s, volta à calma 300 s.
-const plan: Plan = { ...makePlan('Resistência', 30, 5, 1, 10, 2), objective: 'Base aeróbica' };
+// 32 min de base aeróbica: aquecimento de 300 s, dois blocos de esforço de 540 s,
+// cada um com 120 s de recuperação, e volta à calma de 300 s.
+const planAt = (pace: number, grade: number): Plan => ({
+  ...makePlan('Base aeróbica', { warmup: 5, reps: 2, work: 9, recovery: 2, cooldown: 5 }, pace, grade),
+  objective: 'Base aeróbica',
+  zone: zones['Base aeróbica'],
+});
+const plan = planAt(6, 2);
 // A pessoa segura o sensor nos últimos 30 s de cada bloco de esforço e por volta de 1 min de recuperação.
 const grip = (work: number, recovery: number) => (stage: Stage | null, _: number, into: number) =>
   !stage
@@ -78,29 +87,39 @@ const grip = (work: number, recovery: number) => (stage: Stage | null, _: number
       : stage.name === 'Recuperação' && into >= 50 && into <= 70
         ? recovery
         : null;
-const done = (daysAgo: number, work = 112, recovery = 96) =>
-  simulate(plan, grip(work, recovery), 1800, NOW - daysAgo * DAY);
+const done = (daysAgo: number, work = 126, recovery = 110, at = plan) =>
+  simulate(at, grip(work, recovery), 2000, NOW - daysAgo * DAY);
 
-it('resume a sessão por tipo de bloco, com fim de bloco, recuperação e posição na faixa', () => {
+it('resume a sessão por tipo de bloco, com custo da carga, fim de bloco, recuperação e posição na faixa', () => {
   const s = summarize(done(0));
   expect(s).toMatchObject({
-    goal: 'Resistência',
+    goal: 'Base aeróbica',
     objective: 'Base aeróbica',
     completionPercent: 100,
-    zone: { low: 99, high: 117, method: 'máxima' },
-    recoveryDrops: [16],
+    zone: { low: 117, high: 135 },
+    recoveryDrops: [16, 16],
     reductions: 0,
-    validatedPeakBpm: 112,
+    validatedPeakBpm: 126,
   });
-  expect(s.work).toMatchObject({ kmh: 5, inclinePercent: 1, plannedKmh: 5, bpmEnd: 112 });
+  expect(s.work).toMatchObject({
+    kmh: 6,
+    inclinePercent: 2,
+    mets: 4.9,
+    targetKmh: 6,
+    targetInclinePercent: 2,
+    bpmEnd: 126,
+  });
   expect(s.easy).toMatchObject({ kmh: 4, inclinePercent: 0 });
-  // 60 leituras de esforço na faixa e 21 de recuperação abaixo dela.
-  expect(s.zoneSharePercent).toEqual({ below: 26, inside: 74, above: 0 });
+  // A faixa é a dos blocos de esforço: as leituras da recuperação, abaixo dela, não entram.
+  expect(s.zoneSharePercent).toEqual({ below: 0, inside: 100, above: 0 });
+  expect(summarize(done(0, 140)).zoneSharePercent).toEqual({ below: 0, inside: 0, above: 100 });
   expect(historyItem(done(3), NOW)).toMatchObject({
     daysAgo: 3,
-    work: { kmh: 5, inclinePercent: 1, bpmEnd: 112 },
+    goal: 'Base aeróbica',
+    work: { kmh: 6, inclinePercent: 2, mets: 4.9, targetKmh: 6, targetInclinePercent: 2, bpmEnd: 126 },
+    zone: { low: 117, high: 135 },
     position: 'na faixa',
-    recoveryDrops: [16],
+    recoveryDrops: [16, 16],
   });
 });
 
@@ -108,73 +127,100 @@ it('trata registro antigo sem dados por etapa como aproximado e treino livre com
   const old = { ...done(5), log: undefined, changes: undefined, hr: undefined, restBpm: undefined };
   expect(historyItem(old, NOW)).toMatchObject({
     approximate: true,
-    work: { bpmEnd: old.totals.bpmCount ? Math.round(old.totals.bpmSum / old.totals.bpmCount) : null },
+    work: {
+      bpmEnd: old.totals.bpmCount ? Math.round(old.totals.bpmSum / old.totals.bpmCount) : null,
+      targetKmh: null,
+    },
   });
   const free = summarize(simulate(null, () => 108, 600));
   expect(free).toMatchObject({ goal: 'Livre', completionPercent: null, easy: null });
-  expect(free.work).toMatchObject({ kmh: 5, bpmEnd: 108 });
+  expect(free.work).toMatchObject({ kmh: 5, mets: 3.8, bpmEnd: 108, targetKmh: null });
 });
 
-it('o plano recebe faixas, teto e só sessões válidas, e o teto segue o histórico', () => {
+const data = (session: Session, history: Workout[]) =>
+  planPrompt({ profile, session, history, now: NOW }).user;
+
+it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de cargas', () => {
   const fragment = simulate(null, () => 100, 40, NOW - DAY);
-  const history = [fragment, done(2), done(4)];
-  const { system, user } = planPrompt({ profile, minutes: 45, goal: null, history, now: NOW });
-  const data = user as {
-    recent: { daysAgo: number }[];
-    zones: Record<string, unknown>;
-    ceiling: unknown;
-    hr: unknown;
-  };
-  expect(data.recent.map((r) => r.daysAgo)).toEqual([2, 4]);
-  expect(Object.keys(data.zones)).toEqual([...objectives]);
-  expect(data.ceiling).toEqual({ pace: 5.5, grade: 2 });
-  expect(data.hr).toEqual({ restBpm: null, maxBpm: 180, maxSource: 'idade' });
-  for (const option of [...goals, ...objectives]) expect(system).toContain('"' + option + '"');
+  const { system, user } = planPrompt({ profile, session: base, history: [fragment, done(2), done(4)], now: NOW });
+  expect(user.recent.map((r) => r.daysAgo)).toEqual([2, 4]);
+  expect(user.session).toEqual({
+    goal: 'Base aeróbica',
+    structure: 'Contínuo: 5 min aquecendo, 35 min na faixa, 5 min desaquecendo',
+    minutes: 45,
+    zone: { objective: 'Base aeróbica', low: 117, high: 135 },
+    aimBpm: 123,
+  });
+  expect(data(vo2, []).session).toMatchObject({
+    structure: '10 min aquecendo, 4 × 4 min com 3 min leves, 7 min desaquecendo',
+    zone: { objective: 'VO₂máx', low: 162, high: 171 },
+    aimBpm: 165,
+  });
+  expect(user.hr).toEqual({ restBpm: null, maxBpm: 180, maxSource: 'idade' });
+  expect(user.loads[0]).toEqual({ pace: 3, grade: 0, mets: 2.4 });
+  // Do perfil só vai a idade.
+  expect(user.profile).toEqual({ age: 40 });
+  expect(JSON.stringify(user)).not.toMatch(/weightKg|heightCm|activity/);
   expect(system).toContain('json');
-  // Sem histórico vale o teto do nível de atividade.
-  expect(progressionCeiling(profile, [fragment], NOW)).toEqual({ pace: 6, grade: 3 });
-  expect(progressionCeiling({ ...profile, activity: undefined }, [], NOW)).toEqual({ pace: 5, grade: 2 });
-  expect(progressionCeiling({ ...profile, activity: 'Treinado' }, [], NOW)).toEqual({ pace: 7, grade: 4 });
 });
 
-it('valida a resposta do plano, aceitando número em texto', () => {
-  const reply = {
-    why: ' Sessões anteriores abaixo da faixa. ',
-    goal: 'Resistência',
-    objective: 'Base aeróbica',
-    pace: '5,2',
-    grade: 1,
-    workMinutes: 12.4,
-    recoveryMinutes: '2',
-  };
-  expect(parsePlan(reply)).toEqual({
-    why: 'Sessões anteriores abaixo da faixa.',
-    goal: 'Resistência',
-    objective: 'Base aeróbica',
-    pace: 5.2,
-    grade: 1,
-    workMinutes: 12,
-    recoveryMinutes: 2,
+it('a conta do plano repete a carga que ficou na faixa e recalcula pela reta de FC por MET', () => {
+  // Sem nenhuma sessão: 1 + (123 − 70) ÷ 15 = 4,5 METs, e 6 km/h a 1% custa 4,4.
+  expect(planProcedure(data(base, []))).toEqual({ pace: 6, grade: 1, repeat: false });
+  // Mesma sessão com 126 BPM, dentro de 117–135: repete os alvos em que ela terminou.
+  expect(planProcedure(data(base, [done(2)]))).toEqual({ pace: 6, grade: 2, repeat: true });
+  // 105 BPM a 4,9 METs, sem repouso: 15 bpm por MET, alvo de 6,1 METs.
+  expect(planProcedure(data(base, [done(2, 105, 95)]))).toEqual({ pace: 6, grade: 4, repeat: false });
+  // Com repouso de 70 a reta é da própria pessoa: 9 bpm por MET, alvo de 6,9 METs.
+  const rested = (restBpm: number) => [{ ...done(2, 105, 95), restBpm }];
+  expect(planProcedure(data(base, rested(85)))).toMatchObject({ pace: 6, grade: 6 });
+  // Uma reta fora de 8 a 25 bpm por MET é leitura ruim: vale 15.
+  expect(planProcedure(data(base, rested(115)))).toMatchObject({ pace: 6, grade: 4 });
+  // Acima da faixa (151 BPM): alvo de 3,0 METs, e a carga recua para a caminhada plana.
+  expect(planProcedure(data(base, [done(2, 151, 130)]))).toMatchObject({ pace: 4, grade: 0 });
+  // Primeiro VO₂máx, com pontos de 4,9 METs (126) e 3,1 METs (100): 14 bpm por MET, alvo de 7,6 METs.
+  const two = [done(1), done(2, 100, 92, planAt(4.5, 0))];
+  expect(planProcedure(data(vo2, two))).toEqual({ pace: 6, grade: 7, repeat: false });
+  // Registro antigo só conta quando não há outro.
+  const old = { ...done(1, 150, 130), log: undefined, changes: undefined, hr: undefined };
+  expect(planProcedure(data(base, [old, done(2)]))).toEqual({ pace: 6, grade: 2, repeat: true });
+});
+
+it('confere a resposta do plano com a conta do app, aceitando número em texto', () => {
+  // A conta dá 6 km/h a 4%.
+  const parse = parsePlan(data(base, [done(2, 105, 95)]));
+  expect(parse({ why: ' 105 BPM a 4,9 METs. ', pace: '6,0', grade: 4 })).toEqual({
+    why: '105 BPM a 4,9 METs.',
+    pace: 6,
+    grade: 4,
   });
-  expect(() => parsePlan({ ...reply, goal: 'Corrida' })).toThrow();
-  expect(() => parsePlan({ ...reply, objective: 'Máximo' })).toThrow();
-  expect(() => parsePlan({ ...reply, pace: 12 })).toThrow();
-  expect(() => parsePlan({ ...reply, grade: undefined })).toThrow();
-  expect(() => parsePlan(null)).toThrow();
+  // A linha vizinha da escada passa: é um arredondamento no meio da conta.
+  expect(parse({ pace: 6, grade: 3.5 }).grade).toBe(3.5);
+  expect(parse({ pace: 6, grade: 4.5 }).grade).toBe(4.5);
+  // Mais longe que isso é erro de conta: a chamada é repetida.
+  expect(() => parse({ pace: 6, grade: 5 })).toThrow();
+  expect(() => parse({ pace: 9, grade: 1 })).toThrow();
+  expect(() => parse({ pace: 40, grade: 1 })).toThrow();
+  expect(() => parse({ pace: 6 })).toThrow();
+  expect(() => parse(null)).toThrow();
+  // A repetição da sessão anterior tem de ser exata.
+  const repeat = parsePlan(data(base, [done(2)]));
+  expect(repeat({ pace: 6, grade: 2 })).toMatchObject({ pace: 6, grade: 2 });
+  expect(() => repeat({ pace: 6, grade: 2.5 })).toThrow();
 });
 
 it('a revisão envia leituras relativas, o resumo já calculado e só aceita decisão permitida', () => {
-  const workout = { ...done(0), changes: [{ second: 1500, stage: 1, decision: 'reduzir velocidade', bpm: 128 }] };
+  const workout = { ...done(0), changes: [{ second: 1500, stage: 1, decision: 'reduzir inclinação', bpm: 146 }] };
   const stage = plan.stages[3];
-  const readings: Reading[] = [130, 131, 131, 132].map((bpm, i) => ({
+  const readings: Reading[] = [148, 149, 149, 150].map((bpm, i) => ({
     bpm,
     at: NOW - (3 - i) * 1000,
-    kmh: 5,
-    incline: 1,
+    kmh: 6,
+    incline: 2,
   }));
-  const features = pulseFeatures(readings, { low: 99, high: 117 })!;
-  const allowed = ['manter', 'reduzir velocidade', 'reduzir inclinação'] as const;
-  const { system, user } = reviewPrompt({
+  const features = pulseFeatures(readings, { low: 117, high: 135 })!;
+  const allowed = ['manter', 'reduzir inclinação'] as const;
+  const input = {
     workout,
     index: 3,
     left: 200,
@@ -183,15 +229,27 @@ it('a revisão envia leituras relativas, o resumo já calculado e só aceita dec
     features,
     allowed: [...allowed],
     now: NOW,
-  });
+  };
+  const { system, user } = reviewPrompt(input);
   expect(user).toMatchObject({
-    zone: { objective: 'Base aeróbica', low: 99, high: 117 },
-    stage: { kind: 'principal', targetKmh: 5, secondsInStage: stage.seconds - 200, secondsRemaining: 200, secondsAtLoad: 300 },
-    bpm: { count: 4, median: 131, position: 'acima', marginBpm: 14 },
-    readings: [{ secondsAgo: 3, bpm: 130 }, { secondsAgo: 2 }, { secondsAgo: 1 }, { secondsAgo: 0, bpm: 132 }],
-    session: { changes: [{ decision: 'reduzir velocidade', bpm: 128 }] },
+    zone: { objective: 'Base aeróbica', low: 117, high: 135 },
+    stage: {
+      name: 'Base aeróbica 2/2',
+      kind: 'principal',
+      targetKmh: 6,
+      secondsInStage: stage.seconds - 200,
+      secondsRemaining: 200,
+      secondsAtLoad: 300,
+      laterBlocks: 0,
+    },
+    bpm: { count: 4, median: 149, position: 'acima', marginBpm: 14 },
+    readings: [{ secondsAgo: 3, bpm: 148 }, { secondsAgo: 2 }, { secondsAgo: 1 }, { secondsAgo: 0, bpm: 150 }],
+    session: { goal: 'Base aeróbica', changes: [{ decision: 'reduzir inclinação', bpm: 146 }] },
+    profile: { age: 40 },
     allowed,
   });
+  // No primeiro bloco ainda vem outro igual: um ajuste feito ali vale para ele.
+  expect(reviewPrompt({ ...input, index: 1 }).user).toMatchObject({ stage: { laterBlocks: 1 } });
   for (const option of decisions) expect(system).toContain('"' + option + '"');
   const parse = parseReview([...allowed]);
   expect(parse({ reason: ' 14 bpm acima ', decision: 'reduzir inclinação' })).toEqual({
@@ -199,23 +257,33 @@ it('a revisão envia leituras relativas, o resumo já calculado e só aceita dec
     reason: '14 bpm acima',
   });
   // Uma decisão válida mas fora da lista do momento é rejeitada, para a chamada ser repetida.
-  expect(() => parse({ decision: 'aumentar velocidade' })).toThrow();
+  expect(() => parse({ decision: 'reduzir velocidade' })).toThrow();
   expect(() => parse({ decision: 'parar' })).toThrow();
 });
 
-it('a avaliação recebe os limites da FC máxima e prende a previsão a eles', () => {
+it('a avaliação recebe só os dois números que decidem a FC máxima e prende a previsão aos limites', () => {
   const history = [done(2), { ...done(4), estimate: { level: 'Em adaptação', summary: '', maxBpm: 181 } }];
   const input = { workout: done(0), history };
   expect(assessBounds(input)).toEqual({ low: 170, high: 190 });
   const { system, user } = assessPrompt(input);
   expect(user).toMatchObject({
-    profile: { age: 40, activity: 'Ativo' },
-    session: { work: { bpmEnd: 112 }, recoveryDrops: [16] },
-    recent: [{ daysAgo: 2 }, { daysAgo: 4, level: 'Em adaptação', maxBpm: 181 }],
-    heart: { foxMaxBpm: 180, tanakaMaxBpm: 180, observedPeakBpm: 112, previousMaxBpm: [181], bounds: { low: 170, high: 190 } },
+    profile: { age: 40 },
+    session: { goal: 'Base aeróbica', work: { bpmEnd: 126, mets: 4.9 }, recoveryDrops: [16, 16] },
+    recent: [{ daysAgo: 2 }, { daysAgo: 4, level: 'Em adaptação' }],
+    // Pico de 126 em sessões concluídas sem redução: piso de 131, abaixo da estimativa pela idade.
+    heart: { ageEstimateBpm: 180, floorBpm: 131 },
   });
-  // Peso e altura não vão: o prompt proíbe inferência por eles.
-  expect(JSON.stringify(user)).not.toContain('weightKg');
+  expect(Object.keys((user as { heart: object }).heart)).toEqual(['ageEstimateBpm', 'floorBpm']);
+  // Previsões anteriores não vão: a FC máxima sai da idade e dos picos medidos, não do que já foi respondido.
+  expect(JSON.stringify(user)).not.toMatch(/maxBpm/i);
+  // Um pico sustentado acima da estimativa leva o piso, e os limites, para pico + 5.
+  const hard = { workout: done(0, 178), history };
+  expect(assessPrompt(hard).user).toMatchObject({ heart: { ageEstimateBpm: 180, floorBpm: 183 } });
+  expect(assessBounds(hard)).toEqual({ low: 183, high: 190 });
+  const reduced = { ...hard.workout, changes: [{ second: 900, stage: 1, decision: 'reduzir velocidade', bpm: 178 }] };
+  expect(assessBounds({ workout: reduced, history })).toEqual({ low: 178, high: 190 });
+  // Do perfil só vai a idade.
+  expect(JSON.stringify(user)).not.toMatch(/weightKg|activity/);
   for (const level of levels.slice(1)) expect(system).toContain('"' + level + '"');
   const parse = parseAssess({ low: 170, high: 190 });
   expect(parse({ level: 'Base em formação', summary: ' ok ', maxBpm: '183' })).toEqual({
