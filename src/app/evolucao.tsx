@@ -6,6 +6,7 @@ import { UiButton } from '@/components/ui-button';
 import { styles, WorkoutPage } from '@/components/workout-ui';
 import { useWorkoutSession, useWorkout } from '@/workouts/context';
 import { evidence } from '@/workouts/model';
+import { energyKcal } from '@/workouts/physiology';
 import { formatDuration, formatDecimal } from '@/utils/format';
 
 export default function Evolution() {
@@ -44,6 +45,7 @@ export default function Evolution() {
       {!list.length && <Text style={styles.body}>Nenhum treino registrado aqui ainda.</Text>}
       {list.slice(0, count).map((w) => {
         const data = evidence(w);
+        const kcal = energyKcal(w);
         return (
           <Card key={w.id} style={styles.card}>
             <Kicker>{new Date(w.started).toLocaleString('pt-BR')}</Kicker>
@@ -62,6 +64,12 @@ export default function Evolution() {
                 : 'Sem leitura de BPM'}
               {w.restBpm ? ' · 1º minuto ' + w.restBpm : ''}
             </Text>
+            {!!kcal && (
+              <Text style={styles.caption}>
+                Cerca de {kcal} kcal, pela carga e pelo peso de{' '}
+                {String(w.profile.weightKg).replace('.', ',')} kg
+              </Text>
+            )}
             {w.estimate ? (
               <>
                 <Text style={styles.caption}>{w.estimate.level}</Text>

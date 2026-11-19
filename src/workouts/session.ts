@@ -30,7 +30,7 @@ import {
   type Stage,
   type Workout,
 } from './model';
-import { dailyTarget, heartProfile, restingBpm, type Pulse } from './physiology';
+import { dailyTarget, energyKcal, heartProfile, restingBpm, type Pulse } from './physiology';
 import {
   clearData,
   clearSource,
@@ -282,9 +282,11 @@ export class WorkoutSession {
   }
 
   /**
-   * Decide se as leituras recentes pedem uma revisão da carga. As regras locais
-   * resolvem o que não tem escolha (BPM na faixa, etapa leve, carga recém-mudada);
-   * a IA só é consultada quando há mais de uma decisão possível.
+   * Decide se as leituras recentes pedem uma revisão da carga. Num bloco de
+   * esforço com a esteira nos alvos, toda leitura abaixo do teto da faixa vai à
+   * IA, e também toda leitura acima da faixa, em qualquer etapa. As regras
+   * locais resolvem só o que não tem escolha: etapa leve, esteira fora dos
+   * alvos, carga recém-mudada ou já no limite.
    */
   private consider(
     w: Workout,
@@ -453,10 +455,13 @@ export class WorkoutSession {
     saveWorkout(done);
     this.resetReview();
     this.waitForStop = true;
+    const kcal = energyKcal(done);
     this.update({
       active: null,
       guidance: null,
       minimizedCue: null,
+      // O gasto estimado fica no painel até o próximo treino começar.
+      coach: kcal ? 'Treino encerrado · cerca de ' + kcal + ' kcal' : '',
       history: [done, ...this.state.history],
     });
     void this.evaluate(done);
@@ -497,12 +502,15 @@ export class WorkoutSession {
 /** O que o painel mostra quando as regras locais resolvem sem consultar a IA. */
 function localVerdict(f: Features, load: Load) {
   const bpm = f.median + ' BPM';
-  if (f.position === 'na faixa') return 'Na faixa · ' + bpm;
   if (f.position === 'acima') return 'Acima da faixa · ' + bpm + ' · carga já no mínimo';
-  // Nos trechos leves e nas sessões de recuperação ficar abaixo da faixa é o esperado.
-  if (load.stage.measure) return 'Etapa leve · ' + bpm;
-  if (load.easy) return 'Abaixo do teto · ' + bpm;
-  if (!load.reached) return 'Abaixo da faixa · ' + bpm + ' · ajuste a esteira aos alvos';
-  if (load.secondsAtLoad < STEADY_SECONDS) return 'Abaixo da faixa · ' + bpm + ' · estabilizando';
-  return 'Abaixo da faixa · ' + bpm + ' · carga já no máximo';
+  // Nos trechos leves e nas sessões de recuperação ninguém busca o teto da faixa.
+  if (load.easy) {
+    if (f.position === 'na faixa') return 'Na faixa · ' + bpm;
+    return load.stage.measure ? 'Etapa leve · ' + bpm : 'Abaixo do teto · ' + bpm;
+  }
+  if (f.belowTop <= 0) return 'No teto da faixa · ' + bpm;
+  const gap = f.belowTop + ' bpm abaixo do teto · ' + bpm;
+  if (!load.reached) return gap + ' · ajuste a esteira aos alvos';
+  if (load.secondsAtLoad < STEADY_SECONDS) return gap + ' · estabilizando';
+  return gap + ' · carga já no máximo';
 }

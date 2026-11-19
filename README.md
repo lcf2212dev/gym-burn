@@ -81,7 +81,7 @@ Toque em **Treino do dia** antes ou depois de conectar a esteira. A tela abre na
 
 Ajuste a velocidade e a inclinação pelo painel. O tempo do guia acompanha o movimento medido da lona.
 
-O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. Cada registro pode ser apagado ali, em **Apagar registro**. As sessões da esteira simulada não ficam guardadas: o app as descarta quando é aberto de novo.
+O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Ao encerrar, o painel mostra as kcal estimadas da sessão (veja abaixo). Em **Evolução**, consulte as avaliações e as kcal por data, ou tente a avaliação de novo se a internet falhar. Cada registro pode ser apagado ali, em **Apagar registro**. As sessões da esteira simulada não ficam guardadas: o app as descarta quando é aberto de novo.
 
 Para começar do zero, **Meu perfil → Apagar perfil e treinos** remove perfil, histórico, plano do dia e diário da IA. A chave da DeepSeek continua salva.
 
@@ -114,7 +114,7 @@ A recuperação de quarta é a Z1, a base aeróbica (65–75%) pega o alto da Z2
 
 A estrutura e a faixa não mudam; a IA escolhe só a carga. Não há teto de velocidade ou inclinação além do que a esteira alcança (22 km/h e 15%), nem limite de aumento de uma sessão para a outra: a carga já busca a faixa no primeiro treino de cada tipo. Para isso o app calcula o custo metabólico de cada carga em METs (equações do ACSM, de caminhada abaixo de 7 km/h e de corrida a partir daí) e monta uma escada de cargas: caminhada plana até 6 km/h, depois rampa a 6 km/h até 8%, depois corrida a 1%. Quem ainda chega à faixa andando não recebe corrida.
 
-A conta é a mesma para todas as sessões: a FC sobe quase em linha reta com os METs, então a carga de hoje sai da última sessão parecida, do BPM em que ela terminou e do BPM buscado hoje (o terço de baixo da faixa). Se a última sessão igual terminou dentro da faixa, a carga se repete. O app faz essa conta também e recusa a resposta da IA que se afastar dela em mais de uma linha da escada.
+A conta é a mesma para todas as sessões: a FC sobe quase em linha reta com os METs, então a carga de hoje sai da última sessão parecida, do BPM em que ela terminou e do BPM buscado hoje. O alvo é o alto da faixa: a conta busca o teto (135 BPM numa faixa de 117–135), e a carga só se repete se a última sessão igual terminou a até 3 bpm dele. Na recuperação de quarta a faixa é teto: a conta busca o terço de baixo, e a carga se repete se a última sessão terminou em qualquer ponto da faixa. O app faz essa conta também e recusa a resposta da IA que se afastar dela em mais de uma linha da escada.
 
 ### Frequência cardíaca
 
@@ -126,6 +126,10 @@ A FC máxima começa em 220 − idade. Depois de cada sessão avaliada, a IA dev
 
 A faixa de BPM de cada sessão são os percentuais do plano semanal aplicados a essa FC máxima. A FC de repouso não desloca a faixa; ela serve de ponto de partida para a reta que liga carga e frequência cardíaca. É uma orientação de treino, não uma medição clínica. [Referência da American Heart Association](https://www.heart.org/en/healthy-living/exercise-and-physical-activity/fitness-basics/target-heart-rates).
 
+### Calorias estimadas
+
+O painel da esteira calcula as kcal com um peso padrão quando não dá para informar o seu. O app refaz a conta com o peso do perfil: a cada segundo em movimento, o custo metabólico da carga medida (velocidade e inclinação, pelas mesmas equações do ACSM, com a passagem da caminhada para a corrida suavizada entre 6 e 7 km/h) vezes o peso, a 5 kcal por litro de oxigênio. O total aparece no painel ao encerrar o treino e em cada registro de **Evolução**, e inclui o gasto de repouso do período. A frequência cardíaca não entra nessa conta: com a carga medida, as fórmulas por BPM erram mais do que ela. A célula **Calorias** do painel continua mostrando o número que a esteira envia.
+
 ### Quando a IA é chamada
 
 As três chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com raciocínio ligado. A API ignora `temperature` nesse modo, por isso o app não envia esse parâmetro.
@@ -133,12 +137,12 @@ As três chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com racioc�
 | Chamada | Quando | Esforço de raciocínio | O que a DeepSeek recebe |
 | --- | --- | --- | --- |
 | Plano do dia | toque em **Gerar treino com IA** | `high` | idade, FC de repouso e máxima, sessão do dia com a faixa de BPM, resumo das sessões válidas recentes e a escada de cargas |
-| Revisão de carga | durante o guia, quando as leituras saem da faixa e há mais de uma decisão possível | `low` | idade, faixa do dia, etapa atual, resumo e leituras recentes de BPM, ajustes já feitos |
+| Revisão de carga | durante o guia, a cada leitura de um bloco de esforço abaixo do teto da faixa e a cada leitura acima da faixa | `low` | idade, faixa do dia, etapa atual, resumo e leituras recentes de BPM, ajustes já feitos |
 | Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, resumo da sessão por tipo de bloco e das sessões anteriores, estimativas de FC máxima |
 
 Peso e altura ficam só no aparelho: nenhuma chamada os envia.
 
-A revisão usa a mediana de pelo menos 4 leituras, depois de descartar as 2 primeiras de cada pegada no sensor. Com o BPM na faixa nada é enviado. A carga só sobe em bloco de esforço, com os alvos atingidos há 2 minutos, e nunca em dia de recuperação, em que a faixa é teto. Entre velocidade e inclinação quem escolhe é o app, pela mesma escada de cargas do plano; a IA decide se muda ou mantém. Depois de um ajuste, o guia espera 1 minuto antes de revisar de novo. Uma resposta que chega atrasada só é aplicada se a etapa e a carga forem as mesmas e se as leituras dos últimos 30 segundos ainda admitirem a mesma decisão. O ajuste de um bloco de esforço vale também para os blocos iguais que ainda virão. Com internet indisponível o guia segue o plano local.
+A revisão usa a mediana de pelo menos 4 leituras, depois de descartar as 2 primeiras de cada pegada no sensor. Nos blocos de esforço o alvo é o teto da faixa: com a esteira nos alvos há 90 segundos, toda leitura abaixo dele vai à IA. Ela pede mais carga com o BPM 4 bpm ou mais abaixo do teto e mantém quando ele já está a até 3 bpm. Nos primeiros 4 minutos de uma carga a FC ainda sobe sozinha, então ali o aumento só vem com 8 bpm ou mais de distância. Acima da faixa, ela alivia a partir de 5 bpm. O app resolve sozinho só o que não tem escolha: etapa leve, esteira fora dos alvos, carga recém-mudada ou já no limite. A carga nunca sobe em dia de recuperação, em que a faixa é teto. Num bloco longo é normal o guia pedir mais carga no começo e aliviar mais adiante: a FC sobe aos poucos na mesma carga, e segurá-la junto do teto pede esse ajuste. Entre velocidade e inclinação quem escolhe é o app, pela mesma escada de cargas do plano; a IA decide se muda ou mantém. Depois de um ajuste, o guia espera 1 minuto antes de revisar de novo. Uma resposta que chega atrasada só é aplicada se a etapa e a carga forem as mesmas e se as leituras dos últimos 30 segundos ainda admitirem a mesma decisão. O ajuste de um bloco de esforço vale também para os blocos iguais que ainda virão. Com internet indisponível o guia segue o plano local.
 
 Cada chamada tem até 3 novas tentativas em falha de rede, erro do servidor ou resposta fora do formato.
 

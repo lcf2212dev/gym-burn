@@ -17,6 +17,39 @@ export const MAX_INCLINE_PERCENT = 15;
 export const WALK_TOP_KMH = 6;
 export const HILL_TOP_PERCENT = 8;
 export const RUN_FROM_KMH = 7;
+
+/** METs de uma carga pelas equações do ACSM, de caminhada ou de corrida (1 MET é o repouso). */
+function acsm(kmh: number, inclinePercent: number, running: boolean) {
+  const perMinute = (kmh * 1000) / 60;
+  const grade = inclinePercent / 100;
+  const oxygen = running
+    ? 0.2 * perMinute + 0.9 * perMinute * grade + 3.5
+    : 0.1 * perMinute + 1.8 * perMinute * grade + 3.5;
+  return oxygen / 3.5;
+}
+
+/**
+ * Custo metabólico de uma carga, em METs, como o plano o compara: caminhada
+ * abaixo de 7 km/h, corrida a partir daí.
+ */
+export const metabolicCost = (kmh: number, inclinePercent: number) =>
+  acsm(kmh, inclinePercent, kmh >= RUN_FROM_KMH);
+
+/**
+ * Custo metabólico para a conta de kcal. Entre 6 e 7 km/h a equação de
+ * caminhada subestima o passo apertado, e a troca seca para a de corrida quase
+ * dobraria o gasto de um décimo de km/h para o outro: nesse trecho o custo vai
+ * de uma equação à outra em linha reta.
+ */
+export function energyCost(kmh: number, inclinePercent: number) {
+  if (kmh <= WALK_TOP_KMH || kmh >= RUN_FROM_KMH) return metabolicCost(kmh, inclinePercent);
+  const share = (kmh - WALK_TOP_KMH) / (RUN_FROM_KMH - WALK_TOP_KMH);
+  return (
+    (1 - share) * acsm(WALK_TOP_KMH, inclinePercent, false) +
+    share * acsm(RUN_FROM_KMH, inclinePercent, true)
+  );
+}
+
 export type Stage = {
   name: string;
   speed: number;
@@ -47,6 +80,11 @@ export type Totals = {
   bpmCount: number;
   bpmSum: number;
   peakBpm: number;
+  /**
+   * Custo metabólico somado segundo a segundo, em METs × ms: a base da
+   * estimativa de kcal. Não existe nos registros mais antigos.
+   */
+  metMs?: number;
 };
 /** FC de repouso e máxima usadas para calcular a faixa do treino. */
 export type HeartProfile = { rest: number | null; max: number; maxSource: 'idade' | 'IA' };
@@ -218,6 +256,7 @@ export function newWorkout(
       bpmCount: 0,
       bpmSum: 0,
       peakBpm: 0,
+      metMs: 0,
     },
     ended: null,
     reason: '',
@@ -253,6 +292,7 @@ export function accumulate(t: Totals, sample: TreadmillSample, previous: Treadmi
     bpmCount: t.bpmCount + (s.bpm === null ? 0 : 1),
     bpmSum: t.bpmSum + (s.bpm ?? 0),
     peakBpm: Math.max(t.peakBpm, s.bpm ?? 0),
+    metMs: (t.metMs ?? 0) + energyCost(s.speed, sample.inclinationPercent ?? 0) * s.dt,
   };
 }
 
