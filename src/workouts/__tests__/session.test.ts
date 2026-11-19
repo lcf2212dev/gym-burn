@@ -4,11 +4,20 @@ import { WorkoutSession } from '../session';
 import { makePlan, type Plan } from '../model';
 import { dailyTarget } from '../physiology';
 import { assess, reviewIntensity } from '../ai';
-import { clearData, readProfile, readWorkouts, saveWorkout } from '../storage';
+import {
+  clearData,
+  clearSource,
+  deleteWorkout,
+  readProfile,
+  readWorkouts,
+  saveWorkout,
+} from '../storage';
 
 jest.mock('../ai', () => ({ assess: jest.fn(), reviewIntensity: jest.fn() }));
 jest.mock('../storage', () => ({
   clearData: jest.fn(),
+  clearSource: jest.fn(),
+  deleteWorkout: jest.fn(),
   readProfile: jest.fn(),
   readWorkouts: jest.fn(),
   saveWorkout: jest.fn(),
@@ -276,6 +285,21 @@ it('resposta tardia só vale com leitura recente; nova pegada troca a chamada qu
   pending[2]({ decision: 'reduzir velocidade', reason: '' });
   await flush();
   expect(session.snapshot().active?.plan?.stages[0].speed).toBe(3.7);
+});
+
+it('descarta as demonstrações ao abrir e apaga um registro do histórico a pedido', async () => {
+  const { session, walk, snapshot, notify } = setup();
+  // As sessões da esteira simulada não ficam guardadas de uma abertura para a outra.
+  expect(clearSource).toHaveBeenCalledWith('demo');
+  jest.mocked(assess).mockResolvedValue({ level: 'Em adaptação', summary: 'ok', maxBpm: 184 });
+  walk(200, 4, 105);
+  snapshot.phase = 'idle';
+  notify();
+  await flush();
+  const [saved] = session.snapshot().history;
+  session.remove(saved.id);
+  expect(deleteWorkout).toHaveBeenCalledWith(saved.id);
+  expect(session.snapshot().history).toEqual([]);
 });
 
 it('apagar os dados descarta o registro em curso e a avaliação que ainda não voltou', async () => {

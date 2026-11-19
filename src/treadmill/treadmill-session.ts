@@ -388,7 +388,6 @@ export class TreadmillSession implements TreadmillStore {
         return;
       }
       await this.teardown(connection);
-      this.update({ mode: 'ble' });
       this.notify('error', errorMessage(error));
     }
   }
@@ -401,7 +400,6 @@ export class TreadmillSession implements TreadmillStore {
     const connection = this.connection;
     this.update({ phase: 'disconnecting' });
     await this.teardown(connection);
-    this.update({ mode: 'ble' });
   }
 
   /** O link caiu sem que o app tenha pedido. */
@@ -411,7 +409,6 @@ export class TreadmillSession implements TreadmillStore {
     }
     this.linkEpoch++;
     void this.teardown(this.connection).then(() => {
-      this.update({ mode: 'ble' });
       this.notify(
         'error',
         'A conexão com a esteira caiu. A lona continua como estava: use o painel da esteira e conecte de novo quando quiser.',
@@ -430,8 +427,11 @@ export class TreadmillSession implements TreadmillStore {
       await connection.disconnect().catch(() => undefined);
     }
     this.resetLinkState();
-    // Num passo só: quem observa a sessão nunca vê "conectado" com o estado da conexão já zerado.
-    this.update({ phase: 'idle', device: null });
+    // Num passo só: quem observa a sessão nunca vê "conectado" com o estado da
+    // conexão já zerado. A origem volta a "ble" aqui dentro, e não depois:
+    // quem observa pode abrir outra conexão assim que a sessão fica livre, e
+    // uma troca feita mais tarde marcaria a esteira simulada como real.
+    this.update({ phase: 'idle', device: null, mode: 'ble' });
   }
 
   private resetLinkState(): void {

@@ -81,7 +81,7 @@ Toque em **Treino do dia** antes ou depois de conectar a esteira. A tela abre na
 
 Ajuste a velocidade e a inclinação pelo painel. O tempo do guia acompanha o movimento medido da lona.
 
-O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. As demonstrações têm histórico próprio.
+O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. Cada registro pode ser apagado ali, em **Apagar registro**. As sessões da esteira simulada não ficam guardadas: o app as descarta quando é aberto de novo.
 
 Para começar do zero, **Meu perfil → Apagar perfil e treinos** remove perfil, histórico, plano do dia e diário da IA. A chave da DeepSeek continua salva.
 

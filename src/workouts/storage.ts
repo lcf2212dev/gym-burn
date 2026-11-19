@@ -48,6 +48,22 @@ export function clearData() {
   );
 }
 
+export function deleteWorkout(id: string) {
+  db().runSync('DELETE FROM workouts WHERE id = ?', id);
+}
+
+/**
+ * Apaga os treinos de uma origem e o plano preparado para ela. Serve para
+ * limpar as demonstrações sem tocar nos treinos da esteira real.
+ */
+export function clearSource(source: SessionMode) {
+  const ids = readWorkouts()
+    .filter((w) => w.source === source)
+    .map((w) => w.id);
+  for (const id of ids) db().runSync('DELETE FROM workouts WHERE id = ?', id);
+  db().runSync('DELETE FROM prepared WHERE source = ?', source);
+}
+
 export function readProfile(): Profile | null {
   const row = db().getFirstSync<{ data: string }>('SELECT data FROM profile WHERE id = 1');
   return row ? JSON.parse(row.data) : null;

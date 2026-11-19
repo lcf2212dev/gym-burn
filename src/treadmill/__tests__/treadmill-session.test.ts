@@ -693,4 +693,28 @@ describe('contrato de leitura', () => {
     expect(snapshot.status.training).toMatchObject({ name: 'manualMode' });
     expect(snapshot.link.packets).toBeGreaterThan(0);
   });
+
+  it('reabrir a demonstração logo depois de desconectar não a faz passar por esteira real', async () => {
+    const { session } = makeSession();
+    session.actions.openDemo();
+    await jest.advanceTimersByTimeAsync(200);
+    await settle();
+    expect(session.getSnapshot()).toMatchObject({ phase: 'connected', mode: 'demo' });
+
+    // A tela reabre a demonstração assim que a sessão fica livre, antes de a
+    // desconexão terminar de arrumar o próprio estado.
+    const stop = session.subscribe(() => {
+      if (session.getSnapshot().phase !== 'idle') return;
+      stop();
+      session.actions.openDemo();
+    });
+    session.actions.disconnect();
+    await jest.advanceTimersByTimeAsync(200);
+    await settle();
+    await jest.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    // Com a origem trocada para "ble", os treinos simulados entrariam no histórico real.
+    expect(session.getSnapshot()).toMatchObject({ phase: 'connected', mode: 'demo' });
+  });
 });
