@@ -26,8 +26,16 @@ export type Reading = { bpm: number; at: number; kmh: number | null; incline: nu
 
 /** Leituras que uma revisão exige, já sem as 2 primeiras de cada pegada. */
 export const REVIEW_READINGS = 4;
-/** Tempo nos alvos antes de a carga poder subir: a FC precisa ter estabilizado. */
-export const STEADY_SECONDS = 120;
+/**
+ * Tempo nos alvos antes de a carga poder subir: o grosso da resposta da FC já
+ * aconteceu. O guia pede a primeira leitura do bloco aos 120 s da etapa, e a
+ * pessoa leva até uns 30 s para pôr a esteira nos alvos.
+ */
+export const STEADY_SECONDS = 90;
+/** Tempo nos alvos a partir do qual a FC conta como estabilizada. */
+export const SETTLED_SECONDS = 240;
+/** Antes disso, a carga só sobe com o BPM pelo menos este tanto abaixo do teto. */
+export const EARLY_GAP_BPM = 8;
 const CONTACT_GAP_MS = 3000;
 
 /**
@@ -67,6 +75,8 @@ export type Features = {
   position: 'abaixo' | 'na faixa' | 'acima';
   /** Distância da mediana até a borda da faixa; 0 dentro dela. */
   margin: number;
+  /** Quantos bpm a mediana está abaixo do teto da faixa; negativo acima dele. */
+  belowTop: number;
 };
 
 /** O que a IA e as regras locais precisam saber das leituras, já calculado. */
@@ -92,6 +102,7 @@ export function pulseFeatures(readings: Reading[], zone: Zone): Features | null 
     trend: change >= 2 ? 'subindo' : change <= -2 ? 'caindo' : 'estável',
     position,
     margin: position === 'acima' ? center - zone.high : position === 'abaixo' ? zone.low - center : 0,
+    belowTop: zone.high - center,
   };
 }
 
@@ -106,11 +117,13 @@ export type Load = {
 
 /**
  * Decisões que fazem sentido agora. Quando só resta "manter", a IA não é
- * consultada. A carga sobe apenas em etapa principal, com os alvos atingidos
- * há tempo suficiente; aliviar é possível em qualquer etapa. Entre velocidade
- * e inclinação quem escolhe é o app, pela mesma escada de cargas do plano:
- * caminhada sobe pela velocidade até 6 km/h, daí pela rampa até 8%, e correndo
- * (7 km/h ou mais) volta a ser pela velocidade.
+ * consultada. Nos blocos de esforço o alvo é o teto da faixa: qualquer leitura
+ * abaixo dele abre a opção de subir a carga, desde que os alvos estejam
+ * atingidos há tempo suficiente. Aliviar é possível em qualquer etapa, com o
+ * BPM acima da faixa. Entre velocidade e inclinação quem escolhe é o app, pela
+ * mesma escada de cargas do plano: caminhada sobe pela velocidade até 6 km/h,
+ * daí pela rampa até 8%, e correndo (7 km/h ou mais) volta a ser pela
+ * velocidade.
  */
 export function allowedDecisions(features: Features, load: Load): Decision[] {
   const { stage } = load;
@@ -119,12 +132,7 @@ export function allowedDecisions(features: Features, load: Load): Decision[] {
     if (stage.incline >= 0.5 && !running) return ['manter', 'reduzir inclinação'];
     return stage.speed > 1 ? ['manter', 'reduzir velocidade'] : ['manter'];
   }
-  if (
-    features.position === 'abaixo' &&
-    !load.easy &&
-    load.reached &&
-    load.secondsAtLoad >= STEADY_SECONDS
-  ) {
+  if (features.belowTop > 0 && !load.easy && load.reached && load.secondsAtLoad >= STEADY_SECONDS) {
     if (stage.speed >= WALK_TOP_KMH && !running && stage.incline < HILL_TOP_PERCENT)
       return ['manter', 'aumentar inclinação'];
     return stage.speed < MAX_SPEED_KMH ? ['manter', 'aumentar velocidade'] : ['manter'];

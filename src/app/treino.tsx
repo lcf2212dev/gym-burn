@@ -10,7 +10,7 @@ import { preparePlan, readPlan } from '@/workouts/storage';
 import { generatePlan } from '@/workouts/ai';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import type { Plan } from '@/workouts/model';
-import { dailyTarget, heartProfile } from '@/workouts/physiology';
+import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
 import { describe, sessionMinutes, week, zones, zoneSpan } from '@/workouts/week';
 import { formatDecimal, formatDuration } from '@/utils/format';
 
@@ -40,6 +40,9 @@ export default function Training() {
   const recent = history.filter((w) => w.source === source);
   const hr = heartProfile(profile, recent);
   const target = plan && dailyTarget(plan, profile, hr);
+  const aim = target && aimBand(target, target.objective);
+  // Em dia de recuperação a faixa é teto: ninguém busca o alto dela.
+  const chasing = !!target && !!aim && aim.low > target.low;
   const chosen = week[day].session;
   const work = plan?.stages.filter((s) => !s.measure) ?? [];
   // A recuperação é um teto ("abaixo de"); as outras faixas têm piso e teto.
@@ -125,6 +128,9 @@ export default function Training() {
                   }
                 />
               )}
+              {aim && chasing && (
+                <Fact label="Mira: o alto da faixa" value={aim.low + '–' + aim.high + ' BPM'} />
+              )}
               {work[0] && (
                 <Fact
                   label="Carga do esforço"
@@ -159,7 +165,9 @@ export default function Training() {
             ))}
           </Card>
           <Text style={styles.body}>
-            O guia pede os batimentos a cada 3 minutos e a IA revisa a carga pela faixa.
+            {chasing
+              ? 'O guia pede os batimentos a cada 3 minutos. As leituras dos blocos de esforço vão à IA, que ajusta a carga para manter os batimentos perto do teto da faixa.'
+              : 'O guia pede os batimentos a cada 3 minutos, e a IA alivia a carga se eles passarem do teto.'}
           </Text>
         </>
       ) : (

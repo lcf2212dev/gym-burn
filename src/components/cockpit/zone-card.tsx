@@ -5,7 +5,7 @@ import { Colors, LabelType, Metric, NumeralType, withAlpha } from '@/constants/t
 import { useTreadmill } from '@/treadmill/treadmill-context';
 import { useWorkout } from '@/workouts/context';
 import { currentCue, validBpm } from '@/workouts/model';
-import { dailyTarget, heartProfile } from '@/workouts/physiology';
+import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
 import { summarize } from '@/workouts/prompts';
 import { heartZones } from '@/workouts/week';
 
@@ -60,6 +60,11 @@ export function ZoneCard() {
   // ficar abaixo dela é o esperado, e a tela não deve sugerir que falta acelerar.
   const easy = !!plan && !!currentCue(plan, elapsed)?.stage.measure;
   const below = bpm !== null && bpm < target.low;
+  // Nos blocos de esforço do treino guiado o alvo é o alto da faixa: dentro
+  // dela, mas longe do teto, ainda falta carga.
+  const aim = aimBand(target, target.objective);
+  const chasing = !!plan && aim.low > target.low;
+  const short = chasing && !easy && bpm !== null && bpm < aim.low;
   const color =
     bpm === null || (below && easy)
       ? NEUTRAL
@@ -73,11 +78,13 @@ export function ZoneCard() {
       ? 'Segure o sensor para ler'
       : bpm > target.high
         ? bpm - target.high + ' bpm acima do alvo'
-        : below
-          ? easy
-            ? 'Etapa leve'
-            : target.low - bpm + ' bpm abaixo do alvo'
-          : 'No alvo';
+        : short
+          ? target.high - bpm + ' bpm abaixo do teto'
+          : below
+            ? easy
+              ? 'Etapa leve'
+              : target.low - bpm + ' bpm abaixo do alvo'
+            : 'No alvo';
   const share = active ? summarize(active).zoneSharePercent : null;
 
   const minutes = plan ? Math.ceil(plan.minutes) : Math.max(FREE_MINUTES, now + 1);
@@ -97,7 +104,10 @@ export function ZoneCard() {
             <Kicker color={Metric.heart}>Alvo de hoje · {target.objective}</Kicker>
           </View>
           <Text style={styles.range}>
-            {target.low}–{target.high} <Text style={styles.unit}>BPM</Text>
+            {target.low}–{target.high}{' '}
+            <Text style={styles.unit}>
+              BPM{chasing ? ' · mira ' + aim.low + '–' + aim.high : ''}
+            </Text>
           </Text>
         </View>
         <View style={styles.right}>

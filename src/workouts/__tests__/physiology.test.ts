@@ -1,7 +1,10 @@
-import { emptyLog, newWorkout, type Plan, type Workout } from '../model';
+import type { TreadmillSample } from '@/treadmill/types';
+import { accumulate, emptyLog, energyCost, newWorkout, type Plan, type Workout } from '../model';
 import {
   ageMax,
+  aimBand,
   dailyTarget,
+  energyKcal,
   heartProfile,
   loadLadder,
   maxBounds,
@@ -113,4 +116,61 @@ it('o piso da FC máxima soma 5 bpm ao pico de sessão levada até o fim sem red
   expect(maxFloor([peak(180, 600), peak(170, 1800)])).toBe(180);
   expect(maxFloor([peak(178, 600), peak(176, 1800)])).toBe(181);
   expect(maxFloor([session(null, null)])).toBeNull();
+});
+
+it('o alvo dos blocos de esforço é o alto da faixa; em recuperação, a faixa inteira', () => {
+  expect(aimBand({ low: 116, high: 134 }, 'Base aeróbica')).toEqual({ bpm: 134, low: 131, high: 134 });
+  expect(aimBand({ low: 162, high: 171 }, 'VO₂máx')).toEqual({ bpm: 171, low: 168, high: 171 });
+  expect(aimBand({ low: 90, high: 108 }, 'Recuperação')).toEqual({ bpm: 96, low: 90, high: 108 });
+});
+
+it('estima as kcal pela carga de cada segundo e pelo peso do perfil', () => {
+  const moving = (kmh: number, incline: number, seconds: number, weightKg = 78) => {
+    let w = newWorkout({ ...profile, weightKg }, 'ble', null);
+    let previous: TreadmillSample | null = null;
+    for (let t = 0; t <= seconds; t++) {
+      const sample: TreadmillSample = {
+        at: t * 1000,
+        speedKmh: kmh,
+        inclinationPercent: incline,
+        heartRateBpm: null,
+        energyKcal: null,
+        distanceM: null,
+      };
+      w = { ...w, totals: accumulate(w.totals, sample, previous) };
+      previous = sample;
+    }
+    return w;
+  };
+  // 6 km/h a 2% custa 4,886 METs: 45 min × 4,886 × 0,0175 kcal por kg × 78 kg.
+  const walk = moving(6, 2, 2700);
+  expect(walk.totals.metMs).toBeCloseTo(4.886 * 2700000, -4);
+  expect(energyKcal(walk)).toBe(300);
+  // O gasto acompanha o peso; a frequência cardíaca não entra na conta.
+  expect(energyKcal(moving(6, 2, 2700, 100))).toBe(385);
+  // Correndo vale a equação de corrida: 10 km/h a 1% são 10,95 METs.
+  expect(energyKcal(moving(10, 1, 600, 80))).toBe(153);
+  expect(energyKcal(newWorkout(profile, 'ble', null))).toBeNull();
+  // Entre 6 e 7 km/h o custo vai da equação de caminhada à de corrida sem salto.
+  expect([6, 6.5, 6.9, 7].map((kmh) => Math.round(energyCost(kmh, 0) * 100) / 100)).toEqual([
+    3.86, 5.76, 7.29, 7.67,
+  ]);
+  expect(mets(6.9, 0)).toBe(4.3);
+  // Registro antigo, sem a soma segundo a segundo: a conta sai da carga média de cada etapa.
+  const stage = (kmh: number, incline: number, seconds: number) => ({
+    ...emptyLog(),
+    ms: seconds * 1000,
+    distanceM: (kmh * seconds) / 3.6,
+    inclineMs: incline * seconds * 1000,
+    inclineDurationMs: seconds * 1000,
+  });
+  const old: Workout = {
+    ...walk,
+    totals: { ...walk.totals, metMs: undefined },
+    log: [stage(4, 0, 300), stage(6, 2, 2100), stage(4, 0, 300)],
+  };
+  // 10 min a 2,9 METs e 35 min a 4,886 METs.
+  expect(energyKcal(old)).toBe(273);
+  // Sem etapas, vale a média da sessão inteira.
+  expect(energyKcal({ ...old, log: undefined })).toBe(300);
 });

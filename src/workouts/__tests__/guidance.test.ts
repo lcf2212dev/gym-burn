@@ -145,8 +145,12 @@ it('só oferece à IA as decisões que cabem na etapa, já escolhendo entre velo
     pulseFeatures(pulseWindow(pulses(0, [bpm, bpm, bpm, bpm, bpm, bpm]), 0, 0), zone)!;
   const load = { stage: work, easy: false, reached: true, secondsAtLoad: 300 };
   const at = (speed: number, incline: number) => ({ ...load, stage: { ...work, speed, incline } });
-  const [below, inside, above] = [features(90), features(110), features(130)];
-  expect(allowedDecisions(inside, load)).toEqual(['manter']);
+  const [below, inside, top, above] = [features(90), features(110), features(117), features(130)];
+  // O alvo é o teto da faixa: dentro dela, mas abaixo dele, a carga ainda pode subir.
+  expect(inside).toMatchObject({ position: 'na faixa', belowTop: 7 });
+  expect(above).toMatchObject({ position: 'acima', belowTop: -13 });
+  expect(allowedDecisions(inside, load)).toEqual(['manter', 'aumentar velocidade']);
+  expect(allowedDecisions(top, load)).toEqual(['manter']);
   // Caminhada abaixo de 6 km/h: sobe pela velocidade e alivia primeiro a rampa.
   expect(allowedDecisions(below, load)).toEqual(['manter', 'aumentar velocidade']);
   expect(allowedDecisions(above, load)).toEqual(['manter', 'reduzir inclinação']);
@@ -158,10 +162,11 @@ it('só oferece à IA as decisões que cabem na etapa, já escolhendo entre velo
   expect(allowedDecisions(below, at(12, 1))).toEqual(['manter', 'aumentar velocidade']);
   expect(allowedDecisions(above, at(12, 1))).toEqual(['manter', 'reduzir velocidade']);
   expect(allowedDecisions(below, at(22, 1))).toEqual(['manter']);
-  // Abaixo da faixa a carga só sobe em etapa principal, nos alvos, com a FC já estabilizada.
+  // Abaixo do teto a carga só sobe em etapa principal, nos alvos, com a FC já estabilizada.
   expect(allowedDecisions(below, { ...load, easy: true })).toEqual(['manter']);
+  expect(allowedDecisions(inside, { ...load, easy: true })).toEqual(['manter']);
   expect(allowedDecisions(below, { ...load, reached: false })).toEqual(['manter']);
-  expect(allowedDecisions(below, { ...load, secondsAtLoad: 60 })).toEqual(['manter']);
+  expect(allowedDecisions(inside, { ...load, secondsAtLoad: 60 })).toEqual(['manter']);
   // Aliviar é possível em qualquer etapa.
   expect(allowedDecisions(above, { ...load, easy: true, secondsAtLoad: 0 })).toContain('reduzir inclinação');
 });
