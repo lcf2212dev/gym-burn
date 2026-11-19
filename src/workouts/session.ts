@@ -31,7 +31,15 @@ import {
   type Workout,
 } from './model';
 import { dailyTarget, heartProfile, restingBpm, type Pulse } from './physiology';
-import { clearData, readProfile, readWorkouts, saveProfile, saveWorkout } from './storage';
+import {
+  clearData,
+  clearSource,
+  deleteWorkout,
+  readProfile,
+  readWorkouts,
+  saveProfile,
+  saveWorkout,
+} from './storage';
 
 /** Intervalo mínimo entre revisões quando a pessoa volta a segurar o sensor. */
 const CONTACT_REVIEW_GAP = 20_000;
@@ -77,6 +85,9 @@ export class WorkoutSession {
   };
 
   constructor(private treadmill: TreadmillStore) {
+    // As sessões da esteira simulada valem só enquanto o app está aberto: não
+    // aparecem em tela nenhuma, então não há por que guardá-las.
+    clearSource('demo');
     this.state.history = readWorkouts().map((w) => {
       if (w.ended) return w;
       const recovered = { ...w, ended: w.started + w.totals.movingMs, reason: 'App interrompido' };
@@ -137,6 +148,12 @@ export class WorkoutSession {
       assessing: [],
       error: '',
     });
+  }
+
+  /** Apaga um registro encerrado do histórico. O treino em curso não está nele. */
+  remove(id: string) {
+    deleteWorkout(id);
+    this.update({ history: this.state.history.filter((w) => w.id !== id) });
   }
 
   private sameSource(source: Workout['source']) {

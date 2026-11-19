@@ -1,6 +1,6 @@
 import { Redirect } from 'expo-router';
 import { useState } from 'react';
-import { Text } from 'react-native';
+import { Alert, Text } from 'react-native';
 import { Card, Kicker } from '@/components/card';
 import { UiButton } from '@/components/ui-button';
 import { styles, WorkoutPage } from '@/components/workout-ui';
@@ -14,15 +14,21 @@ export default function Evolution() {
   const history = useWorkout((s) => s.history);
   const busy = useWorkout((s) => s.assessing);
   const error = useWorkout((s) => s.error);
-  const [demo, setDemo] = useState(false);
   const [count, setCount] = useState(12);
   if (!profile) return <Redirect href="/perfil" />;
-  const list = history.filter((w) => w.source === (demo ? 'demo' : 'ble'));
+  // As sessões da esteira simulada não entram aqui: o app as descarta ao abrir.
+  const list = history.filter((w) => w.source === 'ble');
+  function erase(id: string, when: string) {
+    Alert.alert('Apagar este registro?', 'O treino de ' + when + ' sai do histórico deste celular.', [
+      { text: 'Cancelar', style: 'cancel' },
+      { text: 'Apagar', style: 'destructive', onPress: () => session.remove(id) },
+    ]);
+  }
   const latest = list.find((w) => w.estimate && w.estimate.level !== 'Dados insuficientes');
   return (
     <WorkoutPage title="Minha evolução">
       <Card hero style={styles.card}>
-        <Kicker>{demo ? 'Demonstração' : 'Condicionamento estimado pela IA'}</Kicker>
+        <Kicker>Condicionamento estimado pela IA</Kicker>
         <Text style={styles.metric}>{latest?.estimate?.level ?? 'Aguardando dados'}</Text>
         <Text style={styles.body}>
           {latest
@@ -33,16 +39,8 @@ export default function Evolution() {
             : 'Acompanhe como seu corpo responde ao esforço em cada sessão com leituras de BPM.'}
         </Text>
       </Card>
-      <UiButton
-        variant="ghost"
-        label={demo ? 'Ver treinos reais' : 'Ver demonstrações'}
-        onPress={() => {
-          setDemo(!demo);
-          setCount(12);
-        }}
-      />
       {!!error && <Text style={styles.error}>{error}</Text>}
-      <Text style={styles.heading}>{demo ? 'Sessões simuladas' : 'Histórico da esteira'}</Text>
+      <Text style={styles.heading}>Histórico da esteira</Text>
       {!list.length && <Text style={styles.body}>Nenhum treino registrado aqui ainda.</Text>}
       {list.slice(0, count).map((w) => {
         const data = evidence(w);
@@ -80,6 +78,12 @@ export default function Evolution() {
                 onPress={() => void session.evaluate(w)}
               />
             )}
+            <UiButton
+              variant="ghost"
+              label="Apagar registro"
+              disabled={busy.includes(w.id)}
+              onPress={() => erase(w.id, new Date(w.started).toLocaleString('pt-BR'))}
+            />
           </Card>
         );
       })}
