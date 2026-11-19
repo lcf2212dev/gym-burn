@@ -1,19 +1,13 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Keyboard, Pressable, Text, View } from 'react-native';
+import { Alert, Keyboard, Text } from 'react-native';
 import { Field, styles, WorkoutPage } from '@/components/workout-ui';
 import { UiButton } from '@/components/ui-button';
 import { Card } from '@/components/card';
 import { hasApiKey, saveApiKey } from '@/workouts/ai';
-import { activities, validProfile, type Activity } from '@/workouts/model';
+import { validProfile } from '@/workouts/model';
 import { heartProfile } from '@/workouts/physiology';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
-
-const activityHint: Record<Activity, string> = {
-  Sedentário: 'Quase não faz exercício.',
-  Ativo: 'Caminha ou treina de 1 a 3 vezes por semana.',
-  Treinado: 'Treina 4 ou mais vezes por semana há meses.',
-};
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -23,7 +17,6 @@ export default function ProfileScreen() {
   const [age, setAge] = useState(profile?.age.toString() ?? '');
   const [weight, setWeight] = useState(profile?.weightKg.toString().replace('.', ',') ?? '');
   const [height, setHeight] = useState(profile?.heightCm.toString() ?? '');
-  const [activity, setActivity] = useState<Activity | undefined>(profile?.activity);
   const [key, setKey] = useState('');
   const [configured, setConfigured] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -41,7 +34,6 @@ export default function ProfileScreen() {
       age: Number(age),
       weightKg: Number(weight.replace(',', '.')),
       heightCm: Number(height.replace(',', '.')),
-      ...(activity ? { activity } : {}),
     };
     if (!validProfile(p)) {
       setError('Confira idade em anos, peso em kg e altura em cm.');
@@ -71,7 +63,6 @@ export default function ProfileScreen() {
               setAge('');
               setWeight('');
               setHeight('');
-              setActivity(undefined);
               setError('');
             } catch {
               setError('Falha ao apagar os dados neste aparelho.');
@@ -99,9 +90,9 @@ export default function ProfileScreen() {
   return (
     <WorkoutPage title="Meu perfil" back={!!profile}>
       <Text style={styles.body}>
-        Seu perfil fica neste celular. Ao usar a IA, a DeepSeek recebe idade, peso, altura, nível de
-        atividade e o resumo dos treinos, com as frequências de repouso e máxima estimadas. Durante
-        o guia, a IA também recebe BPM, velocidade e inclinação recentes para revisar os alvos.
+        Seu perfil fica neste celular. Ao usar a IA, a DeepSeek recebe sua idade e o resumo dos
+        treinos, com as frequências de repouso e máxima estimadas. Durante o guia, a IA também
+        recebe BPM, velocidade e inclinação recentes para revisar a carga.
       </Text>
       <Field
         label="Idade (anos)"
@@ -124,27 +115,6 @@ export default function ProfileScreen() {
         onChangeText={setHeight}
         maxLength={6}
       />
-      <View style={styles.group}>
-        <Text style={styles.caption}>Nível de atividade</Text>
-        <View style={styles.row}>
-          {activities.map((item) => (
-            <Pressable
-              key={item}
-              accessibilityRole="radio"
-              accessibilityState={{ checked: activity === item }}
-              accessibilityHint={activityHint[item]}
-              onPress={() => setActivity(item)}
-              style={[styles.option, item === activity && styles.selected]}>
-              <Text style={styles.caption}>{item}</Text>
-            </Pressable>
-          ))}
-        </View>
-        <Text style={styles.body}>
-          {activity
-            ? activityHint[activity]
-            : 'Orienta o primeiro plano enquanto ainda não há treinos registrados.'}
-        </Text>
-      </View>
       <UiButton label="Salvar perfil" onPress={save} />
       {!!error && (
         <Text accessibilityRole="alert" style={styles.error}>

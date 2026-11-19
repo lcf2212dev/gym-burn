@@ -20,6 +20,7 @@ import {
   emptyLog,
   insufficient,
   levels,
+  logBeats,
   logStage,
   newWorkout,
   REST_WINDOW_SECONDS,
@@ -210,6 +211,7 @@ export class WorkoutSession {
       const elapsed = Math.floor(totals.movingMs / 1000);
       const cue = w.plan && currentCue(w.plan, elapsed);
       let next = this.measureRest({ ...w, totals }, sample, moving);
+      next = { ...next, beats: logBeats(next.beats, sample, this.previous, elapsed) };
       // O treino livre tem um registro só. No guiado, o que passa do fim do
       // plano não pertence a etapa nenhuma.
       const index = cue ? cue.index : w.plan ? -1 : 0;
@@ -256,7 +258,7 @@ export class WorkoutSession {
     const reached = g.speedReached && g.inclineReached;
     return {
       stage,
-      easy: stage.measure || plan.goal === 'Recuperação ativa',
+      easy: stage.measure || plan.objective === 'Recuperação',
       reached,
       secondsAtLoad: reached && this.reachedSince !== null ? (now - this.reachedSince) / 1000 : 0,
     };
@@ -480,7 +482,9 @@ function localVerdict(f: Features, load: Load) {
   const bpm = f.median + ' BPM';
   if (f.position === 'na faixa') return 'Na faixa · ' + bpm;
   if (f.position === 'acima') return 'Acima da faixa · ' + bpm + ' · carga já no mínimo';
-  if (load.easy) return 'Abaixo da faixa · ' + bpm + ' · etapa leve';
+  // Nos trechos leves e nas sessões de recuperação ficar abaixo da faixa é o esperado.
+  if (load.stage.measure) return 'Etapa leve · ' + bpm;
+  if (load.easy) return 'Abaixo do teto · ' + bpm;
   if (!load.reached) return 'Abaixo da faixa · ' + bpm + ' · ajuste a esteira aos alvos';
   if (load.secondsAtLoad < STEADY_SECONDS) return 'Abaixo da faixa · ' + bpm + ' · estabilizando';
   return 'Abaixo da faixa · ' + bpm + ' · carga já no máximo';

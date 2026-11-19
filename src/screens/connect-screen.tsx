@@ -29,7 +29,6 @@ import {
   LabelType,
   MaxContentWidth,
   Neon,
-  NumeralType,
   Spacing,
   TitleType,
   withAlpha,
@@ -45,12 +44,6 @@ const RADAR_SIZE = 168;
 const PULSE_MS = 2000;
 /** Anéis estáticos, do externo para o interno (fração do diâmetro). */
 const RADAR_RINGS = [1, 0.72, 0.46] as const;
-
-const STEPS = [
-  'Segure o botão Bluetooth do painel por ~5 s, até ele entrar no modo APP.',
-  'Toque no nome da sua esteira na lista acima.',
-  'Não pareie pela tela de Bluetooth do sistema: o app conecta direto.',
-];
 
 /**
  * Abertura do app: procura esteiras sozinha, mostra as que aparecem e conecta
@@ -201,29 +194,6 @@ export function ConnectScreen() {
               )}
             </View>
           )}
-
-          <Surface tone="sunken" style={styles.guide}>
-            <SectionLabel label="Primeira vez?" accent={Neon.violet} />
-            {STEPS.map((step, index) => (
-              <View
-                key={step}
-                style={[
-                  styles.step,
-                  index > 0 && {
-                    borderTopWidth: 1,
-                    borderTopColor: theme.border,
-                    paddingTop: Spacing.three,
-                  },
-                ]}>
-                <Text style={[styles.stepNumber, NumeralType, { color: Neon.volt }]}>
-                  {index + 1}
-                </Text>
-                <Text style={[styles.stepText, BodyType, { color: theme.textSecondary }]}>
-                  {step}
-                </Text>
-              </View>
-            ))}
-          </Surface>
 
           <View style={styles.footer}>
             <Text style={[styles.footerText, LabelType, { color: theme.textMuted }]}>
@@ -507,24 +477,6 @@ const styles = StyleSheet.create({
   },
   rescan: {
     marginTop: Spacing.two,
-  },
-  guide: {
-    gap: Spacing.three,
-  },
-  step: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: Spacing.three,
-  },
-  stepNumber: {
-    minWidth: 20,
-    fontSize: 26,
-    lineHeight: 22,
-    textAlign: 'center',
-  },
-  stepText: {
-    flex: 1,
-    flexShrink: 1,
   },
   footer: {
     flexDirection: 'row',

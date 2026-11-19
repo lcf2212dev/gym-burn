@@ -1,5 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
-import { makePlan, type Estimate, type Goal, type Plan, type Profile, type Workout } from './model';
+import type { Estimate, Plan, Profile, Workout } from './model';
 import {
   assessBounds,
   assessPrompt,
@@ -7,13 +7,13 @@ import {
   parsePlan,
   parseReview,
   planPrompt,
-  progressionCeiling,
   PROMPT_VERSION,
   reviewPrompt,
   type Prompt,
   type ReviewInput,
 } from './prompts';
 import { saveCall } from './storage';
+import { sessionPlan, type Session } from './week';
 
 const keyName = 'gym-burn.deepseek';
 export const apiKey = () => SecureStore.getItemAsync(keyName);
@@ -178,37 +178,21 @@ export async function callModel<T>(
   throw failure;
 }
 
+/**
+ * O plano de hoje para uma sessão do plano semanal. A estrutura e a faixa vêm
+ * da sessão; a IA escolhe a carga dos blocos de esforço. Não há teto além do
+ * que a esteira alcança: a resposta é conferida com a conta do app, e a
+ * revisão durante o treino corrige o que a frequência cardíaca mostrar.
+ */
 export async function generatePlan(
   profile: Profile,
-  minutes: number,
-  goal: Goal | null,
+  session: Session,
   history: Workout[],
   options?: CallOptions,
 ): Promise<Plan> {
-  const now = Date.now();
-  const choice = await callModel(
-    'plan',
-    planPrompt({ profile, minutes, goal, history, now }),
-    parsePlan,
-    options,
-  );
-  // O teto de progressão vale mesmo que a IA peça mais.
-  const ceiling = progressionCeiling(profile, history, now);
-  if (choice.pace > ceiling.pace || choice.grade > ceiling.grade)
-    record(
-      'plan',
-      { note: 'Teto de progressão aplicado', asked: choice, ceiling },
-      options?.journal ?? true,
-    );
-  const plan = makePlan(
-    goal ?? choice.goal,
-    minutes,
-    Math.min(choice.pace, ceiling.pace),
-    Math.min(choice.grade, ceiling.grade),
-    choice.workMinutes,
-    choice.recoveryMinutes,
-  );
-  return { ...plan, objective: choice.objective, why: choice.why };
+  const prompt = planPrompt({ profile, session, history, now: Date.now() });
+  const choice = await callModel('plan', prompt, parsePlan(prompt.user), options);
+  return { ...sessionPlan(session, choice.pace, choice.grade), why: choice.why };
 }
 
 /** `history` são as sessões anteriores da mesma origem, da mais nova para a mais antiga. */

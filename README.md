@@ -12,13 +12,12 @@ painel de treino. Quem controla a esteira continua sendo o painel dela.
 
 <p align="center">
   <img src="docs/screenshots/01-conexao.png" width="31%" alt="Tela de conexão: radar procurando esteiras" />
-  <img src="docs/screenshots/02-cockpit.png" width="31%" alt="Cockpit: velocidade, inclinação, batimentos e gráfico ao vivo" />
+  <img src="docs/screenshots/02-cockpit.png" width="31%" alt="Cockpit: velocidade, inclinação, batimentos e grade de métricas" />
   <img src="docs/screenshots/03-treino-e-console.png" width="31%" alt="Grade de métricas do treino, eventos do console e cartões de detalhe" />
 </p>
 <p align="center">
   <img src="docs/screenshots/04-equipamento.png" width="31%" alt="Cartão do equipamento expandido: identidade do módulo, faixas e recursos declarados" />
   <img src="docs/screenshots/05-dados-da-esteira.png" width="31%" alt="Lista completa dos campos do Treadmill Data, inclusive os que a esteira não envia" />
-  <img src="docs/screenshots/06-grafico-batimentos.png" width="31%" alt="Gráfico ao vivo na série de batimentos" />
 </p>
 
 Capturas do modo demonstração (esteira simulada), no Android 15. A identidade do equipamento
@@ -32,8 +31,8 @@ mostrada é a da T600X real: o app lê o módulo BLE que ela expõe.
   (`0x2AD3`), e lê a identidade e as capacidades do equipamento ao conectar;
 - **atualiza o cockpit cerca de uma vez por segundo**, com velocidade, inclinação, batimentos,
   tempo, distância, calorias e MET;
-- **guarda os últimos 60 segundos** de velocidade, inclinação e frequência cardíaca para o gráfico
-  ao vivo;
+- **guarda as leituras dos últimos 2 minutos** de velocidade, inclinação e frequência cardíaca, de
+  onde saem a revisão da carga e o cartão da zona de batimentos;
 - **traduz os eventos do console** (início, parada, pausa, mudança de alvo feita no painel, chave de
   segurança) em avisos legíveis;
 - **mostra com honestidade o que a esteira não manda**, marcando `—` nos campos que o firmware
@@ -63,30 +62,69 @@ Em resumo: ele informa; ele não comanda.
 | O que a esteira declara medir | — | Fitness Machine Feature (0x2ACC) |
 | Faixas de velocidade e inclinação | km/h, % | Supported Speed Range (0x2AD4) e Supported Inclination Range (0x2AD5) |
 
-O cockpit tem velocidade em destaque, inclinação e batimentos ao lado, o gráfico dos últimos 60 s, a
-grade de métricas, um cartão com o equipamento encontrado e uma lista dos campos que o modelo não
-envia. A referência completa dos campos e das escalas está em
+O cockpit mostra o guia do treino (etapa, tempo que falta e carga a pôr no painel), velocidade,
+inclinação e batimentos com a unidade ao lado, a grade de métricas e o cartão da zona: a faixa de
+batimentos da sessão, a última leitura, o que a IA decidiu e a linha do tempo do treino. A linha do
+tempo tem uma coluna por minuto, preenchida à medida que as leituras de BPM chegam, sobre as cinco
+zonas de frequência cardíaca (Z1 a Z5, de 10 em 10 pontos percentuais a partir de 50% da FC
+máxima), com o alvo do dia em destaque. A velocidade média é
+calculada pelo app, pela distância e pelo tempo que a esteira informa, porque este modelo não a
+envia. Um toque longo no nome da esteira abre o cartão do equipamento e a lista dos campos que o
+modelo não envia. A referência completa dos campos e das escalas está em
 [docs/dados-da-esteira.md](docs/dados-da-esteira.md).
 
 ## Treinos guiados
 
-Na primeira abertura, informe idade, peso, altura e nível de atividade em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho.
+Na primeira abertura, informe idade, peso e altura em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho.
 
-Toque em **Treino do dia** antes ou depois de conectar a esteira. O plano gerado fica salvo no celular para aquele dia. A escolha automática usa seu perfil, as faixas de BPM e as sessões válidas recentes (3 minutos ou mais em movimento). Também é possível selecionar o objetivo e ajustar os 45 minutos iniciais. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda 6 leituras novas de BPM, cerca de 10 segundos. É possível minimizar e reabrir o aviso pelo painel.
+Toque em **Treino do dia** antes ou depois de conectar a esteira. A tela abre na sessão de hoje do plano semanal (veja abaixo) e deixa escolher a de outro dia. A IA define a velocidade e a inclinação dos blocos de esforço a partir das sessões válidas recentes (3 minutos ou mais em movimento), e o plano gerado fica salvo no celular para aquele dia. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda 6 leituras novas de BPM, cerca de 10 segundos. Um toque fora do aviso o recolhe, e **Ver aviso**, no painel, o reabre.
 
 Ajuste a velocidade e a inclinação pelo painel. O tempo do guia acompanha o movimento medido da lona.
 
-O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console, a desconexão ou **Encerrar registro** encerram a sessão. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. As demonstrações têm histórico próprio.
+O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Em **Evolução**, consulte as avaliações por data ou tente novamente se a internet falhar. As demonstrações têm histórico próprio.
 
 Para começar do zero, **Meu perfil → Apagar perfil e treinos** remove perfil, histórico, plano do dia e diário da IA. A chave da DeepSeek continua salva.
+
+### Plano semanal
+
+O guia segue uma semana fixa: um treino de 45 minutos por dia, de segunda a sábado, com a faixa de frequência cardíaca dos blocos de esforço em percentual da FC máxima:
+
+| Dia | Sessão | Estrutura | Faixa |
+| --- | --- | --- | --- |
+| Segunda e quinta | Base aeróbica | contínuo | 65–75% |
+| Terça | VO₂máx | 10 min aquecendo, 4 × 4 min com 3 min leves, 7 min desaquecendo | 90–95% nos tiros |
+| Quarta | Recuperação ativa ou caminhada inclinada | contínuo, bem leve | abaixo de 60–65% |
+| Sexta | Limiar | 10 min aquecendo, 3 × 8 min com 2 min leves, 5 min desaquecendo | 85–90% nos blocos |
+| Sábado | Base aeróbica ou caminhada inclinada | contínuo | 65–75% |
+| Domingo | descanso | | |
+
+Nos dias contínuos os 45 minutos incluem 5 de entrada e 5 de saída em ritmo leve. Na quarta, "abaixo de 60–65%" é um teto: o app busca 50–60% e só pede para aliviar com a FC alguns bpm acima disso. Onde o plano escreve "ou caminhada inclinada" (quarta e sábado) o treino é um só: a rampa entra pela escada de cargas descrita abaixo, quando a faixa pede mais do que a caminhada plana oferece. A semana está em `src/workouts/week.ts`.
+
+Os alvos dos treinos ficam dentro das cinco zonas de frequência cardíaca que o painel desenha:
+
+| Zona | % da FC máxima | Sensação | Para quê |
+| --- | --- | --- | --- |
+| Z1 – Recuperação | 50–60% | muito leve, dá para conversar fácil | aquecimento, recuperação ativa |
+| Z2 – Aeróbica base | 60–70% | leve, conversa tranquila | queima de gordura, base de resistência |
+| Z3 – Aeróbica moderada | 70–80% | moderado, frases curtas | condicionamento aeróbico, eficiência cardíaca |
+| Z4 – Limiar | 80–90% | forte, só palavras soltas | aumentar o limiar de lactato, ritmo de prova |
+| Z5 – Máximo (VO₂máx) | 90–100% | máximo, insustentável por muito tempo | tiros curtos, potência e velocidade |
+
+A recuperação de quarta é a Z1, a base aeróbica (65–75%) pega o alto da Z2 e o começo da Z3, o limiar (85–90%) fica na Z4 e os tiros de VO₂máx (90–95%) na Z5.
+
+A estrutura e a faixa não mudam; a IA escolhe só a carga. Não há teto de velocidade ou inclinação além do que a esteira alcança (22 km/h e 15%), nem limite de aumento de uma sessão para a outra: a carga já busca a faixa no primeiro treino de cada tipo. Para isso o app calcula o custo metabólico de cada carga em METs (equações do ACSM, de caminhada abaixo de 7 km/h e de corrida a partir daí) e monta uma escada de cargas: caminhada plana até 6 km/h, depois rampa a 6 km/h até 8%, depois corrida a 1%. Quem ainda chega à faixa andando não recebe corrida.
+
+A conta é a mesma para todas as sessões: a FC sobe quase em linha reta com os METs, então a carga de hoje sai da última sessão parecida, do BPM em que ela terminou e do BPM buscado hoje (o terço de baixo da faixa). Se a última sessão igual terminou dentro da faixa, a carga se repete. O app faz essa conta também e recusa a resposta da IA que se afastar dela em mais de uma linha da escada.
 
 ### Frequência cardíaca
 
 A esteira só lê batimentos com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando. O app usa a menor das 5 últimas e desconta 15 bpm.
 
-A FC máxima começa em 220 − idade. Depois de cada sessão avaliada, a IA devolve uma previsão, e o app passa a usar a mediana das 3 últimas. A previsão fica presa a 10 bpm das estimativas pela idade e nunca abaixo do maior pico já observado. Caminhada submáxima não mede a FC máxima, então o erro típico continua na casa de ±10 bpm.
+Depois disso o guia pede os batimentos a cada 3 minutos. Em cada etapa nova o primeiro pedido espera a frequência cardíaca acompanhar a carga (1 minuto nas etapas leves, 2 nas de esforço), e o seguinte abre 3 minutos depois da leitura atendida, com aviso sonoro. Um pedido sem resposta fica aberto, sem empilhar outro, e nenhum pedido novo abre nos últimos 30 segundos da etapa. O pedido vale em qualquer velocidade, inclusive correndo: as faixas do plano dependem dessa leitura.
 
-Com repouso medido, a faixa de BPM do treino sai da reserva de frequência cardíaca; sem ele, de percentuais da máxima. A faixa pela reserva nunca se afasta mais de 10 bpm da faixa pela máxima, para uma leitura ruim de repouso não deslocar o alvo. É uma orientação de treino, não uma medição clínica. [Referência da American Heart Association](https://www.heart.org/en/healthy-living/exercise-and-physical-activity/fitness-basics/target-heart-rates).
+A FC máxima começa em 220 − idade. Depois de cada sessão avaliada, a IA devolve uma previsão, e o app passa a usar a mediana das 3 últimas. A previsão é o maior de dois números que o app calcula: a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade) e o piso medido, que é o maior pico já observado, com 5 bpm a mais quando o pico veio de uma sessão levada até o fim sem redução de carga. Ela fica presa a 10 bpm das estimativas pela idade e nunca abaixo desse piso. Treino submáximo não mede a FC máxima, então o erro típico continua na casa de ±10 bpm.
+
+A faixa de BPM de cada sessão são os percentuais do plano semanal aplicados a essa FC máxima. A FC de repouso não desloca a faixa; ela serve de ponto de partida para a reta que liga carga e frequência cardíaca. É uma orientação de treino, não uma medição clínica. [Referência da American Heart Association](https://www.heart.org/en/healthy-living/exercise-and-physical-activity/fitness-basics/target-heart-rates).
 
 ### Quando a IA é chamada
 
@@ -94,13 +132,13 @@ As três chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com racioc�
 
 | Chamada | Quando | Esforço de raciocínio | O que a DeepSeek recebe |
 | --- | --- | --- | --- |
-| Plano do dia | toque em **Gerar treino com IA** | `high` | perfil, FC de repouso e máxima, faixas de BPM, duração, modo e resumo das sessões válidas recentes |
-| Revisão de carga | durante o guia, quando as leituras saem da faixa e há mais de uma decisão possível | `low` | idade, nível de atividade, faixa do dia, etapa atual, resumo e leituras recentes de BPM, ajustes já feitos |
-| Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, nível de atividade, resumo da sessão por tipo de bloco e das sessões anteriores, estimativas de FC máxima |
+| Plano do dia | toque em **Gerar treino com IA** | `high` | idade, FC de repouso e máxima, sessão do dia com a faixa de BPM, resumo das sessões válidas recentes e a escada de cargas |
+| Revisão de carga | durante o guia, quando as leituras saem da faixa e há mais de uma decisão possível | `low` | idade, faixa do dia, etapa atual, resumo e leituras recentes de BPM, ajustes já feitos |
+| Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, resumo da sessão por tipo de bloco e das sessões anteriores, estimativas de FC máxima |
 
-O plano tem teto de progressão: não passa de 0,5 km/h e 1% acima da maior carga principal recente, ou do teto do nível de atividade quando ainda não há histórico.
+Peso e altura ficam só no aparelho: nenhuma chamada os envia.
 
-A revisão usa a mediana de pelo menos 4 leituras, depois de descartar as 2 primeiras de cada pegada no sensor. Com o BPM na faixa nada é enviado. A carga só sobe em bloco de esforço, com os alvos atingidos há 2 minutos. Depois de um ajuste, o guia espera 1 minuto antes de revisar de novo. Uma resposta que chega atrasada só é aplicada se a etapa e a carga forem as mesmas e se as leituras dos últimos 30 segundos ainda admitirem a mesma decisão. O ajuste de um bloco de esforço vale também para os blocos iguais que ainda virão. Com internet indisponível o guia segue o plano local.
+A revisão usa a mediana de pelo menos 4 leituras, depois de descartar as 2 primeiras de cada pegada no sensor. Com o BPM na faixa nada é enviado. A carga só sobe em bloco de esforço, com os alvos atingidos há 2 minutos, e nunca em dia de recuperação, em que a faixa é teto. Entre velocidade e inclinação quem escolhe é o app, pela mesma escada de cargas do plano; a IA decide se muda ou mantém. Depois de um ajuste, o guia espera 1 minuto antes de revisar de novo. Uma resposta que chega atrasada só é aplicada se a etapa e a carga forem as mesmas e se as leituras dos últimos 30 segundos ainda admitirem a mesma decisão. O ajuste de um bloco de esforço vale também para os blocos iguais que ainda virão. Com internet indisponível o guia segue o plano local.
 
 Cada chamada tem até 3 novas tentativas em falha de rede, erro do servidor ou resposta fora do formato.
 
@@ -215,7 +253,7 @@ esteira Matrix T600X  ── codec FTMS puro em src/ftms
 | --- | --- |
 | `src/app` | rotas do Expo Router; a rota principal mostra a conexão ou o cockpit conforme a fase da sessão |
 | `src/screens` | tela de conexão e tela do cockpit |
-| `src/components` | primitivas visuais e blocos do cockpit (gráfico, cartões, métricas, avisos) |
+| `src/components` | primitivas visuais e blocos do cockpit (cartões, métricas, zona de batimentos, avisos) |
 | `src/treadmill` | sessão (estado, busca, conexão, leitura), contrato de tipos, contexto React e constantes da T600X |
 | `src/ftms` | codec puro do FTMS: bytes, Treadmill Data, Machine Status, Training Status, Device Information, Feature e faixas |
 | `src/ble` | contrato `BleTransport`, implementação com `react-native-ble-manager` e permissões do Android |

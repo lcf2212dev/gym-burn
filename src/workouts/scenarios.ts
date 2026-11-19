@@ -2,26 +2,18 @@
 // salva. Cada cenário tem um desfecho aceito; a mesma entrada é enviada algumas
 // vezes para medir também a concordância entre repetições.
 
-import {
-  allowedDecisions,
-  pulseFeatures,
-  type Decision,
-  type Objective,
-  type Reading,
-} from './adaptive';
+import { allowedDecisions, pulseFeatures, type Decision, type Reading } from './adaptive';
 import { callModel, type Kind } from './ai';
 import {
   emptyLog,
-  makePlan,
   median,
-  type Goal,
   type HeartProfile,
   type Plan,
   type Profile,
   type StageLog,
   type Workout,
 } from './model';
-import { dailyTarget, foxMax } from './physiology';
+import { dailyTarget, foxMax, loadLadder } from './physiology';
 import {
   assessBounds,
   assessPrompt,
@@ -29,10 +21,9 @@ import {
   parsePlan,
   parseReview,
   planPrompt,
-  progressionCeiling,
   reviewPrompt,
-  type PlanChoice,
 } from './prompts';
+import { sessionPlan, week, type Session } from './week';
 
 export type Outcome = {
   scenario: string;
@@ -49,20 +40,25 @@ export type Outcome = {
 
 const DAY = 86400000;
 const total = (values: number[]) => values.reduce((a, b) => a + b, 0);
-const near = (a: number, b: number) => Math.abs(a - b) < 0.05;
+
+// As sessões do plano semanal usadas nos cenários.
+const base = week[1].session!;
+const vo2 = week[2].session!;
+const recovery = week[3].session!;
+const threshold = week[5].session!;
 
 // --- Sessões fabricadas ----------------------------------------------------
 
 type Past = {
   daysAgo: number;
-  goal?: Goal;
-  objective?: Objective;
-  minutes?: number;
+  session?: Session;
   pace?: number;
   grade?: number;
   /** BPM estabilizado nos blocos de esforço e nos blocos leves. */
   bpmWork?: number | null;
   bpmEasy?: number | null;
+  /** Leitura do primeiro minuto, de onde sai a FC de repouso. */
+  rest?: number;
   /** Queda em 1 min de recuperação. */
   drop?: number | null;
   /** Parcela do plano realmente feita. */
@@ -73,10 +69,7 @@ type Past = {
 };
 
 function past(profile: Profile, now: number, p: Past): Workout {
-  const plan: Plan = {
-    ...makePlan(p.goal ?? 'Resistência', p.minutes ?? 45, p.pace ?? 5, p.grade ?? 1, 15, 2),
-    objective: p.objective ?? 'Base aeróbica',
-  };
+  const plan = sessionPlan(p.session ?? base, p.pace ?? 6, p.grade ?? 2);
   const hr: HeartProfile = { rest: null, max: foxMax(profile.age), maxSource: 'idade' };
   const zone = dailyTarget(plan, profile, hr);
   let budget = plan.minutes * 60 * (p.completion ?? 1);
@@ -89,8 +82,8 @@ function past(profile: Profile, now: number, p: Past): Workout {
     const bpm = stage.measure ? (p.bpmEasy ?? null) : (p.bpmWork ?? null);
     const tail = bpm === null ? [] : [bpm - 1, bpm, bpm + 1, bpm, bpm, bpm + 1, bpm - 1, bpm];
     const afterWork = i > 0 && stage.measure && !plan.stages[i - 1].measure;
-    const base = (p.bpmWork ?? 0) - (p.drop ?? 0);
-    const early = afterWork && p.bpmWork != null && p.drop != null ? [base + 1, base, base - 1] : [];
+    const start = (p.bpmWork ?? 0) - (p.drop ?? 0);
+    const early = afterWork && p.bpmWork != null && p.drop != null ? [start + 1, start, start - 1] : [];
     const counts: StageLog['zone'] = [0, 0, 0];
     [...tail, ...early].forEach((b) => counts[b < zone.low ? 0 : b > zone.high ? 2 : 1]++);
     log.push({
@@ -127,7 +120,7 @@ function past(profile: Profile, now: number, p: Past): Workout {
     ended: started + movingMs,
     reason: (p.completion ?? 1) >= 1 ? 'Duração concluída' : 'Encerrado no app',
     estimate: p.level ? { level: p.level, summary: '', maxBpm: p.maxBpm ?? null } : null,
-    restBpm: null,
+    restBpm: p.rest ?? null,
     hr,
     log,
     changes: Array.from({ length: p.reductions ?? 0 }, (_, k) => ({
@@ -139,15 +132,18 @@ function past(profile: Profile, now: number, p: Past): Workout {
   };
 }
 
-const adult: Profile = { age: 40, weightKg: 78, heightCm: 175, activity: 'Ativo' };
+// 40 anos: FC máxima estimada de 180. Faixas: recuperação 90–108, base 117–135,
+// limiar 153–162, VO₂máx 162–171.
+const adult: Profile = { age: 40, weightKg: 78, heightCm: 175 };
 
 // --- Revisão durante o treino ----------------------------------------------
-// Pessoa de 40 anos em "Base aeróbica": faixa de 99 a 117 BPM. Plano de 45 min
-// com dois blocos de esforço a 5,5 km/h e 2%.
 
 type ReviewCase = {
   name: string;
-  /** Etapa: 0 aquecimento, 1 esforço, 2 recuperação, 3 esforço, 4 volta à calma. */
+  session: Session;
+  pace: number;
+  grade: number;
+  /** Índice da etapa no plano da sessão. */
   stage: number;
   into: number;
   reached: boolean;
@@ -159,37 +155,51 @@ type ReviewCase = {
   expect: Decision[];
 };
 
-const reduce: Decision[] = ['reduzir velocidade', 'reduzir inclinação'];
-const increase: Decision[] = ['aumentar velocidade', 'aumentar inclinação'];
 const hold: Decision[] = ['manter'];
+// Base aeróbica a 6 km/h e 2%: aquecimento (0), esforço de 35 min (1), volta à calma (2).
+const walk = { session: base, pace: 6, grade: 2 };
+// VO₂máx a 6 km/h e 6,5%: aquecimento (0), tiros nas etapas 1, 3, 5 e 7, com recuperação depois de cada um.
+const shots = { session: vo2, pace: 6, grade: 6.5 };
 
 const reviewCases: ReviewCase[] = [
-  { name: 'faixa-estavel', stage: 1, into: 400, reached: true, atLoad: 380, bpm: [110, 111, 110, 112, 111, 110], expect: hold },
-  { name: 'acima-sustentado', stage: 1, into: 500, reached: true, atLoad: 480, bpm: [129, 130, 131, 130, 131, 132], expect: reduce },
-  { name: 'acima-marginal', stage: 1, into: 500, reached: true, atLoad: 480, bpm: [119, 120, 119, 120, 119, 120], expect: hold },
+  { name: 'faixa-estavel', ...walk, stage: 1, into: 400, reached: true, atLoad: 380, bpm: [125, 126, 125, 127, 126, 125], expect: hold },
+  { name: 'acima-sustentado', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [147, 148, 149, 148, 149, 150], expect: ['reduzir inclinação'] },
+  { name: 'acima-marginal', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [137, 138, 137, 138, 137, 138], expect: hold },
   {
     name: 'acima-logo-apos-reducao',
+    ...walk,
     stage: 1,
     into: 600,
     reached: true,
     atLoad: 20,
-    bpm: [124, 123, 123, 122, 122, 121],
-    change: { secondsAgo: 45, decision: 'reduzir velocidade', bpm: 129 },
+    bpm: [142, 141, 141, 140, 140, 139],
+    change: { secondsAgo: 45, decision: 'reduzir inclinação', bpm: 147 },
     expect: hold,
   },
-  { name: 'abaixo-cedo-demais', stage: 1, into: 40, reached: true, atLoad: 25, bpm: [92, 93, 93, 94, 95, 95], expect: hold },
-  { name: 'abaixo-estavel', stage: 1, into: 420, reached: true, atLoad: 400, bpm: [88, 89, 88, 89, 88, 89], expect: increase },
-  { name: 'aquecimento-abaixo', stage: 0, into: 120, reached: true, atLoad: 100, bpm: [85, 86, 85, 86, 86, 85], expect: hold },
-  { name: 'recuperacao-caindo', stage: 2, into: 50, reached: true, atLoad: 30, bpm: [128, 126, 124, 122, 120, 119], expect: hold },
-  { name: 'volta-a-calma-presa-acima', stage: 4, into: 200, reached: true, atLoad: 180, bpm: [131, 131, 132, 131, 132, 132], expect: ['reduzir velocidade'] },
-  { name: 'pico-isolado-no-fim', stage: 1, into: 500, reached: true, atLoad: 480, bpm: [110, 111, 110, 112, 111, 150], expect: hold },
-  { name: 'abaixo-sem-atingir-alvo', stage: 1, into: 400, reached: false, atLoad: 0, bpm: [90, 90, 91, 90, 91, 90], kmh: 4.8, expect: hold },
-  { name: 'acima-e-subindo', stage: 1, into: 300, reached: true, atLoad: 280, bpm: [123, 123, 124, 124, 125, 125], expect: reduce },
+  { name: 'abaixo-cedo-demais', ...walk, stage: 1, into: 40, reached: true, atLoad: 25, bpm: [102, 103, 103, 104, 105, 105], expect: hold },
+  { name: 'abaixo-estavel', ...walk, stage: 1, into: 420, reached: true, atLoad: 400, bpm: [106, 107, 106, 107, 106, 107], expect: ['aumentar inclinação'] },
+  { name: 'aquecimento-abaixo', ...walk, stage: 0, into: 120, reached: true, atLoad: 100, bpm: [95, 96, 95, 96, 96, 95], expect: hold },
+  { name: 'volta-a-calma-caindo', ...walk, stage: 2, into: 50, reached: true, atLoad: 30, bpm: [146, 144, 142, 140, 138, 137], expect: hold },
+  { name: 'volta-a-calma-presa-acima', ...walk, stage: 2, into: 200, reached: true, atLoad: 180, bpm: [149, 149, 150, 149, 150, 150], expect: ['reduzir velocidade'] },
+  { name: 'pico-isolado-no-fim', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [125, 126, 125, 127, 126, 165], expect: hold },
+  { name: 'abaixo-sem-atingir-alvo', ...walk, stage: 1, into: 400, reached: false, atLoad: 0, bpm: [105, 105, 106, 105, 106, 105], kmh: 5.2, expect: hold },
+  { name: 'acima-e-subindo', ...walk, stage: 1, into: 300, reached: true, atLoad: 280, bpm: [141, 141, 142, 142, 143, 143], expect: ['reduzir inclinação'] },
+  // No meio do tiro a FC ainda está subindo: não é hora de aumentar a carga.
+  { name: 'tiro-abaixo-subindo', ...shots, stage: 1, into: 135, reached: true, atLoad: 125, bpm: [150, 151, 153, 154, 156, 157], expect: hold },
+  // Faltam 90 s, mas vêm mais 3 tiros: o ajuste vale para eles.
+  { name: 'tiro-abaixo-estavel', ...shots, stage: 1, into: 150, reached: true, atLoad: 140, bpm: [150, 151, 150, 151, 150, 151], expect: ['aumentar inclinação'] },
+  { name: 'ultimo-tiro-sem-tempo', ...shots, stage: 7, into: 150, reached: true, atLoad: 140, bpm: [150, 151, 150, 151, 150, 151], expect: hold },
+  // Correndo, a carga muda pela velocidade.
+  { name: 'limiar-correndo-acima', session: threshold, pace: 8, grade: 1, stage: 1, into: 300, reached: true, atLoad: 280, bpm: [172, 173, 172, 173, 174, 173], expect: ['reduzir velocidade'] },
+  // Em dia de recuperação a faixa é teto: abaixo dela nada sobe.
+  { name: 'recuperacao-abaixo-do-teto', session: recovery, pace: 4.5, grade: 0, stage: 1, into: 600, reached: true, atLoad: 580, bpm: [84, 85, 84, 85, 85, 84], expect: hold },
+  // Caminhando abaixo de 6 km/h, a carga sobe pela velocidade.
+  { name: 'caminhada-abaixo-estavel', session: base, pace: 5, grade: 0, stage: 1, into: 420, reached: true, atLoad: 400, bpm: [104, 105, 104, 105, 104, 105], expect: ['aumentar velocidade'] },
 ];
 
 async function runReview(c: ReviewCase) {
   const now = Date.now();
-  const plan: Plan = { ...makePlan('Resistência', 45, 5.5, 2, 15, 2), objective: 'Base aeróbica' };
+  const plan: Plan = sessionPlan(c.session, c.pace, c.grade);
   const stage = plan.stages[c.stage];
   const elapsed = total(plan.stages.slice(0, c.stage).map((s) => s.seconds)) + c.into;
   const hr: HeartProfile = { rest: null, max: foxMax(adult.age), maxSource: 'idade' };
@@ -229,7 +239,12 @@ async function runReview(c: ReviewCase) {
   // As mesmas regras locais da sessão: espera depois de um ajuste e lista de decisões possíveis.
   if (c.change && c.change.secondsAgo < 60) return { answer: 'manter', detail: 'espera após ajuste', called: false };
   const features = pulseFeatures(readings, dailyTarget(plan, adult, hr))!;
-  const load = { stage, easy: stage.measure, reached: c.reached, secondsAtLoad: c.atLoad };
+  const load = {
+    stage,
+    easy: stage.measure || plan.objective === 'Recuperação',
+    reached: c.reached,
+    secondsAtLoad: c.atLoad,
+  };
   const allowed = allowedDecisions(features, load);
   if (allowed.length === 1) return { answer: 'manter', detail: 'regra local: ' + features.position, called: false };
   const { decision, reason } = await callModel(
@@ -245,103 +260,107 @@ async function runReview(c: ReviewCase) {
 
 type PlanCase = {
   name: string;
-  profile: Profile;
-  minutes: number;
-  goal: Goal | null;
+  session: Session;
   history: (now: number) => Workout[];
-  /** Devolve o motivo da reprovação, ou `null` se o plano serve. */
-  check: (c: PlanChoice) => string | null;
+  /** A carga que o procedimento do prompt dá para esta entrada. */
+  expect: { pace: number; grade: number };
+  /** `true` quando só vale a carga exata (repetir a sessão anterior). */
+  exact?: boolean;
 };
 
 const steady = (now: number, days: number[], p: Omit<Past, 'daysAgo'>) =>
   days.map((daysAgo) => past(adult, now, { level: 'Base em formação', maxBpm: 180, ...p, daysAgo }));
 
 const planCases: PlanCase[] = [
+  // Sem nenhum ponto: 1 + (123 − 70) ÷ 15 = 4,5 METs.
+  { name: 'base-sem-historico', session: base, history: () => [], expect: { pace: 6, grade: 1 } },
+  // Um ponto só (3,5 km/h a 2% com 99 BPM) e repouso de 62: 16 bpm por MET, alvo de 4,8 METs.
   {
-    name: 'sem-historico-sedentario',
-    profile: { age: 58, weightKg: 82, heightCm: 170, activity: 'Sedentário' },
-    minutes: 30,
-    goal: null,
-    history: () => [],
-    check: (c) =>
-      c.pace > 4.5 ? 'ritmo acima de 4,5' : c.grade > 1 ? 'inclinação acima de 1%' : c.objective === 'Resistência moderada' ? 'objetivo moderado sem histórico' : null,
+    name: 'base-um-ponto-com-repouso',
+    session: base,
+    history: (now) => [past(adult, now, { daysAgo: 1, session: recovery, pace: 3.5, grade: 2, bpmWork: 99, bpmEasy: 90, rest: 77 })],
+    expect: { pace: 6, grade: 1.5 },
   },
   {
-    name: 'sem-historico-treinado',
-    profile: { age: 30, weightKg: 70, heightCm: 175, activity: 'Treinado' },
-    minutes: 45,
-    goal: null,
-    history: () => [],
-    check: (c) => (c.pace < 5 || c.pace > 6.5 ? 'ritmo fora de 5,0 a 6,5' : c.grade > 3 ? 'inclinação acima de 3%' : null),
+    name: 'base-na-faixa-repete',
+    session: base,
+    history: (now) => steady(now, [2, 4, 7], { pace: 6, grade: 2, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+    expect: { pace: 6, grade: 2 },
+    exact: true,
   },
+  // Dois pontos (4,9 METs com 108 e 3,4 com 88): 13 bpm por MET, alvo de 6,0 METs.
   {
-    name: 'progressao-um-passo',
-    profile: adult,
-    minutes: 45,
-    goal: null,
-    history: (now) => steady(now, [2, 4, 6], { pace: 5, grade: 1, bpmWork: 94, bpmEasy: 88, drop: 15 }),
-    check: (c) => {
-      const speed = c.pace > 5.05 && c.pace < 5.35 && near(c.grade, 1);
-      const slope = near(c.pace, 5) && near(c.grade, 1.5);
-      return speed || slope ? null : 'esperado um único passo acima de 5,0 km/h e 1%';
-    },
-  },
-  {
-    name: 'recuo-apos-sessao-dura',
-    profile: adult,
-    minutes: 45,
-    goal: null,
+    name: 'base-abaixo-da-faixa-sobe',
+    session: base,
     history: (now) => [
-      past(adult, now, { daysAgo: 1, pace: 5.5, grade: 2, bpmWork: 128, bpmEasy: 112, drop: 9, reductions: 2, completion: 0.6, level: 'Em adaptação', maxBpm: 180 }),
-      ...steady(now, [3, 5], { pace: 5.3, grade: 2, bpmWork: 114, bpmEasy: 100, drop: 14 }),
+      ...steady(now, [2], { pace: 6, grade: 2, bpmWork: 108, bpmEasy: 92, drop: 15 }),
+      ...steady(now, [5], { session: recovery, pace: 5, grade: 0, bpmWork: 88, bpmEasy: 82 }),
     ],
-    check: (c) =>
-      c.pace > 5.55 || c.grade > 2.05 ? 'carga acima da sessão que precisou de reduções' : c.pace > 5.25 && c.grade > 1.55 ? 'não recuou em relação a 5,5 km/h e 2%' : null,
+    expect: { pace: 6, grade: 4 },
   },
+  // 5,9 METs deram 146 BPM, com repouso de 70: 15,5 bpm por MET, alvo de 4,4 METs.
   {
-    name: 'modo-fixo-intervalado',
-    profile: adult,
-    minutes: 40,
-    goal: 'Intervalado',
-    history: (now) => steady(now, [2, 4, 6], { pace: 5, grade: 1, bpmWork: 108, bpmEasy: 96, drop: 15 }),
-    check: (c) =>
-      c.goal !== 'Intervalado' ? 'trocou o modo pedido' : c.workMinutes > 5 ? 'bloco de esforço longo para intervalado' : c.recoveryMinutes > 3 ? 'recuperação longa' : c.pace < 4.5 || c.pace > 5.55 ? 'ritmo fora de 4,5 a 5,5' : c.grade > 1.55 ? 'inclinação acima de 1,5%' : null,
+    name: 'base-acima-da-faixa-recua',
+    session: base,
+    history: (now) => steady(now, [2], { pace: 6, grade: 4, bpmWork: 146, bpmEasy: 118, drop: 12, rest: 85 }),
+    expect: { pace: 6, grade: 1 },
   },
+  // Primeiro VO₂máx, com pontos de base (4,9 METs, 126) e de recuperação (3,1 METs, 100): alvo de 7,6 METs.
   {
-    name: 'menos-de-24h-de-descanso',
-    profile: adult,
-    minutes: 45,
-    goal: null,
+    name: 'vo2-primeira-vez',
+    session: vo2,
     history: (now) => [
-      past(adult, now, { daysAgo: 0, objective: 'Resistência moderada', pace: 5.5, grade: 2, bpmWork: 122, bpmEasy: 104, drop: 16, level: 'Base em formação', maxBpm: 180 }),
-      ...steady(now, [2, 4], { pace: 5.3, grade: 2, bpmWork: 112, bpmEasy: 98, drop: 15 }),
+      ...steady(now, [1], { pace: 6, grade: 2, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+      ...steady(now, [2], { session: recovery, pace: 4.5, grade: 0, bpmWork: 100, bpmEasy: 92 }),
     ],
-    check: (c) => (c.objective === 'Resistência moderada' ? 'repetiu objetivo moderado com menos de 24 h' : c.pace > 5.55 ? 'subiu o ritmo sem descanso' : null),
+    expect: { pace: 6, grade: 7 },
+  },
+  {
+    name: 'limiar-correndo-na-faixa',
+    session: threshold,
+    history: (now) => [
+      ...steady(now, [1], { pace: 6, grade: 2, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+      ...steady(now, [7], { session: threshold, pace: 8.5, grade: 1, bpmWork: 158, bpmEasy: 120, drop: 24 }),
+    ],
+    expect: { pace: 8.5, grade: 1 },
+    exact: true,
+  },
+  // 4,9 METs deram 150 BPM, com repouso de 70: 20,5 bpm por MET. O alvo de 96 BPM pede
+  // 2,3 METs, abaixo da carga mais leve da escada: vale a primeira linha.
+  {
+    name: 'recuperacao-primeira-linha',
+    session: recovery,
+    history: (now) => steady(now, [1, 3], { pace: 6, grade: 2, bpmWork: 150, bpmEasy: 120, drop: 16, rest: 85 }),
+    expect: { pace: 3, grade: 0 },
   },
 ];
 
+const sameLoad = (a: { pace: number; grade: number }, b: { pace: number; grade: number }) =>
+  Math.abs(a.pace - b.pace) < 0.05 && Math.abs(a.grade - b.grade) < 0.05;
+
+/** A entrada de cada cenário de plano com a carga esperada, para os testes conferirem o gabarito. */
+export const planChecks = (now: number) =>
+  planCases.map((c) => ({
+    name: c.name,
+    data: planPrompt({ profile: adult, session: c.session, history: c.history(now), now }).user,
+    expect: c.expect,
+    exact: !!c.exact,
+  }));
+
 async function runPlan(c: PlanCase) {
   const now = Date.now();
-  const history = c.history(now);
-  const raw = await callModel(
-    'plan',
-    planPrompt({ profile: c.profile, minutes: c.minutes, goal: c.goal, history, now }),
-    parsePlan,
-    { journal: false },
-  );
-  // O teto de progressão faz parte do sistema: o que vale é o plano final.
-  const ceiling = progressionCeiling(c.profile, history, now);
-  const choice: PlanChoice = {
-    ...raw,
-    goal: c.goal ?? raw.goal,
-    pace: Math.min(raw.pace, ceiling.pace),
-    grade: Math.min(raw.grade, ceiling.grade),
-  };
-  const problem = c.check(choice);
+  const prompt = planPrompt({ profile: adult, session: c.session, history: c.history(now), now });
+  // A conferência com a conta do app já acontece em `parsePlan`, como no treino real.
+  const choice = await callModel('plan', prompt, parsePlan(prompt.user), { journal: false });
+  // Fora da repetição exata, a linha vizinha da escada também serve.
+  const ladder = loadLadder();
+  const at = ladder.findIndex((row) => sameLoad(row, c.expect));
+  const near = at >= 0 && !c.exact && [ladder[at - 1], ladder[at + 1]].some((row) => row && sameLoad(row, choice));
+  const ok = sameLoad(choice, c.expect) || near;
   return {
-    answer: [choice.goal, choice.objective, choice.pace, choice.grade, choice.workMinutes + '/' + choice.recoveryMinutes].join(' | '),
-    detail: problem ?? choice.why,
-    ok: !problem,
+    answer: choice.pace + ' km/h | ' + choice.grade + '%',
+    detail: (ok ? '' : 'esperado ' + c.expect.pace + ' km/h e ' + c.expect.grade + '%. ') + choice.why,
+    ok,
     called: true,
   };
 }
@@ -358,17 +377,17 @@ type AssessCase = {
   max: [number, number];
 };
 
-const older: Profile = { age: 50, weightKg: 80, heightCm: 172, activity: 'Ativo' };
+const older: Profile = { age: 50, weightKg: 80, heightCm: 172 };
 const fine = (now: number, profile: Profile, days: number[], bpm: number[], extra: Omit<Past, 'daysAgo'> = {}) =>
   days.map((daysAgo, k) =>
-    past(profile, now, { pace: 5, grade: 1, bpmWork: bpm[k], bpmEasy: 98, drop: 15, level: 'Base em formação', maxBpm: 180, ...extra, daysAgo }),
+    past(profile, now, { bpmWork: bpm[k], bpmEasy: 104, drop: 15, level: 'Base em formação', maxBpm: 180, ...extra, daysAgo }),
   );
 
 const assessCases: AssessCase[] = [
   {
     name: 'primeira-sessao',
     profile: adult,
-    session: { pace: 5, grade: 1, bpmWork: 110, bpmEasy: 98, drop: 14 },
+    session: { bpmWork: 125, bpmEasy: 104, drop: 14 },
     history: () => [],
     levels: ['Em adaptação'],
     max: [177, 183],
@@ -376,52 +395,64 @@ const assessCases: AssessCase[] = [
   {
     name: 'base-em-formacao',
     profile: adult,
-    session: { pace: 5, grade: 1, bpmWork: 111, bpmEasy: 98, drop: 14 },
-    history: (now, p) => fine(now, p, [2, 5, 8], [112, 112, 113], { level: 'Em adaptação', drop: 14 }),
+    session: { bpmWork: 126, bpmEasy: 104, drop: 14 },
+    history: (now, p) => fine(now, p, [2, 5, 8], [127, 127, 128], { level: 'Em adaptação', drop: 14 }),
     levels: ['Base em formação'],
     max: [177, 183],
   },
   {
     name: 'base-consistente',
     profile: adult,
-    session: { pace: 5, grade: 1, bpmWork: 109, bpmEasy: 96, drop: 22 },
-    history: (now, p) => fine(now, p, [3, 6, 9, 12, 15], [112, 112, 113, 114, 115], { drop: 21 }),
+    session: { bpmWork: 124, bpmEasy: 102, drop: 22 },
+    history: (now, p) => fine(now, p, [3, 6, 9, 12, 15], [127, 127, 128, 129, 130], { drop: 21 }),
     levels: ['Base consistente'],
     max: [177, 183],
   },
   {
     name: 'acima-da-faixa-com-reducoes',
     profile: adult,
-    session: { pace: 5.5, grade: 2, bpmWork: 126, bpmEasy: 110, drop: 10, reductions: 2 },
-    history: (now, p) => fine(now, p, [3, 6, 9, 12], [112, 112, 113, 113]),
+    session: { grade: 4, bpmWork: 144, bpmEasy: 116, drop: 10, reductions: 2 },
+    history: (now, p) => fine(now, p, [3, 6, 9, 12], [127, 127, 128, 128]),
     levels: ['Em adaptação'],
     max: [177, 183],
   },
+  // Tiros concluídos com pico de 176, acima da estimativa pela idade (172): a máxima é pico + 5.
   {
     name: 'pico-acima-da-estimativa',
     profile: older,
-    session: { pace: 6, grade: 3, bpmWork: 176, bpmEasy: 150, drop: 12 },
-    history: (now, p) => fine(now, p, [3, 6], [150, 152], { maxBpm: 172, level: 'Em adaptação' }),
+    session: { session: vo2, pace: 6, grade: 8, bpmWork: 176, bpmEasy: 150, drop: 12 },
+    history: (now, p) => fine(now, p, [3, 6], [122, 124], { maxBpm: 172, level: 'Em adaptação' }),
     levels: ['Em adaptação'],
     max: [179, 183],
   },
   {
+    // Hoje foi leve, mas há 5 dias a pessoa sustentou 177 bpm até o fim: o piso de 182 continua valendo.
     name: 'maxima-estavel-entre-sessoes',
     profile: adult,
-    session: { pace: 5, grade: 1, bpmWork: 111, bpmEasy: 98, drop: 15 },
+    session: { bpmWork: 126, bpmEasy: 104, drop: 15 },
     history: (now, p) => [
-      ...fine(now, p, [2, 5], [112, 112], { maxBpm: 183 }),
-      ...fine(now, p, [8], [113], { maxBpm: 182 }),
+      ...fine(now, p, [2], [127]),
+      ...fine(now, p, [5], [177], { session: vo2, pace: 6.5, grade: 8, bpmEasy: 150, maxBpm: 182 }),
+      ...fine(now, p, [8], [128]),
     ],
     levels: ['Base em formação'],
-    max: [180, 186],
+    max: [181, 183],
   },
   {
     name: 'sessao-interrompida-na-metade',
     profile: adult,
-    session: { pace: 5, grade: 1, bpmWork: 112, bpmEasy: 98, drop: 15, completion: 0.5 },
-    history: (now, p) => fine(now, p, [3, 6, 9, 12], [112, 112, 113, 113]),
+    session: { bpmWork: 127, bpmEasy: 104, drop: 15, completion: 0.5 },
+    history: (now, p) => fine(now, p, [3, 6, 9, 12], [127, 127, 128, 128]),
     levels: ['Em adaptação'],
+    max: [177, 183],
+  },
+  // Tiros na faixa de 90–95% são o planejado: intensidade alta não é sinal de adaptação.
+  {
+    name: 'tiros-na-faixa',
+    profile: adult,
+    session: { session: vo2, pace: 6, grade: 7, bpmWork: 165, bpmEasy: 132, drop: 26 },
+    history: (now, p) => fine(now, p, [1, 3, 6], [127, 127, 128]),
+    levels: ['Base em formação'],
     max: [177, 183],
   },
 ];

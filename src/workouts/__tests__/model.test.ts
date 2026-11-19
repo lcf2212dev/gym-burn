@@ -2,15 +2,24 @@ import {
   accumulate,
   currentCue,
   evidence,
-  goals,
   insufficient,
+  logBeats,
   logStage,
   makePlan,
   newWorkout,
   validProfile,
   validSession,
+  type MinuteBeats,
   type StageLog,
 } from '../model';
+import {
+  describe as structureText,
+  heartZones,
+  sessionMinutes,
+  sessionPlan,
+  week,
+  zoneSpan,
+} from '../week';
 import type { TreadmillSample } from '@/treadmill/types';
 
 const profile = { age: 35, heightCm: 175, weightKg: 75 };
@@ -23,27 +32,93 @@ const sample = (at: number, speedKmh: number, heartRateBpm: number | null): Trea
   inclinationPercent: 2,
 });
 
-it.each(goals)('mantém a duração e pede BPM no momento certo em %s', (goal) => {
-  for (const minutes of [5, 45, 180]) {
-    const plan = makePlan(goal, minutes, 5, 1);
-    expect(plan.stages.reduce((n, s) => n + s.seconds, 0)).toBe(minutes * 60);
-    // A primeira etapa pede a FC de repouso logo no início, só enquanto a janela está aberta.
-    const first = plan.stages[0];
-    expect(currentCue(plan, 0)).toMatchObject({ index: 0, into: 0, measure: true });
-    expect(currentCue(plan, 0)?.stage.name).toBe('Aquecimento');
-    if (first.seconds > 90) expect(currentCue(plan, 90)?.measure).toBe(false);
-    // As demais esperam a FC acompanhar a carga: 60 s nas leves, 120 s nas principais.
-    const second = currentCue(plan, first.seconds)!;
-    expect(second).toMatchObject({ index: 1, into: 0, measure: false });
-    const wait = Math.min(second.stage.measure ? 60 : 120, Math.floor(second.stage.seconds / 2));
-    expect(currentCue(plan, first.seconds + wait - 1)?.measure).toBe(false);
-    expect(currentCue(plan, first.seconds + wait)).toMatchObject({ into: wait, measure: true });
-    expect(currentCue(plan, minutes * 60)).toBeNull();
-  }
+const options = week.flatMap((entry) => (entry.session ? [[entry.day, entry.session] as const] : []));
+
+it('a semana tem um treino de 45 minutos de segunda a sábado e o domingo de descanso', () => {
+  expect(week.map((entry) => entry.session?.goal ?? null)).toEqual([
+    null,
+    'Base aeróbica',
+    'VO₂máx',
+    'Recuperação ativa',
+    'Base aeróbica',
+    'Limiar',
+    'Base aeróbica',
+  ]);
+  expect(options).toHaveLength(6);
+  for (const [, option] of options) expect(sessionMinutes(option)).toBe(45);
+  expect(structureText(week[1].session!)).toBe('Contínuo: 5 min aquecendo, 35 min na faixa, 5 min desaquecendo');
+  expect(structureText(week[2].session!)).toBe('10 min aquecendo, 4 × 4 min com 3 min leves, 7 min desaquecendo');
+});
+
+it('cada treino tem o alvo dentro das cinco zonas de frequência', () => {
+  expect(heartZones.map((zone) => [zone.id, zone.name, zone.from])).toEqual([
+    ['Z1', 'Recuperação', 50],
+    ['Z2', 'Aeróbica base', 60],
+    ['Z3', 'Aeróbica moderada', 70],
+    ['Z4', 'Limiar', 80],
+    ['Z5', 'Máximo (VO₂máx)', 90],
+  ]);
+  expect(zoneSpan('Recuperação')).toEqual({ ids: 'Z1', feel: 'muito leve' });
+  // A base aeróbica, de 65 a 75%, pega o alto da Z2 e o começo da Z3.
+  expect(zoneSpan('Base aeróbica')).toEqual({ ids: 'Z2–Z3', feel: 'leve a moderado' });
+  expect(zoneSpan('Limiar')).toEqual({ ids: 'Z4', feel: 'forte' });
+  expect(zoneSpan('VO₂máx')).toEqual({ ids: 'Z5', feel: 'máximo' });
+});
+
+it('monta as etapas de cada sessão com a estrutura do plano semanal', () => {
+  const shape = (day: number) =>
+    sessionPlan(week[day].session!, 9, 1).stages.map((s) => [s.name, s.seconds, s.speed, s.incline]);
+  expect(shape(1)).toEqual([
+    ['Aquecimento', 300, 4, 0],
+    ['Base aeróbica', 2100, 9, 1],
+    ['Volta à calma', 300, 4, 0],
+  ]);
+  expect(shape(2)).toEqual([
+    ['Aquecimento', 600, 4, 0],
+    ['VO₂máx 1/4', 240, 9, 1],
+    ['Recuperação', 180, 4, 0],
+    ['VO₂máx 2/4', 240, 9, 1],
+    ['Recuperação', 180, 4, 0],
+    ['VO₂máx 3/4', 240, 9, 1],
+    ['Recuperação', 180, 4, 0],
+    ['VO₂máx 4/4', 240, 9, 1],
+    ['Recuperação', 180, 4, 0],
+    ['Volta à calma', 420, 4, 0],
+  ]);
+  expect(shape(5).map((s) => s[1])).toEqual([600, 480, 120, 480, 120, 480, 120, 300]);
+  // Em carga de caminhada lenta o trecho leve fica em 80% da velocidade.
+  expect(sessionPlan(week[3].session!, 3.5, 0).stages[0].speed).toBe(2.8);
+  expect(sessionPlan(week[5].session!, 9, 1)).toMatchObject({
+    goal: 'Limiar',
+    objective: 'Limiar',
+    zone: [85, 90],
+    minutes: 45,
+  });
+});
+
+it.each(options)('pede BPM no momento certo em %s', (_, option) => {
+  // 10 km/h: o pedido vale também correndo.
+  const plan = sessionPlan(option, 10, 1);
+  expect(plan.stages.reduce((n, s) => n + s.seconds, 0)).toBe(45 * 60);
+  // A primeira etapa pede a FC de repouso logo no início, só enquanto a janela está aberta.
+  const first = plan.stages[0];
+  expect(currentCue(plan, 0)).toMatchObject({ index: 0, into: 0, measure: true });
+  expect(currentCue(plan, 0)?.stage.name).toBe('Aquecimento');
+  expect(currentCue(plan, 90)?.measure).toBe(false);
+  // Fechada a janela do repouso, a primeira etapa volta a aceitar leitura aos 3 minutos.
+  expect(currentCue(plan, 179)?.measure).toBe(false);
+  expect(currentCue(plan, 180)?.measure).toBe(true);
+  // As demais esperam a FC acompanhar a carga: 60 s nas leves, 120 s nas principais.
+  const second = currentCue(plan, first.seconds)!;
+  expect(second).toMatchObject({ index: 1, into: 0, measure: false });
+  expect(second.stage).toMatchObject({ measure: false, speed: 10 });
+  expect(currentCue(plan, first.seconds + 119)?.measure).toBe(false);
+  expect(currentCue(plan, first.seconds + 120)).toMatchObject({ into: 120, measure: true });
+  expect(currentCue(plan, 45 * 60)).toBeNull();
 });
 
 it('ignora pausa e lacuna BLE e calcula apenas o esforço observado', () => {
-  const w = newWorkout(profile, 'ble', makePlan('Intervalado', 45, 8, 4));
+  const w = newWorkout(profile, 'ble', sessionPlan(week[2].session!, 8, 4));
   const samples = [
     sample(0, 3.6, 110),
     sample(1000, 3.6, null),
@@ -94,6 +169,25 @@ it('registra por etapa a posição na faixa, o fim do bloco, a recuperação e o
   expect(log!.inclineMs / log!.inclineDurationMs).toBe(2);
 });
 
+it('guarda os batimentos minuto a minuto, só com a lona andando', () => {
+  let beats: MinuteBeats[] | undefined;
+  let previous: TreadmillSample | null = null;
+  const feed = (elapsed: number, bpm: number | null, speed = 5) => {
+    const s = sample(elapsed * 1000, speed, bpm);
+    beats = logBeats(beats, s, previous, elapsed);
+    previous = s;
+  };
+  feed(10, 100);
+  feed(11, 104);
+  feed(59, null);
+  expect(beats).toEqual([[204, 2]]);
+  // Minutos sem leitura ficam zerados até o da leitura seguinte.
+  feed(200, 130);
+  feed(201, 0);
+  feed(202, 140, 0);
+  expect(beats).toEqual([[204, 2], [0, 0], [0, 0], [130, 1]]);
+});
+
 it('separa sessão válida de fragmento e de sessão sem leituras', () => {
   const w = newWorkout(profile, 'ble', null);
   const short = { ...w, totals: { ...w.totals, movingMs: 179000, bpmCount: 50 } };
@@ -104,9 +198,14 @@ it('separa sessão válida de fragmento e de sessão sem leituras', () => {
 });
 
 it('rejeita alvos inválidos e perfil incompleto', () => {
+  expect(validProfile(profile)).toBe(true);
   expect(validProfile({ ...profile, heightCm: 0 })).toBe(false);
-  expect(validProfile({ ...profile, activity: 'Ativo' })).toBe(true);
-  expect(validProfile({ ...profile, activity: 'Atleta' as never })).toBe(false);
-  expect(() => makePlan('Resistência', 45, 40, 1)).toThrow();
-  expect(() => makePlan('Resistência', 45, 4, NaN)).toThrow();
+  const structure = { warmup: 5, reps: 1, work: 35, recovery: 0, cooldown: 5 };
+  // Não há teto além do que a esteira alcança: 22 km/h e 15%.
+  expect(makePlan('Base aeróbica', structure, 22, 15).stages[1]).toMatchObject({ speed: 22, incline: 15 });
+  expect(() => makePlan('Base aeróbica', structure, 22.5, 1)).toThrow();
+  expect(() => makePlan('Base aeróbica', structure, 6, 15.5)).toThrow();
+  expect(() => makePlan('Base aeróbica', structure, 4, NaN)).toThrow();
+  expect(() => makePlan('Resistência' as never, structure, 4, 1)).toThrow();
+  expect(() => makePlan('Base aeróbica', { ...structure, reps: 0 }, 4, 1)).toThrow();
 });

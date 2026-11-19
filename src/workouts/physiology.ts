@@ -1,12 +1,14 @@
-import { objectives, type Objective } from './adaptive';
 import {
+  HILL_TOP_PERCENT,
+  MAX_SPEED_KMH,
   median,
+  RUN_FROM_KMH,
   validBpm,
+  WALK_TOP_KMH,
   type HeartProfile,
   type Plan,
   type Profile,
   type Workout,
-  type Zone,
 } from './model';
 
 export type Pulse = { at: number; bpm: number };
@@ -16,15 +18,17 @@ export const CONTACT_GAP_MS = 3000;
 
 export const foxMax = (age: number) => 220 - age;
 export const tanakaMax = (age: number) => Math.round(208 - 0.7 * age);
+/** FC máxima estimada só pela idade: a média das duas fórmulas. */
+export const ageMax = (age: number) => Math.round((foxMax(age) + tanakaMax(age)) / 2);
 
 /**
  * Limites aceitos para a FC máxima prevista pela IA. Caminhada submáxima não
- * mede a máxima: o erro típico de qualquer previsão é de ±10 bpm. O pico já
- * observado é o único dado duro, e vale como piso.
+ * mede a máxima: o erro típico de qualquer previsão é de ±10 bpm. O piso medido
+ * (`maxFloor`) é o único dado duro, e a previsão nunca fica abaixo dele.
  */
-export function maxBounds(age: number, peak: number | null) {
+export function maxBounds(age: number, floor: number | null) {
   const estimates = [foxMax(age), tanakaMax(age)];
-  const low = Math.max(Math.min(...estimates) - 10, peak ?? 0);
+  const low = Math.max(Math.min(...estimates) - 10, floor ?? 0);
   return { low, high: Math.max(Math.max(...estimates) + 10, low) };
 }
 
@@ -32,6 +36,26 @@ export function maxBounds(age: number, peak: number | null) {
 export function observedPeak(history: Workout[]) {
   const top = Math.max(0, ...history.flatMap((w) => (w.log ?? []).map((l) => l?.top ?? 0)));
   return top || null;
+}
+
+/** Sessão levada até o fim (90% do plano, ou 20 min de treino livre) sem pedido de redução de carga. */
+function sustained(w: Workout) {
+  const finished = w.totals.movingMs >= (w.plan ? w.plan.minutes * 54000 : 1200000);
+  return finished && !(w.changes ?? []).some((c) => c.decision.startsWith('reduzir'));
+}
+
+/** Quanto a FC máxima fica, no mínimo, acima do pico de uma sessão sustentada. */
+const SUSTAINED_MARGIN_BPM = 5;
+
+/**
+ * Piso medido da FC máxima: o maior pico validado entre as sessões. Quando o
+ * pico é de uma sessão sustentada, a pessoa seguiu andando depois dele, então
+ * não estava no máximo: o piso fica 5 bpm acima.
+ */
+export function maxFloor(sessions: Workout[]) {
+  const held = observedPeak(sessions.filter(sustained));
+  const floor = Math.max(observedPeak(sessions) ?? 0, held === null ? 0 : held + SUSTAINED_MARGIN_BPM);
+  return floor || null;
 }
 
 /**
@@ -56,15 +80,15 @@ export function restingBpm(readings: Pulse[], closed: boolean): number | null {
 
 /**
  * Quanto a leitura do primeiro minuto fica acima do repouso real: a pessoa já
- * está em pé e andando devagar. Sem esse desconto a faixa pela reserva subiria
- * mais de 10 bpm para uma pessoa típica.
+ * está em pé e andando devagar.
  */
 export const WALKING_OFFSET_BPM = 15;
 
 /**
  * Repouso e máxima em uso, a partir do histórico da mesma origem (mais novo
  * primeiro). O repouso é a menor das 5 últimas leituras de início de treino,
- * menos o desconto de quem já está andando. A máxima é a mediana das 3 últimas
+ * menos o desconto de quem já está andando; serve de ponto de partida para a
+ * relação entre carga e frequência cardíaca. A máxima é a mediana das 3 últimas
  * previsões da IA, para uma resposta ruim não deslocar a faixa sozinha.
  */
 export function heartProfile(profile: Profile, history: Workout[]): HeartProfile {
@@ -83,57 +107,74 @@ export function heartProfile(profile: Profile, history: Workout[]): HeartProfile
   };
 }
 
-// Percentuais da FC máxima (método sem repouso) e da reserva (com repouso). Os
-// da reserva são os equivalentes dos primeiros para uma pessoa típica (repouso
-// 70, máxima 180): trocar de método não aumenta a intensidade pedida.
-const bands: Record<Objective, { max: [number, number]; reserve: [number, number] }> = {
-  'Recuperação leve': { max: [50, 60], reserve: [20, 35] },
-  'Base aeróbica': { max: [55, 65], reserve: [28, 43] },
-  'Resistência moderada': { max: [60, 70], reserve: [35, 50] },
+// O plano semanal dá as faixas em % da FC máxima, e cada plano carrega a sua.
+// Estas são as dos planos gravados antes dele, que só tinham o nome do objetivo.
+const legacyBands: Record<string, [number, number]> = {
+  'Recuperação leve': [50, 60],
+  'Base aeróbica': [55, 65],
+  'Resistência moderada': [60, 70],
 };
+/** Sem plano (treino livre) vale a base aeróbica do plano semanal. */
+const FREE_ZONE: [number, number] = [65, 75];
 
-/** O repouso individualiza a faixa, mas só a desloca até este tanto da faixa pela máxima. */
-const MAX_SHIFT_BPM = 10;
-
-function zoneFor(objective: Objective, profile: Profile, hr?: HeartProfile) {
-  const max = hr?.max ?? foxMax(profile.age);
-  const rest = hr?.rest ?? null;
-  const byMax = bands[objective].max.map((percent) => (max * percent) / 100);
-  // Um repouso colado na máxima é leitura ruim: a reserva não serve de base.
-  if (rest === null || max - rest < 40)
-    return { low: Math.round(byMax[0]), high: Math.round(byMax[1]), method: 'máxima' } as const;
-  // A leitura de repouso vem de um sensor de mão, com a pessoa já andando. O
-  // limite impede que uma leitura ruim leve a faixa para longe da estimativa.
-  const [low, high] = bands[objective].reserve.map((percent, i) => {
-    const value = rest + ((max - rest) * percent) / 100;
-    return Math.round(Math.min(byMax[i] + MAX_SHIFT_BPM, Math.max(byMax[i] - MAX_SHIFT_BPM, value)));
-  });
-  return { low, high, method: 'reserva' } as const;
-}
-
-export function planObjective(plan: Plan | null): Objective {
+function legacyObjective(plan: Plan) {
+  const goal: string = plan.goal;
   return (
-    plan?.objective ??
-    (plan?.goal === 'Recuperação ativa'
-      ? objectives[0]
-      : plan?.goal === 'Resistência'
-        ? objectives[2]
-        : objectives[1])
+    plan.objective ??
+    (goal === 'Recuperação ativa'
+      ? 'Recuperação leve'
+      : goal === 'Resistência'
+        ? 'Resistência moderada'
+        : 'Base aeróbica')
   );
 }
 
-/** Faixa orientativa de BPM do treino. Sem plano (treino livre) vale a base aeróbica. */
-export function dailyTarget(plan: Plan | null, profile: Profile, hr?: HeartProfile) {
-  const objective = planObjective(plan);
-  return { objective, ...zoneFor(objective, profile, hr) };
+/** Nome da faixa de intensidade do treino. */
+export function planObjective(plan: Plan | null): string {
+  return !plan ? 'Base aeróbica' : plan.zone ? (plan.objective ?? plan.goal) : legacyObjective(plan);
 }
 
-/** A faixa de cada objetivo para esta pessoa, como vai no prompt do plano. */
-export function zones(profile: Profile, hr?: HeartProfile) {
-  return Object.fromEntries(
-    objectives.map((o) => {
-      const { low, high } = zoneFor(o, profile, hr);
-      return [o, { low, high }];
-    }),
-  ) as Record<Objective, Zone>;
+/** Faixa de BPM dos blocos de esforço: os percentuais do plano sobre a FC máxima em uso. */
+export function dailyTarget(plan: Plan | null, profile: Profile, hr?: HeartProfile) {
+  const max = hr?.max ?? foxMax(profile.age);
+  const [low, high] =
+    plan?.zone ?? (plan ? (legacyBands[legacyObjective(plan)] ?? legacyBands['Base aeróbica']) : FREE_ZONE);
+  return {
+    objective: planObjective(plan),
+    low: Math.round((max * low) / 100),
+    high: Math.round((max * high) / 100),
+  };
+}
+
+/**
+ * Custo metabólico de uma carga, em METs (1 MET é o repouso), pelas equações do
+ * ACSM: caminhada abaixo de 7 km/h, corrida a partir daí. A frequência cardíaca
+ * sobe quase em linha reta com ele, o que permite comparar cargas diferentes.
+ */
+export function mets(kmh: number, inclinePercent: number) {
+  const perMinute = (kmh * 1000) / 60;
+  const grade = inclinePercent / 100;
+  const oxygen =
+    kmh >= RUN_FROM_KMH
+      ? 0.2 * perMinute + 0.9 * perMinute * grade + 3.5
+      : 0.1 * perMinute + 1.8 * perMinute * grade + 3.5;
+  return Math.round((oxygen / 3.5) * 10) / 10;
+}
+
+/**
+ * As cargas entre as quais a IA escolhe, da mais leve à mais pesada:
+ * caminhada plana até 6 km/h, depois rampa a 6 km/h até 8%, depois corrida a
+ * 1%. É o caminho que não pede corrida de quem ainda chega à faixa andando.
+ */
+export function loadLadder() {
+  const rows: { pace: number; grade: number; mets: number }[] = [];
+  // Só entra a carga que custa mais que a anterior: assim cada METs tem uma linha só.
+  const add = (pace: number, grade: number) => {
+    const cost = mets(pace, grade);
+    if (cost > (rows[rows.length - 1]?.mets ?? 0)) rows.push({ pace, grade, mets: cost });
+  };
+  for (let pace = 3; pace < WALK_TOP_KMH; pace += 0.5) add(pace, 0);
+  for (let grade = 0; grade <= HILL_TOP_PERCENT; grade += 0.5) add(WALK_TOP_KMH, grade);
+  for (let pace = RUN_FROM_KMH; pace <= MAX_SPEED_KMH; pace += 0.5) add(pace, 1);
+  return rows;
 }

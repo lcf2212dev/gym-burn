@@ -1,5 +1,5 @@
 import type { TreadmillSample } from '@/treadmill/types';
-import { currentCue, validBpm } from './model';
+import { currentCue, PULSE_INTERVAL_SECONDS, validBpm } from './model';
 
 export type Cue = NonNullable<ReturnType<typeof currentCue>>;
 export type Guidance = {
@@ -7,12 +7,15 @@ export type Guidance = {
   speedReached: boolean;
   inclineReached: boolean;
   adjusted: boolean;
+  /** Horário do pedido de batimentos em aberto ou, depois de atendido, do último. */
   bpmRequestedAt: number | null;
   /** Leituras válidas recebidas desde o pedido. */
   bpmCount: number;
   /** Horário da última leitura contada, para não contar a mesma amostra duas vezes. */
   bpmAt: number | null;
   bpmReceived: boolean;
+  /** Segundo da etapa em que o pedido foi atendido: o seguinte abre 3 minutos depois. */
+  bpmDoneInto: number | null;
 };
 
 /**
@@ -20,6 +23,8 @@ export type Guidance = {
  * descartadas pela revisão, que precisa de mais 4.
  */
 export const PULSE_READINGS = 6;
+/** Um pedido repetido só abre se ainda houver este tempo de etapa para segurar o sensor. */
+const PULSE_MIN_LEFT_SECONDS = 30;
 
 export function pendingAction(g: Guidance | null) {
   if (!g) return null;
@@ -34,7 +39,18 @@ export function advanceGuidance(
   now: number,
 ): Guidance | null {
   if (!cue) return null;
-  const prior = previous?.index === cue.index ? previous : null;
+  const stage = previous?.index === cue.index ? previous : null;
+  // Três minutos depois de uma leitura atendida o guia pede outra: o estado do
+  // pedido recomeça do zero, e o aviso reabre.
+  const again =
+    cue.measure &&
+    stage?.bpmDoneInto != null &&
+    cue.into - stage.bpmDoneInto >= PULSE_INTERVAL_SECONDS &&
+    cue.left >= PULSE_MIN_LEFT_SECONDS;
+  const prior: Guidance | null =
+    stage && again
+      ? { ...stage, bpmRequestedAt: null, bpmCount: 0, bpmAt: null, bpmReceived: false, bpmDoneInto: null }
+      : stage;
   const fresh = (at: number | null | undefined) => at != null && at <= now && now - at <= 5000;
   // Os pacotes FTMS podem vir divididos. Cada alvo precisa de uma leitura
   // recente do próprio campo, mesmo quando as notificações continuam chegando.
@@ -61,6 +77,7 @@ export function advanceGuidance(
     fresh(sample.at) &&
     validBpm(sample.heartRateBpm);
   const bpmCount = bpmRequestedAt === null ? 0 : (prior?.bpmCount ?? 0) + (counted ? 1 : 0);
+  const bpmReceived = !!prior?.bpmReceived || bpmCount >= PULSE_READINGS;
   return {
     index: cue.index,
     speedReached,
@@ -69,6 +86,7 @@ export function advanceGuidance(
     bpmRequestedAt,
     bpmCount,
     bpmAt: counted ? sample.at : (prior?.bpmAt ?? null),
-    bpmReceived: !!prior?.bpmReceived || bpmCount >= PULSE_READINGS,
+    bpmReceived,
+    bpmDoneInto: bpmReceived ? (prior?.bpmDoneInto ?? cue.into) : null,
   };
 }
