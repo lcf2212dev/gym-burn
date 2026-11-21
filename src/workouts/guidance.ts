@@ -79,6 +79,11 @@ export function advanceGuidance(
     fresh(sample.at) &&
     validBpm(sample.heartRateBpm);
   const bpmCount = bpmRequestedAt === null ? 0 : (prior?.bpmCount ?? 0) + (counted ? 1 : 0);
+  // Com a cinta no peito a leitura é contínua e ninguém precisa segurar o
+  // sensor: o pedido já nasce atendido e o aviso não abre. Se a cinta cair, o
+  // pedido seguinte volta a pedir as mãos no sensor da esteira.
+  const strap =
+    bpmRequestedAt !== null && !!sample && fresh(sample.at) && sample.heartRateSource === 'strap';
   return {
     index: cue.index,
     speedReached,
@@ -89,6 +94,6 @@ export function advanceGuidance(
     bpmRequestedAt,
     bpmCount,
     bpmAt: counted ? sample.at : (prior?.bpmAt ?? null),
-    bpmReceived: !!prior?.bpmReceived || bpmCount >= PULSE_READINGS,
+    bpmReceived: !!prior?.bpmReceived || bpmCount >= PULSE_READINGS || strap,
   };
 }

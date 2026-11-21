@@ -42,6 +42,9 @@ const TRANSIENT_STATES: readonly string[] = [
 
 const BASE_UUID_SHORT = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/;
 
+/** Heart Rate Service: marca no anúncio as cintas e relógios de batimentos. */
+const HEART_RATE_SERVICE = '180d';
+
 /**
  * UUID no formato que o código nativo aceita nas duas plataformas: 4 dígitos
  * hexa (16 bits) ou 128 bits com hífens. `UUIDHelper.isValidBLEUUID` (Android)
@@ -110,9 +113,8 @@ function toScannedDevice(peripheral: Peripheral): ScannedDevice {
   const ftmsKey = Object.keys(serviceData).find((key) => sameUuid(key, FTMS.service));
   const ftmsBytes = ftmsKey === undefined ? undefined : serviceData[ftmsKey]?.bytes;
 
-  const listsFtmsService = (advertising.serviceUUIDs ?? []).some((uuid) =>
-    sameUuid(uuid, FTMS.service),
-  );
+  const advertised = advertising.serviceUUIDs ?? [];
+  const listsFtmsService = advertised.some((uuid) => sameUuid(uuid, FTMS.service));
 
   return {
     id: peripheral.id,
@@ -120,6 +122,7 @@ function toScannedDevice(peripheral: Peripheral): ScannedDevice {
     rssi: typeof peripheral.rssi === 'number' ? peripheral.rssi : null,
     advertisesFtms: listsFtmsService || ftmsKey !== undefined,
     ftms: ftmsBytes ? parseFtmsServiceData(Uint8Array.from(ftmsBytes)) : null,
+    advertisesHeartRate: advertised.some((uuid) => sameUuid(uuid, HEART_RATE_SERVICE)),
     advertisement: describeAdvertisement(advertising),
   };
 }
@@ -342,10 +345,25 @@ function raceWithTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => Er
 // Transporte
 // ---------------------------------------------------------------------------
 
+interface Scanner {
+  onDevice: (device: ScannedDevice) => void;
+  onError: (error: Error) => void;
+}
+
 export function createBleManagerTransport(): BleTransport {
   let starting: Promise<void> | null = null;
   /** Nomes vistos na busca: o Android pode não informar o nome depois de conectar. */
   const scannedNames = new Map<string, string>();
+
+  /**
+   * As buscas abertas. A biblioteca só faz uma busca nativa por vez (uma segunda
+   * chamada derruba a primeira), e a esteira e a cinta de batimentos procuram ao
+   * mesmo tempo: a busca nativa é uma só, começa com a primeira e para quando a
+   * última sai.
+   */
+  const scanners = new Set<Scanner>();
+  /** Os listeners da busca nativa em curso; `null` sem busca. */
+  let nativeScan: { release(): void } | null = null;
 
   function ensureStarted(): Promise<void> {
     starting ??= BleManager.start({ showAlert: false }).catch((error: unknown) => {
@@ -438,71 +456,106 @@ export function createBleManagerTransport(): BleTransport {
     );
   }
 
+  /** A busca nativa falhou ou parou sozinha: todas as buscas abertas acabam com o erro. */
+  function failScan(error: Error): void {
+    const current = [...scanners];
+    scanners.clear();
+    nativeScan?.release();
+    nativeScan = null;
+    current.forEach((scanner) => scanner.onError(error));
+  }
+
+  function startNativeScan(): void {
+    const discoverSubscription = BleManager.onDiscoverPeripheral((peripheral) => {
+      const device = toScannedDevice(peripheral);
+      if (device.name) {
+        scannedNames.set(device.id, device.name);
+      }
+      // Cópia: uma busca pode sair de dentro do próprio callback.
+      [...scanners].forEach((scanner) => {
+        if (scanners.has(scanner)) {
+          scanner.onDevice(device);
+        }
+      });
+    });
+
+    // O scan é contínuo (`seconds: 0`), então um evento de parada com a busca aberta
+    // é falha do rádio (no Android, `onScanFailed` em `DefaultScanManager.java:334`).
+    // Reiniciar sozinho poderia girar em laço contra um erro persistente (ex.: limite de
+    // inícios de scan do Android); quem decide tentar de novo é a sessão.
+    const stopSubscription = BleManager.onStopScan(({ status }) => {
+      // 0 é o eco de um `stopScan` do próprio app (`BleManager.java:395`,
+      // `SwiftBleManager.swift:537`). Ele pode chegar depois de a busca seguinte
+      // já ter começado, e não é falha dela.
+      if (status === 0) {
+        return;
+      }
+      const code = status === undefined ? '' : ` (código ${status})`;
+      failScan(new Error(`A busca por esteiras parou sozinha${code}. Tente buscar de novo.`));
+    });
+
+    const current = {
+      release() {
+        discoverSubscription.remove();
+        stopSubscription.remove();
+      },
+    };
+    nativeScan = current;
+
+    BleManager.scan({
+      // Sem filtro de serviço: a T600X pode não anunciar 0x1826 no pacote de anúncio.
+      serviceUUIDs: [],
+      // 0 = sem limite de tempo (`index.js:391`): vale até a última busca sair.
+      seconds: 0,
+      // iOS: sem isso o RSSI só chega uma vez. No Android é ignorado — o callback
+      // AllMatches já repassa todo anúncio.
+      allowDuplicates: true,
+      // Padrão da biblioteca é LowPower, que demora a achar o aparelho.
+      scanMode: BleScanMode.LowLatency,
+    }).catch((error: unknown) => {
+      if (nativeScan === current) {
+        failScan(wrapError('Falha ao iniciar a busca por esteiras', error));
+      }
+    });
+  }
+
+  /**
+   * Uma preparação por vez: a esteira e a cinta pedem o rádio no mesmo instante
+   * ao abrir o app, e dois pedidos de permissão ou dois diálogos de "ligar o
+   * Bluetooth" ao mesmo tempo deixam um dos dois sem resposta (o nativo guarda
+   * um callback só).
+   */
+  let preparing: Promise<void> | null = null;
+
   return {
-    async prepare() {
-      await requestBlePermissions();
-      await ensureStarted();
-      await ensureAdapterOn();
+    prepare() {
+      preparing ??= (async () => {
+        await requestBlePermissions();
+        await ensureStarted();
+        await ensureAdapterOn();
+      })().finally(() => {
+        preparing = null;
+      });
+      return preparing;
     },
 
     scan(onDevice, onError) {
-      let removed = false;
-      let stopped = false;
-
-      const discoverSubscription = BleManager.onDiscoverPeripheral((peripheral) => {
-        if (removed || stopped) {
-          return;
-        }
-        const device = toScannedDevice(peripheral);
-        if (device.name) {
-          scannedNames.set(device.id, device.name);
-        }
-        onDevice(device);
-      });
-
-      // O scan é contínuo (`seconds: 0`), então um evento de parada antes do `remove()`
-      // é falha do rádio (no Android, `onScanFailed` em `DefaultScanManager.java:334`).
-      // Reiniciar sozinho poderia girar em laço contra um erro persistente (ex.: limite de
-      // inícios de scan do Android); quem decide tentar de novo é a sessão.
-      const stopSubscription = BleManager.onStopScan(({ status }) => {
-        if (removed || stopped) {
-          return;
-        }
-        stopped = true;
-        discoverSubscription.remove();
-        stopSubscription.remove();
-        const code = status === undefined ? '' : ` (código ${status})`;
-        onError(new Error(`A busca por esteiras parou sozinha${code}. Tente buscar de novo.`));
-      });
-
-      BleManager.scan({
-        // Sem filtro de serviço: a T600X pode não anunciar 0x1826 no pacote de anúncio.
-        serviceUUIDs: [],
-        // 0 = sem limite de tempo (`index.js:391`): vale até o `remove()`.
-        seconds: 0,
-        // iOS: sem isso o RSSI só chega uma vez. No Android é ignorado — o callback
-        // AllMatches já repassa todo anúncio.
-        allowDuplicates: true,
-        // Padrão da biblioteca é LowPower, que demora a achar o aparelho.
-        scanMode: BleScanMode.LowLatency,
-      }).catch((error: unknown) => {
-        if (!removed && !stopped) {
-          stopped = true;
-          onError(wrapError('Falha ao iniciar a busca por esteiras', error));
-        }
-      });
-
+      const scanner: Scanner = { onDevice, onError };
+      scanners.add(scanner);
+      if (!nativeScan) {
+        startNativeScan();
+      }
       return {
         remove() {
-          if (removed) {
+          // `false`: já saiu, ou a busca falhou e a lista foi esvaziada.
+          if (!scanners.delete(scanner)) {
             return;
           }
-          removed = true;
-          // Antes do stopScan: o nativo emite onStopScan na própria chamada
-          // (`BleManager.java:395`) e isso não é uma parada inesperada.
-          discoverSubscription.remove();
-          stopSubscription.remove();
-          if (!stopped) {
+          if (scanners.size === 0 && nativeScan) {
+            // Antes do stopScan: o nativo emite onStopScan na própria chamada
+            // (`BleManager.java:395`) e isso não é uma parada inesperada.
+            nativeScan.release();
+            nativeScan = null;
             BleManager.stopScan().catch(noop);
           }
         },

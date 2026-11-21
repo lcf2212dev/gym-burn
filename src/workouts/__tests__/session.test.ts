@@ -160,6 +160,53 @@ it('lê a FC de repouso nas primeiras leituras do treino', () => {
   expect(session.snapshot().guidance?.bpmReceived).toBe(true);
 });
 
+it('com a cinta no peito o treino corre sem pedido de batimentos, mede o repouso e revê a carga', async () => {
+  const { session, snapshot, notify } = setup();
+  jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'manter', reason: '' });
+  // Aquecimento de 120 s a 4 km/h e um bloco de esforço de 6 min a 5 km/h e 1%.
+  session.start(continuous());
+  let now = T0;
+  let asked = 0;
+  /** Um segundo de esteira com a leitura contínua da cinta em cada amostra. */
+  const strapWalk = (seconds: number, speedKmh: number, bpm: number, incline = 0) => {
+    for (let i = 0; i < seconds; i++) {
+      now += 1000;
+      jest.setSystemTime(now);
+      snapshot.samples = [
+        ...snapshot.samples.slice(-119),
+        {
+          speedAt: now,
+          inclineAt: now,
+          at: now,
+          speedKmh,
+          inclinationPercent: incline,
+          heartRateBpm: bpm,
+          heartRateSource: 'strap',
+          energyKcal: null,
+          distanceM: null,
+        },
+      ];
+      notify();
+      if (pendingAction(session.snapshot().guidance) === 'bpm') asked++;
+    }
+  };
+  strapWalk(120, 4, 80);
+  // A FC de repouso sai das primeiras leituras, sem ninguém segurar o sensor.
+  expect(session.snapshot().active?.restBpm).toBe(80);
+  expect(reviewIntensity).not.toHaveBeenCalled();
+  // No bloco de esforço, 10 bpm abaixo do teto: com 90 s na carga a leitura vai à IA.
+  strapWalk(200, 5, 110, 1);
+  await flush();
+
+  expect(asked).toBe(0);
+  expect(reviewIntensity).toHaveBeenCalled();
+  expect(jest.mocked(reviewIntensity).mock.calls[0][0]).toMatchObject({
+    index: 1,
+    features: { median: 110, position: 'na faixa' },
+  });
+  expect(session.snapshot().active?.totals.bpmCount).toBeGreaterThan(300);
+});
+
 it('pede os batimentos a cada 3 minutos de treino, num relógio que atravessa a troca de etapa', () => {
   const { session, walk } = setup();
   jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'manter', reason: '' });

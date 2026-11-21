@@ -1,6 +1,9 @@
 import type { ScannedDevice } from '@/ble/transport';
 import type { FitnessMachineFeature, MachineStatusEvent, SupportedRange, TrainingStatus } from '@/ftms';
 
+/** De onde vêm os batimentos: a cinta no peito ou o sensor de mão da esteira. */
+export type HeartRateSource = 'strap' | 'treadmill';
+
 /** De onde vem a esteira: o rádio de verdade ou a esteira simulada. */
 export type SessionMode = 'ble' | 'demo';
 
@@ -81,8 +84,14 @@ export interface TreadmillMetrics {
   totalEnergyKcal: number | null;
   energyPerHourKcal: number | null;
   energyPerMinuteKcal: number | null;
-  /** `null` quando a esteira manda 0 (sem contato nas alças). */
+  /**
+   * Os batimentos em uso: os da cinta enquanto ela manda leituras, senão os do
+   * sensor de mão da esteira. `null` quando a esteira manda 0 (sem contato nas
+   * alças) e não há cinta.
+   */
   heartRateBpm: number | null;
+  /** De onde veio `heartRateBpm`; `null` sem leitura. */
+  heartRateSource: HeartRateSource | null;
   /** METs calculados pelo firmware; 1,0 com a lona parada. */
   metabolicEquivalent: number | null;
   elapsedTimeS: number | null;
@@ -103,7 +112,18 @@ export interface TreadmillSample {
   at: number;
   speedKmh: number | null;
   inclinationPercent: number | null;
+  /**
+   * A leitura de batimentos que chegou com esta amostra. Com a cinta em uso,
+   * cada leitura dela aparece numa amostra só; as amostras entre duas leituras
+   * ficam com `null`.
+   */
   heartRateBpm: number | null;
+  /**
+   * De onde vêm os batimentos neste instante. `'strap'` vale para toda amostra
+   * feita com a cinta em uso, inclusive as que ficaram sem leitura: com ela a
+   * leitura é contínua e ninguém precisa segurar o sensor.
+   */
+  heartRateSource?: HeartRateSource | null;
   energyKcal: number | null;
   distanceM: number | null;
 }

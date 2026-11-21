@@ -140,6 +140,14 @@ export default function ProfileScreen() {
         </Card>
       )}
       <Card style={styles.card}>
+        <Text style={styles.heading}>Cinta de batimentos</Text>
+        <Text style={styles.body}>
+          Com uma cinta no peito o app lê os batimentos direto dela, o tempo todo. Sem ela, valem
+          os do sensor de mão da esteira.
+        </Text>
+        <UiButton variant="ghost" label="Configurar cinta" onPress={() => router.push('/cinta')} />
+      </Card>
+      <Card style={styles.card}>
         <Text style={styles.heading}>DeepSeek</Text>
         {configured && !editing ? (
           <>

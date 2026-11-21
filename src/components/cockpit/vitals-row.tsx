@@ -24,7 +24,8 @@ export function VitalsRow({ metrics }: { metrics: TreadmillMetrics }) {
     },
     {
       icon: 'heart-pulse',
-      label: 'Batimentos',
+      // O rótulo diz de onde vem o número: da cinta no peito ou do sensor de mão da esteira.
+      label: metrics.heartRateSource === 'strap' ? 'Cinta' : 'Batimentos',
       value: formatInteger(metrics.heartRateBpm),
       unit: 'BPM',
       color: Metric.heart,
@@ -34,10 +35,12 @@ export function VitalsRow({ metrics }: { metrics: TreadmillMetrics }) {
     <Card padded={false} style={styles.card}>
       {stats.map((s, i) => (
         <View
-          key={s.label}
+          key={s.icon}
           style={[styles.stat, i > 0 && styles.divider]}
           accessible
-          accessibilityLabel={s.label + ' ' + s.value + ' ' + s.unit}>
+          accessibilityLabel={
+            (s.label === 'Cinta' ? 'Batimentos pela cinta' : s.label) + ' ' + s.value + ' ' + s.unit
+          }>
           <IconLabel icon={s.icon} label={s.label} color={s.color} />
           <View style={styles.valueRow}>
             <Text adjustsFontSizeToFit numberOfLines={1} style={[styles.value, { color: s.color }]}>

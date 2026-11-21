@@ -1,7 +1,7 @@
 import type { FtmsAdvertisement } from '@/ftms';
 
 /**
- * Contrato entre a sessão da esteira e o rádio. Existem duas implementações:
+ * Contrato entre as sessões (a da esteira e a da cinta de batimentos) e o rádio. Existem duas implementações:
  * a real (`ble-manager-transport.ts`) e a esteira simulada do modo
  * demonstração e dos testes (`src/simulator`).
  *
@@ -36,6 +36,8 @@ export interface ScannedDevice {
   advertisesFtms: boolean;
   /** Service Data do FTMS decodificado, quando o anúncio traz. */
   ftms: FtmsAdvertisement | null;
+  /** O anúncio cita o Heart Rate Service (0x180D): é uma cinta ou relógio de batimentos. */
+  advertisesHeartRate?: boolean;
   /**
    * O anúncio em texto (serviços, Service Data, dados do fabricante). Fica
    * disponível para a tela de detalhes mostrar como a esteira se anuncia.
@@ -97,7 +99,9 @@ export interface BleTransport {
 
   /**
    * Procura equipamentos por perto até `remove()` ser chamado. Um mesmo
-   * equipamento pode ser entregue várias vezes (o RSSI muda).
+   * equipamento pode ser entregue várias vezes (o RSSI muda). Pode haver mais
+   * de uma busca aberta ao mesmo tempo (a da esteira e a da cinta): o rádio
+   * faz uma só e entrega a todas.
    */
   scan(
     onDevice: (device: ScannedDevice) => void,

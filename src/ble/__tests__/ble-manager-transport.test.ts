@@ -125,6 +125,24 @@ describe('prepare', () => {
     expect(ble.start).toHaveBeenCalledWith({ showAlert: false });
   });
 
+  it('dois pedidos ao mesmo tempo (esteira e cinta) dividem uma preparação só', async () => {
+    const transport = createBleManagerTransport();
+    ble.checkState.mockResolvedValue('off' as never);
+    ble.enableBluetooth.mockImplementation(async () => {
+      ble.checkState.mockResolvedValue('on' as never);
+    });
+
+    await Promise.all([transport.prepare(), transport.prepare()]);
+
+    // Um diálogo de permissão e um de "ligar o Bluetooth", não dois.
+    expect(permissions).toHaveBeenCalledTimes(1);
+    expect(ble.enableBluetooth).toHaveBeenCalledTimes(1);
+
+    // Terminada, a próxima confere tudo de novo.
+    await transport.prepare();
+    expect(permissions).toHaveBeenCalledTimes(2);
+  });
+
   it('repassa a negação de permissão sem iniciar a biblioteca', async () => {
     const denied = new BleUnavailableError('unauthorized', 'Permissão negada.');
     permissions.mockRejectedValue(denied);
@@ -251,6 +269,7 @@ describe('scan', () => {
       name: 'T600X',
       rssi: -61,
       advertisesFtms: true,
+      advertisesHeartRate: false,
       ftms: null,
       advertisement: 'serviços=[0x1826]',
     });
@@ -403,6 +422,94 @@ describe('scan', () => {
 
     subscription.remove();
     expect(ble.stopScan).not.toHaveBeenCalled();
+  });
+
+  it('marca advertisesHeartRate para quem anuncia o Heart Rate Service', () => {
+    const { onDevice } = startScan();
+
+    ble.__emit('discover', {
+      id: DEVICE_ID,
+      name: 'XOSS_X2P_989171',
+      rssi: -60,
+      advertising: { serviceUUIDs: ['180D'] },
+    });
+
+    expect(onDevice.mock.calls[0][0]).toMatchObject({
+      advertisesHeartRate: true,
+      advertisesFtms: false,
+    });
+  });
+
+  describe('duas buscas ao mesmo tempo (a da esteira e a da cinta)', () => {
+    it('dividem uma busca nativa só, e ela para quando a última sai', () => {
+      const transport = createBleManagerTransport();
+      const treadmill = { onDevice: jest.fn(), onError: jest.fn() };
+      const strap = { onDevice: jest.fn(), onError: jest.fn() };
+      const first = transport.scan(treadmill.onDevice, treadmill.onError);
+      const second = transport.scan(strap.onDevice, strap.onError);
+
+      expect(ble.scan).toHaveBeenCalledTimes(1);
+      expect(ble.__listenerCount('discover')).toBe(1);
+
+      ble.__emit('discover', { id: DEVICE_ID, rssi: -50, advertising: {} });
+      expect(treadmill.onDevice).toHaveBeenCalledTimes(1);
+      expect(strap.onDevice).toHaveBeenCalledTimes(1);
+
+      first.remove();
+      expect(ble.stopScan).not.toHaveBeenCalled();
+      ble.__emit('discover', { id: DEVICE_ID, rssi: -51, advertising: {} });
+      expect(treadmill.onDevice).toHaveBeenCalledTimes(1);
+      expect(strap.onDevice).toHaveBeenCalledTimes(2);
+
+      second.remove();
+      expect(ble.stopScan).toHaveBeenCalledTimes(1);
+      expect(ble.__listenerCount('discover')).toBe(0);
+    });
+
+    it('quem sai de dentro do próprio callback não derruba a entrega às outras', () => {
+      const transport = createBleManagerTransport();
+      const other = jest.fn();
+      const leaving = transport.scan(() => leaving.remove(), jest.fn());
+      transport.scan(other, jest.fn());
+
+      ble.__emit('discover', { id: DEVICE_ID, rssi: -50, advertising: {} });
+
+      expect(other).toHaveBeenCalledTimes(1);
+      expect(ble.stopScan).not.toHaveBeenCalled();
+    });
+
+    it('a parada espontânea avisa as duas, e a próxima busca começa do zero', () => {
+      const transport = createBleManagerTransport();
+      const treadmill = jest.fn();
+      const strap = jest.fn();
+      transport.scan(jest.fn(), treadmill);
+      const second = transport.scan(jest.fn(), strap);
+
+      ble.__emit('stopScan', { status: 2 });
+
+      expect(treadmill).toHaveBeenCalledTimes(1);
+      expect(strap).toHaveBeenCalledTimes(1);
+      second.remove();
+      expect(ble.stopScan).not.toHaveBeenCalled();
+
+      transport.scan(jest.fn(), jest.fn());
+      expect(ble.scan).toHaveBeenCalledTimes(2);
+    });
+
+    it('o eco do stopScan anterior não derruba a busca que começou em seguida', () => {
+      const transport = createBleManagerTransport();
+      transport.scan(jest.fn(), jest.fn()).remove();
+      const onError = jest.fn();
+      const onDevice = jest.fn();
+      transport.scan(onDevice, onError);
+
+      // O nativo emite a parada (status 0) depois de responder ao stopScan.
+      ble.__emit('stopScan', { status: 0 });
+      ble.__emit('discover', { id: DEVICE_ID, rssi: -50, advertising: {} });
+
+      expect(onError).not.toHaveBeenCalled();
+      expect(onDevice).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('o evento de parada provocado pelo próprio remove() não vira erro', () => {

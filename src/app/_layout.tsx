@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react';
 import { createAppServices } from '@/app-services';
 import { Colors, Neon } from '@/constants/theme';
 import { GuidanceSheet } from '@/components/cockpit/guidance-sheet';
+import { StrapProvider } from '@/heart/strap-context';
 import { WorkoutProvider } from '@/workouts/context';
 import { TreadmillProvider } from '@/treadmill/treadmill-context';
 
@@ -37,7 +38,7 @@ const navigationTheme = {
 };
 
 export default function RootLayout() {
-  // Uma sessão durante toda a vida do app.
+  // Uma sessão com a esteira e uma com a cinta durante toda a vida do app.
   const [services] = useState(createAppServices);
   // Importa só os pesos usados, não a família inteira.
   const [fontsLoaded, fontError] = useFonts({
@@ -63,10 +64,12 @@ export default function RootLayout() {
       {/* O esquema é fixo no escuro (ver `use-color-scheme`). */}
       <ThemeProvider value={navigationTheme}>
         <StatusBar style="light" />
-        <WorkoutProvider store={services.session}>
-          <Stack screenOptions={{ headerShown: false }} />
-          <GuidanceSheet />
-        </WorkoutProvider>
+        <StrapProvider store={services.strap}>
+          <WorkoutProvider store={services.session}>
+            <Stack screenOptions={{ headerShown: false }} />
+            <GuidanceSheet />
+          </WorkoutProvider>
+        </StrapProvider>
       </ThemeProvider>
     </TreadmillProvider>
   );

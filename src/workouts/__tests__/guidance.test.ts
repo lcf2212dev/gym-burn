@@ -52,6 +52,60 @@ it('fecha apenas após os dois alvos contemporâneos e não reabre o ajuste conc
   expect(pendingAction(advanceGuidance(complete, cue, sample(6400, 1, 2), 6400))).toBeNull();
 });
 
+it('com a cinta no peito o pedido de batimentos já nasce atendido e o aviso não abre', () => {
+  const pulseCue = { ...cue, measure: true };
+  const strap = (at: number, bpm: number | null): TreadmillSample => ({
+    ...sample(at, undefined, undefined, bpm),
+    heartRateSource: 'strap',
+  });
+  // Esteira já nos alvos: sem pedido de batimentos não resta aviso nenhum.
+  const opened = advanceGuidance(null, pulseCue, strap(500, 105), 500);
+  expect(opened).toMatchObject({ bpmRequestedAt: 500, bpmReceived: true });
+  expect(pendingAction(opened)).toBeNull();
+
+  // O pedido seguinte, 3 minutos depois, também não abre.
+  const next = advanceGuidance(opened, { ...pulseCue, pulse: 1 }, strap(180_000, 110), 180_000);
+  expect(next).toMatchObject({ bpmSlot: 1, bpmReceived: true });
+  expect(pendingAction(next)).toBeNull();
+});
+
+it('se a cinta cai, o pedido seguinte volta a pedir as mãos no sensor da esteira', () => {
+  const pulseCue = { ...cue, measure: true };
+  const strap: TreadmillSample = { ...sample(500, undefined, undefined, 105), heartRateSource: 'strap' };
+  const opened = advanceGuidance(null, pulseCue, strap, 500);
+
+  // Sem cinta e sem as mãos no sensor: a amostra vem sem batimentos.
+  const next = advanceGuidance(opened, { ...pulseCue, pulse: 1 }, sample(180_000), 180_000);
+  expect(next).toMatchObject({ bpmSlot: 1, bpmReceived: false });
+  expect(pendingAction(next)).toBe('bpm');
+
+  // A leitura do sensor de mão conta uma a uma, como sempre.
+  const grip: TreadmillSample = {
+    ...sample(181_000, undefined, undefined, 110),
+    heartRateSource: 'treadmill',
+  };
+  expect(advanceGuidance(next, { ...pulseCue, pulse: 1 }, grip, 181_000)).toMatchObject({
+    bpmCount: 1,
+    bpmReceived: false,
+  });
+
+  // E a cinta que volta fecha o pedido que estava aberto.
+  const back: TreadmillSample = { ...sample(182_000, undefined, undefined, 111), heartRateSource: 'strap' };
+  const closed = advanceGuidance(next, { ...pulseCue, pulse: 1 }, back, 182_000);
+  expect(closed).toMatchObject({ bpmReceived: true });
+  expect(pendingAction(closed)).toBeNull();
+});
+
+it('a amostra entre duas leituras da cinta também atende o pedido', () => {
+  // A esteira manda mais de um pacote por segundo e cada leitura da cinta entra
+  // numa amostra só: o pedido que abre numa amostra sem número não pode piscar o aviso.
+  const pulseCue = { ...cue, measure: true };
+  const between: TreadmillSample = { ...sample(500), heartRateSource: 'strap' };
+  const opened = advanceGuidance(null, pulseCue, between, 500);
+  expect(opened).toMatchObject({ bpmReceived: true, bpmCount: 0 });
+  expect(pendingAction(opened)).toBeNull();
+});
+
 it('o aviso de batimentos só fecha depois das leituras válidas novas que a revisão exige', () => {
   const pulseCue = { ...cue, measure: true };
   let progress = advanceGuidance(null, pulseCue, sample(500, undefined, undefined, 105), 500);

@@ -10,7 +10,8 @@ function db() {
       CREATE TABLE IF NOT EXISTS prepared (source TEXT PRIMARY KEY, day TEXT NOT NULL, profile TEXT NOT NULL, plan TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workouts (id TEXT PRIMARY KEY, started INTEGER NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS ai_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS ai_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
   }
   return database;
 }
@@ -40,7 +41,8 @@ export function readCalls(): AiCall[] {
 /**
  * Apaga perfil, treinos, planos preparados e o diário da IA. A chave da
  * DeepSeek fica no armazenamento seguro do sistema, fora deste banco, e não é
- * tocada.
+ * tocada. A cinta de batimentos pareada (`settings`) também fica: é
+ * equipamento, não dado de treino, e tem o seu próprio "Esquecer".
  */
 export function clearData() {
   db().execSync(
@@ -62,6 +64,19 @@ export function clearSource(source: SessionMode) {
     .map((w) => w.id);
   for (const id of ids) db().runSync('DELETE FROM workouts WHERE id = ?', id);
   db().runSync('DELETE FROM prepared WHERE source = ?', source);
+}
+
+/** A cinta de batimentos pareada neste celular. */
+export type SavedStrap = { id: string; name: string | null };
+
+export function readStrap(): SavedStrap | null {
+  const row = db().getFirstSync<{ value: string }>("SELECT value FROM settings WHERE key = 'strap'");
+  return row ? JSON.parse(row.value) : null;
+}
+
+export function saveStrap(strap: SavedStrap | null) {
+  if (strap) db().runSync("INSERT OR REPLACE INTO settings VALUES ('strap', ?)", JSON.stringify(strap));
+  else db().runSync("DELETE FROM settings WHERE key = 'strap'");
 }
 
 export function readProfile(): Profile | null {

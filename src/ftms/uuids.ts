@@ -62,9 +62,12 @@ const CHARACTERISTIC_NAMES: Record<string, string> = {
   [uuid16(0x2ad6)]: 'Supported Resistance Level Range',
   [uuid16(0x2ad7)]: 'Supported Heart Rate Range',
   [uuid16(0x2ad8)]: 'Supported Power Range',
+  // Da cinta de batimentos, para as mensagens de erro do rádio.
+  [uuid16(0x2a37)]: 'Heart Rate Measurement',
+  [uuid16(0x2a19)]: 'Battery Level',
 };
 
-/** Nome oficial da característica FTMS, ou o próprio UUID se for desconhecida. */
+/** Nome oficial da característica, ou o próprio UUID se for desconhecida. */
 export function characteristicName(uuid: string): string {
   const normalized = normalizeUuid(uuid);
   return CHARACTERISTIC_NAMES[normalized] ?? normalized;

@@ -32,6 +32,7 @@ import {
 import type { TreadmillStore } from './treadmill-context';
 import type {
   EquipmentInfo,
+  HeartRateSource,
   LinkInfo,
   Notice,
   RangeInfo,
@@ -75,6 +76,7 @@ const EMPTY_METRICS: TreadmillMetrics = {
   energyPerHourKcal: null,
   energyPerMinuteKcal: null,
   heartRateBpm: null,
+  heartRateSource: null,
   metabolicEquivalent: null,
   elapsedTimeS: null,
   remainingTimeS: null,
@@ -102,14 +104,18 @@ export interface TreadmillSessionOptions {
   ble: BleTransport;
   /** A esteira simulada do modo demonstração. */
   demo: { transport: BleTransport; deviceId: string };
+  /**
+   * A leitura de uma cinta no peito que vale neste instante, com a hora em que
+   * chegou, ou `null` se ela não tem leitura recente. Quando há leitura, é ela
+   * que vale; o sensor de mão da esteira fica como reserva.
+   */
+  heartRate?: (now: number) => { bpm: number; at: number } | null;
   /** A busca para sozinha depois deste tempo (para não gastar bateria). */
   scanTimeoutMs?: number;
   now?: () => number;
 }
 
-interface ResolvedOptions extends Required<Omit<TreadmillSessionOptions, 'scanTimeoutMs'>> {
-  scanTimeoutMs: number;
-}
+type ResolvedOptions = Required<TreadmillSessionOptions>;
 
 /** Marca a leitura que estourou o prazo (para não insistir nas próximas). */
 class ReadTimeoutError extends Error {
@@ -194,9 +200,14 @@ export class TreadmillSession implements TreadmillStore {
   private lastPacketAt: number | null = null;
   private readonly packetIntervals: number[] = [];
   private dataErrorNotified = false;
+  /** Última leitura do sensor de mão da esteira; `null` sem contato nas alças. */
+  private gripBpm: number | null = null;
+  /** Hora da última leitura da cinta que já entrou numa amostra. */
+  private strapSampledAt: number | null = null;
 
   constructor(options: TreadmillSessionOptions) {
     this.options = {
+      heartRate: () => null,
       scanTimeoutMs: DEFAULT_SCAN_TIMEOUT_MS,
       now: Date.now,
       ...options,
@@ -439,6 +450,8 @@ export class TreadmillSession implements TreadmillStore {
     this.lastPacketAt = null;
     this.packetIntervals.length = 0;
     this.dataErrorNotified = false;
+    this.gripBpm = null;
+    this.strapSampledAt = null;
     this.update({
       equipment: null,
       capabilities: null,
@@ -690,6 +703,21 @@ export class TreadmillSession implements TreadmillStore {
 
     const now = this.options.now();
     const previous = this.snapshot.metrics;
+    // 0 significa "sem contato nas alças"; a tela mostra vazio, não um zero falso.
+    if (data.heartRateBpm !== undefined) {
+      this.gripBpm = data.heartRateBpm === 0 ? null : data.heartRateBpm;
+    }
+    // A cinta manda uma leitura por segundo, sem ninguém segurar nada: enquanto
+    // ela tem leitura recente, vale a dela. Sem cinta, vale o sensor da esteira.
+    const strap = this.options.heartRate(now);
+    const strapBpm = strap?.bpm ?? null;
+    // A esteira manda mais de um pacote por segundo (o registro FTMS vem
+    // dividido): cada leitura da cinta entra numa amostra só, senão o treino
+    // contaria a mesma leitura duas vezes.
+    const strapIsNew = strap !== null && strap.at !== this.strapSampledAt;
+    if (strapIsNew) {
+      this.strapSampledAt = strap.at;
+    }
     const inclinationRange = this.snapshot.capabilities?.inclinationRange ?? T600X_INCLINATION_RANGE;
     const metrics: TreadmillMetrics = {
       speedKmh: data.instantaneousSpeedKmh ?? previous.speedKmh,
@@ -708,13 +736,8 @@ export class TreadmillSession implements TreadmillStore {
       totalEnergyKcal: data.totalEnergyKcal ?? previous.totalEnergyKcal,
       energyPerHourKcal: data.energyPerHourKcal ?? previous.energyPerHourKcal,
       energyPerMinuteKcal: data.energyPerMinuteKcal ?? previous.energyPerMinuteKcal,
-      // 0 significa "sem contato nas alças"; a tela mostra vazio, não um zero falso.
-      heartRateBpm:
-        data.heartRateBpm !== undefined
-          ? data.heartRateBpm === 0
-            ? null
-            : data.heartRateBpm
-          : previous.heartRateBpm,
+      heartRateBpm: strapBpm ?? this.gripBpm,
+      heartRateSource: strapBpm !== null ? 'strap' : this.gripBpm !== null ? 'treadmill' : null,
       metabolicEquivalent: data.metabolicEquivalent ?? previous.metabolicEquivalent,
       elapsedTimeS: data.elapsedTimeS ?? previous.elapsedTimeS,
       remainingTimeS: data.remainingTimeS ?? previous.remainingTimeS,
@@ -726,6 +749,10 @@ export class TreadmillSession implements TreadmillStore {
 
     // Uma amostra por notificação de Treadmill Data, para o gráfico ao vivo.
     const lastSample = this.snapshot.samples.at(-1);
+    // Do sensor da esteira só entra na amostra a leitura que veio neste pacote.
+    const sampleSource: HeartRateSource | null =
+      strap !== null ? 'strap' : data.heartRateBpm ? 'treadmill' : null;
+    const sampleBpm = strap !== null ? (strapIsNew ? strap.bpm : null) : data.heartRateBpm || null;
     const samples = [
       ...this.snapshot.samples,
       {
@@ -734,7 +761,8 @@ export class TreadmillSession implements TreadmillStore {
         inclineAt: data.inclinationPercent !== undefined ? now : lastSample?.inclineAt ?? null,
         speedKmh: metrics.speedKmh,
         inclinationPercent: metrics.inclinationPercent,
-        heartRateBpm: data.heartRateBpm || null,
+        heartRateBpm: sampleBpm,
+        heartRateSource: sampleSource,
         energyKcal: metrics.totalEnergyKcal,
         distanceM: metrics.distanceM,
       },

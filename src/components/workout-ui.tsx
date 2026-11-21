@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ReactNode } from 'react';
 import { Colors, MaxContentWidth, Neon, TitleType } from '@/constants/theme';
+import { useStrap } from '@/heart/strap-context';
 
 const colors = Colors.dark;
 /**
@@ -70,14 +71,24 @@ export function Field({ label, ...props }: TextInputProps & { label: string }) {
 
 export function WorkoutLinks() {
   const router = useRouter();
+  const connected = useStrap((s) => s.phase === 'connected');
+  const bpm = useStrap((s) => s.bpm);
+  // Com a cinta conectada o próprio atalho mostra a leitura: dá para conferir
+  // que ela está funcionando antes de subir na esteira.
+  const strap = connected && bpm !== null ? 'Cinta · ' + bpm + ' bpm' : 'Cinta';
+  const links = [
+    { label: 'Perfil', href: '/perfil' },
+    { label: 'Evolução', href: '/evolucao' },
+    { label: strap, href: '/cinta' },
+  ] as const;
   return (
     <View style={styles.row}>
-      {(['Perfil', 'Evolução'] as const).map((label) => (
+      {links.map(({ label, href }) => (
         <Pressable
-          key={label}
+          key={href}
           accessibilityRole="button"
           style={styles.link}
-          onPress={() => router.push(label === 'Perfil' ? '/perfil' : '/evolucao')}>
+          onPress={() => router.push(href)}>
           <Text style={styles.linkText}>{label}</Text>
         </Pressable>
       ))}

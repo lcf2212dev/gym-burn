@@ -35,6 +35,8 @@ mostrada é a da T600X real: o app lê o módulo BLE que ela expõe.
   onde saem a revisão da carga e o cartão da zona de batimentos;
 - **traduz os eventos do console** (início, parada, pausa, mudança de alvo feita no painel, chave de
   segurança) em avisos legíveis;
+- **lê os batimentos de uma cinta no peito**, quando há uma pareada, e fica com o sensor de mão da
+  esteira como reserva;
 - **mostra com honestidade o que a esteira não manda**, marcando `—` nos campos que o firmware
   declara mas nunca envia;
 - tem um **modo demonstração** escondido para experimentar o app sem esteira por perto.
@@ -118,9 +120,23 @@ A conta é a mesma para todas as sessões: a FC sobe quase em linha reta com os 
 
 ### Frequência cardíaca
 
-A esteira só lê batimentos com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando. O app usa a menor das 5 últimas e desconta 15 bpm.
+Sem cinta no peito, os batimentos vêm do sensor de mão da esteira, que só lê com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando. O app usa a menor das 5 últimas e desconta 15 bpm.
 
 Depois disso o guia pede os batimentos sempre a cada 3 minutos de lona andando, num relógio fixo (3:00, 6:00, 9:00…), com aviso sonoro. A troca de etapa não adia nem zera o pedido, e ele vale em qualquer velocidade, inclusive correndo: as faixas do plano dependem dessa leitura. Um pedido sem resposta fica aberto até o seguinte, que reabre o aviso e toca de novo. O pedido da FC de repouso só vale nos primeiros 90 segundos. Com um pedido de batimentos e um ajuste da esteira em aberto ao mesmo tempo, a tela mostra o mais recente.
+
+#### Cinta de batimentos
+
+Com uma cinta no peito pareada, os batimentos vêm dela, e não da esteira. Serve qualquer monitor que fale o perfil padrão de frequência cardíaca do Bluetooth (Heart Rate Service, `0x180D`); o app foi testado com a XOSS X2 Pro. O pareamento é feito uma vez, em **Cinta**, na tela inicial: vista a cinta, toque no nome dela na lista e confira a leitura. Não é preciso parear pela tela de Bluetooth do sistema.
+
+Daí em diante o app conecta sozinho na cinta sempre que procura ou usa uma esteira (inclusive a simulada), e reconecta se o link cair. Enquanto a esteira está conectando, a cinta espera a vez. Se ela não aparece, a busca vai ficando mais espaçada, de 10 segundos até 1 minuto entre uma tentativa e outra. A cinta manda uma leitura por segundo, com a lona parada ou andando, então:
+
+- o guia deixa de pedir as mãos no sensor: os pedidos de 3 em 3 minutos já nascem atendidos e o aviso não abre;
+- a FC de repouso do dia sai das primeiras leituras do treino, sem ninguém segurar nada;
+- a carga é revista a cada 90 segundos, e não a cada pedido de leitura.
+
+A esteira continua como reserva. Vale a leitura dela sempre que a cinta não tem uma leitura dos últimos 5 segundos: cinta fora do alcance, sem bateria, sem contato com a pele ou ainda conectando. Nesse caso o pedido seguinte volta a pedir as mãos no sensor, e fecha sozinho se a cinta voltar. No painel, o rótulo do número diz de onde ele vem: **Cinta** ou **Batimentos** (sensor da esteira).
+
+A cinta pareada fica guardada no celular e não é apagada por "Apagar perfil e treinos"; para trocar de cinta, use **Esquecer cinta**.
 
 A FC máxima começa em 220 − idade. Depois de cada sessão avaliada, a IA devolve uma previsão, e o app passa a usar a mediana das 3 últimas. A previsão é o maior de dois números que o app calcula: a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade) e o piso medido, que é o maior pico já observado, com 5 bpm a mais quando o pico veio de uma sessão levada até o fim sem redução forçada de carga. Redução forçada é a feita com o BPM 5 ou mais acima do teto da faixa: o alívio menor é rotina de quem treina junto do teto e não pesa aqui nem no nível da avaliação. Ela fica presa a 10 bpm das estimativas pela idade e nunca abaixo desse piso. Treino submáximo não mede a FC máxima, então o erro típico continua na casa de ±10 bpm.
 
@@ -176,6 +192,9 @@ adb logcat -s ReactNativeJS | grep gymburn-diag
 4. **Use o painel para tudo.** Ajuste velocidade e inclinação por ele, e apoie o celular num lugar
    seguro. O app só acompanha.
 
+Se você usa cinta de batimentos, vista-a antes de abrir o app: ela conecta sozinha enquanto a
+esteira é procurada, e o atalho **Cinta** da tela inicial passa a mostrar a leitura.
+
 Não é preciso parear pela tela de Bluetooth do sistema: a esteira é um periférico BLE e o app
 conecta direto. A tela de conexão também traz um cartão com esses três passos.
 
@@ -186,6 +205,9 @@ O app mantém a tela acesa enquanto acompanha o treino, para o celular não apag
 Sem esteira por perto, dá para ver o cockpit funcionando: na tela de conexão, faça um **toque longo
 na marca GYM BURN**. O app conecta numa esteira simulada, que fala FTMS em bytes como a de verdade,
 e o restante da interface se comporta igual.
+
+Com uma cinta pareada, a demonstração também usa os batimentos dela, no lugar dos simulados: o
+Bluetooth de verdade é ligado para procurá-la.
 
 ## Por que o app não controla a esteira
 
@@ -248,6 +270,12 @@ descoberta do GATT e leitura das notificações, e depende apenas do contrato `B
 isso o rádio real e a esteira simulada são intercambiáveis. O codec FTMS é código puro, sem React e
 sem Bluetooth.
 
+A cinta de batimentos tem a sua própria sessão (`src/heart/strap-session.ts`), no mesmo contrato
+`BleTransport` e no mesmo rádio: as duas buscas dividem uma única busca nativa. A sessão da esteira
+pergunta à da cinta, a cada pacote, se há leitura recente; se há, é ela que entra nas métricas e
+nas amostras, marcada com a origem. O resto do app (guia, revisão da carga, registro do treino) lê
+os batimentos das amostras, sem saber de onde vieram.
+
 ```
 telas e componentes (src/screens, src/components)
         │  snapshot imutável / ações
@@ -267,6 +295,7 @@ esteira Matrix T600X  ── codec FTMS puro em src/ftms
 | `src/screens` | tela de conexão e tela do cockpit |
 | `src/components` | primitivas visuais e blocos do cockpit (cartões, métricas, zona de batimentos, avisos) |
 | `src/treadmill` | sessão (estado, busca, conexão, leitura), contrato de tipos, contexto React e constantes da T600X |
+| `src/heart` | cinta de batimentos: codec do Heart Rate Measurement, sessão (pareamento, busca, conexão, leitura) e contexto React |
 | `src/ftms` | codec puro do FTMS: bytes, Treadmill Data, Machine Status, Training Status, Device Information, Feature e faixas |
 | `src/ble` | contrato `BleTransport`, implementação com `react-native-ble-manager` e permissões do Android |
 | `src/simulator` | esteira simulada que fala FTMS em bytes; usada no modo demonstração e nos testes |
@@ -275,7 +304,7 @@ esteira Matrix T600X  ── codec FTMS puro em src/ftms
 | `src/utils` | formatação de números e textos em português do Brasil |
 | `src/constants` | tokens de tema: cores, tipografia, espaçamento |
 
-`src/app-services.ts` cria a sessão e o transporte, que vivem durante toda a execução do app.
+`src/app-services.ts` cria o transporte e as duas sessões, que vivem durante toda a execução do app.
 
 ## Testes
 
@@ -288,7 +317,9 @@ npm run lint
 A suíte cobre o codec do FTMS (bytes, Treadmill Data, Device Information, Feature e faixas), as
 permissões de Bluetooth do Android, a esteira simulada e a sessão de ponta a ponta com um transporte
 falso. Nenhum teste toca o rádio de verdade: a esteira simulada fala os mesmos bytes do FTMS, e o
-modo demonstração exercita exatamente o mesmo caminho da esteira real.
+modo demonstração exercita exatamente o mesmo caminho da esteira real. A cinta de batimentos é
+coberta do mesmo jeito: o codec, a sessão com um transporte falso (pareamento, queda do link, nova
+busca) e a troca entre a leitura da cinta e a da esteira.
 
 Nos treinos guiados, a suíte cobre o plano, a sessão, as regras de carga, a frequência cardíaca e a
 montagem e validação dos prompts, sem chamar a DeepSeek. A qualidade das respostas da IA é medida à

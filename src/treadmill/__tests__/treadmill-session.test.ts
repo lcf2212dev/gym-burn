@@ -544,6 +544,141 @@ describe('métricas', () => {
     expect(metrics.inclinationPercent).toBe(10); // faixa plausível: sem correção
   });
 
+  it('diz que os batimentos vêm da esteira quando não há cinta', async () => {
+    const { transport, session } = makeSession();
+    const connection = await connectFake(transport, session);
+
+    connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+    expect(session.getSnapshot().metrics.heartRateSource).toBeNull();
+    expect(session.getSnapshot().samples.at(-1)!.heartRateSource).toBeNull();
+
+    connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket({ heartRateBpm: 128 }));
+    expect(session.getSnapshot().metrics).toMatchObject({
+      heartRateBpm: 128,
+      heartRateSource: 'treadmill',
+    });
+    expect(session.getSnapshot().samples.at(-1)).toMatchObject({
+      heartRateBpm: 128,
+      heartRateSource: 'treadmill',
+    });
+  });
+
+  describe('com a cinta de batimentos', () => {
+    /** A cinta com uma leitura nova a cada consulta, como quando ela manda mais rápido que a esteira. */
+    const live = (bpm: () => number | null) => (now: number) => {
+      const value = bpm();
+      return value === null ? null : { bpm: value, at: now };
+    };
+
+    it('a leitura da cinta vale no lugar da do sensor de mão', async () => {
+      const heartRate = jest.fn(live(() => 142));
+      const { transport, session } = makeSession({ heartRate });
+      const connection = await connectFake(transport, session);
+
+      // Sem contato nas alças: a esteira manda 0.
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect(heartRate).toHaveBeenLastCalledWith(Date.now());
+      expect(session.getSnapshot().metrics).toMatchObject({
+        heartRateBpm: 142,
+        heartRateSource: 'strap',
+      });
+      expect(session.getSnapshot().samples.at(-1)).toMatchObject({
+        heartRateBpm: 142,
+        heartRateSource: 'strap',
+      });
+
+      // Segurando as alças ao mesmo tempo, continua valendo a cinta.
+      await jest.advanceTimersByTimeAsync(1000);
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket({ heartRateBpm: 128 }));
+      expect(session.getSnapshot().metrics).toMatchObject({
+        heartRateBpm: 142,
+        heartRateSource: 'strap',
+      });
+      expect(session.getSnapshot().samples.at(-1)!.heartRateBpm).toBe(142);
+    });
+
+    it('cada leitura da cinta entra numa amostra só, mesmo com o registro da esteira dividido em dois pacotes', async () => {
+      let reading = { bpm: 142, at: 1000 };
+      const { transport, session } = makeSession({ heartRate: () => reading });
+      const connection = await connectFake(transport, session);
+      const speedOnly = new ByteWriter().u16(0).u16(500).finish();
+
+      // Dois pacotes no mesmo segundo, com a mesma leitura da cinta em vigor.
+      connection.emit(FTMS.service, FTMS.treadmillData, speedOnly);
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      const [first, second] = session.getSnapshot().samples;
+      expect(first).toMatchObject({ heartRateBpm: 142, heartRateSource: 'strap' });
+      // A segunda amostra sabe que a cinta está em uso, mas não repete a leitura.
+      expect(second).toMatchObject({ heartRateBpm: null, heartRateSource: 'strap' });
+      // O painel continua mostrando o número.
+      expect(session.getSnapshot().metrics.heartRateBpm).toBe(142);
+
+      // Chegou outra leitura (mesmo valor, hora nova): conta de novo.
+      reading = { bpm: 142, at: 2000 };
+      connection.emit(FTMS.service, FTMS.treadmillData, speedOnly);
+      expect(session.getSnapshot().samples.at(-1)!.heartRateBpm).toBe(142);
+    });
+
+    it('sem leitura da cinta, voltam os batimentos da esteira', async () => {
+      let strap: number | null = 142;
+      const { transport, session } = makeSession({ heartRate: live(() => strap) });
+      const connection = await connectFake(transport, session);
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket({ heartRateBpm: 128 }));
+
+      strap = null;
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket({ heartRateBpm: 130 }));
+      expect(session.getSnapshot().metrics).toMatchObject({
+        heartRateBpm: 130,
+        heartRateSource: 'treadmill',
+      });
+      expect(session.getSnapshot().samples.at(-1)).toMatchObject({
+        heartRateBpm: 130,
+        heartRateSource: 'treadmill',
+      });
+
+      // E sem contato nas alças não sobra leitura nenhuma: nada de segurar o valor da cinta.
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect(session.getSnapshot().metrics).toMatchObject({
+        heartRateBpm: null,
+        heartRateSource: null,
+      });
+    });
+
+    it('num pacote sem o campo de FC, o painel não repete a leitura velha da cinta', async () => {
+      let strap: number | null = 142;
+      const { transport, session } = makeSession({ heartRate: live(() => strap) });
+      const connection = await connectFake(transport, session);
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+
+      strap = null;
+      // Só a velocidade: flags 0 e 4 octetos.
+      connection.emit(FTMS.service, FTMS.treadmillData, new ByteWriter().u16(0).u16(500).finish());
+
+      expect(session.getSnapshot().metrics).toMatchObject({
+        heartRateBpm: null,
+        heartRateSource: null,
+      });
+      expect(session.getSnapshot().samples.at(-1)).toMatchObject({
+        heartRateBpm: null,
+        heartRateSource: null,
+      });
+    });
+
+    it('uma conexão nova com a esteira volta a contar a leitura em vigor', async () => {
+      const { transport, session } = makeSession({ heartRate: () => ({ bpm: 142, at: 1000 }) });
+      const first = await connectFake(transport, session);
+      first.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      session.actions.disconnect();
+      await settle();
+
+      const second = await connectFake(transport, session);
+      second.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+
+      expect(session.getSnapshot().samples).toHaveLength(1);
+      expect(session.getSnapshot().samples[0].heartRateBpm).toBe(142);
+    });
+  });
+
   it('guarda no máximo 120 amostras, uma por notificação', async () => {
     const { transport, session } = makeSession();
     const connection = await connectFake(transport, session);
