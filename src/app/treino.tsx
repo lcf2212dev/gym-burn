@@ -9,7 +9,7 @@ import { useTreadmill } from '@/treadmill/treadmill-context';
 import { preparePlan, readPlan } from '@/workouts/storage';
 import { generatePlan } from '@/workouts/ai';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
-import type { Plan } from '@/workouts/model';
+import { RUN_FROM_KMH, WALK_TOP_KMH, type Plan } from '@/workouts/model';
 import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
 import { describe, sessionMinutes, week, zones, zoneSpan } from '@/workouts/week';
 import { formatDecimal, formatDuration } from '@/utils/format';
@@ -28,9 +28,12 @@ export default function Training() {
   // O dia cujo treino será feito: começa em hoje, e a lista da semana deixa trocar.
   const [day, pick] = useState(today);
   const [plan, setPlan] = useState<Plan | null>(() => {
-    // Um plano preparado antes do plano semanal não tem faixa própria: vale gerar outro.
+    // Um plano preparado antes do plano semanal não tem faixa própria, e um com
+    // alvo entre o teto da caminhada e o começo da corrida é de antes desse teto:
+    // nos dois casos vale gerar outro.
     const stored = readPlan(source, profile);
-    return stored?.zone ? stored : null;
+    const unwalkable = stored?.stages.some((s) => s.speed > WALK_TOP_KMH && s.speed < RUN_FROM_KMH);
+    return stored?.zone && !unwalkable ? stored : null;
   });
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(1);

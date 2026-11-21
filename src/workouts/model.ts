@@ -12,14 +12,15 @@ export type Profile = { age: number; weightKg: number; heightCm: number };
  */
 export const MAX_SPEED_KMH = 22;
 export const MAX_INCLINE_PERCENT = 15;
-// A escada de carga: a caminhada sobe pela velocidade até 6 km/h, depois pela
-// inclinação até 8%, e a partir de 7 km/h a pessoa corre.
-export const WALK_TOP_KMH = 6;
+// A escada de carga: a caminhada sobe pela velocidade até 5,6 km/h, depois pela
+// inclinação até 8%, e a partir de 7 km/h a pessoa corre. Acima de 5,6 km/h a
+// pessoa já não consegue caminhar: nenhum alvo de caminhada passa disso.
+export const WALK_TOP_KMH = 5.6;
 export const HILL_TOP_PERCENT = 8;
 export const RUN_FROM_KMH = 7;
 
 /** METs de uma carga pelas equações do ACSM, de caminhada ou de corrida (1 MET é o repouso). */
-function acsm(kmh: number, inclinePercent: number, running: boolean) {
+export function acsm(kmh: number, inclinePercent: number, running: boolean) {
   const perMinute = (kmh * 1000) / 60;
   const grade = inclinePercent / 100;
   const oxygen = running
@@ -36,7 +37,7 @@ export const metabolicCost = (kmh: number, inclinePercent: number) =>
   acsm(kmh, inclinePercent, kmh >= RUN_FROM_KMH);
 
 /**
- * Custo metabólico para a conta de kcal. Entre 6 e 7 km/h a equação de
+ * Custo metabólico para a conta de kcal. Entre 5,6 e 7 km/h a equação de
  * caminhada subestima o passo apertado, e a troca seca para a de corrida quase
  * dobraria o gasto de um décimo de km/h para o outro: nesse trecho o custo vai
  * de uma equação à outra em linha reta.
@@ -197,37 +198,30 @@ export function makePlan(goal: Goal, structure: Structure, pace: number, grade: 
 
 /** Por quanto tempo, no início do treino, uma leitura ainda conta como FC de repouso. */
 export const REST_WINDOW_SECONDS = 90;
-/** Tempo entre uma leitura de BPM atendida e o pedido seguinte na mesma etapa. */
+/** Tempo entre dois pedidos de leitura de BPM, do começo ao fim do treino. */
 export const PULSE_INTERVAL_SECONDS = 180;
 
-// Diz se a etapa aceita um pedido de leitura neste segundo; quem repete o
-// pedido a cada 3 minutos é o guia (`advanceGuidance`). O pedido vale em
-// qualquer velocidade: as faixas do plano dependem da leitura também correndo.
-// A frequência cardíaca leva de 2 a 3 minutos para acompanhar uma mudança de
-// carga. O primeiro pedido espera 60 s nas etapas leves e 120 s nas
-// principais. A primeira etapa pede logo no início: é a FC de repouso do dia,
-// e esse pedido vale só enquanto a janela estiver aberta. Depois dela, a
-// etapa volta a aceitar leitura aos 3 minutos.
-function pulseDue(index: number, stage: Stage, into: number) {
-  if (index === 0) return into < REST_WINDOW_SECONDS || into >= PULSE_INTERVAL_SECONDS;
-  return into >= Math.min(stage.measure ? 60 : 120, Math.floor(stage.seconds / 2));
-}
-
+// O guia pede os batimentos num relógio fixo: um pedido a cada 3 minutos de
+// lona andando (0:00, 3:00, 6:00…), em qualquer etapa e em qualquer
+// velocidade. A troca de etapa não adia nem zera o pedido. O primeiro é a FC
+// de repouso do dia e só vale enquanto a janela do repouso estiver aberta;
+// sem resposta, ele caduca e o seguinte abre aos 3 minutos.
 export function currentCue(plan: Plan, elapsed: number) {
   let start = 0;
   for (const [index, stage] of plan.stages.entries()) {
     const end = start + stage.seconds;
     if (elapsed < end) {
-      const into = elapsed - start;
-      const measure = pulseDue(index, stage, into);
+      const pulse = Math.floor(elapsed / PULSE_INTERVAL_SECONDS);
       return {
         index,
         stage,
         /** Segundos já feitos na etapa. */
-        into,
+        into: elapsed - start,
         left: end - elapsed,
-        measure,
-        key: index + (measure ? '-bpm' : '-ajuste'),
+        /** Número do pedido de leitura em vigor: muda a cada 3 minutos de treino. */
+        pulse,
+        /** O pedido de leitura está aberto neste segundo. */
+        measure: pulse > 0 || elapsed < REST_WINDOW_SECONDS,
       };
     }
     start = end;

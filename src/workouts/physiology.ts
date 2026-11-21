@@ -1,6 +1,7 @@
 import {
   energyCost,
   HILL_TOP_PERCENT,
+  inRange,
   MAX_SPEED_KMH,
   median,
   metabolicCost,
@@ -41,10 +42,26 @@ export function observedPeak(history: Workout[]) {
   return top || null;
 }
 
-/** Sessão levada até o fim (90% do plano, ou 20 min de treino livre) sem pedido de redução de carga. */
+/** Quantos bpm acima do teto da faixa fazem de um alívio uma redução forçada. */
+export const FORCED_REDUCTION_BPM = 5;
+
+/**
+ * Reduções de carga que pesam na avaliação da sessão: as feitas com o BPM 5 ou
+ * mais acima do teto da faixa. O app alivia a carga já com 1 bpm de excesso, e
+ * para quem treina junto do teto esse alívio pequeno é rotina, não sinal de
+ * carga errada.
+ */
+export function forcedReductions(w: Workout) {
+  const { high } = dailyTarget(w.plan, w.profile, w.hr);
+  return (w.changes ?? []).filter(
+    (c) => c.decision.startsWith('reduzir') && c.bpm >= high + FORCED_REDUCTION_BPM,
+  ).length;
+}
+
+/** Sessão levada até o fim (90% do plano, ou 20 min de treino livre) sem redução forçada de carga. */
 function sustained(w: Workout) {
   const finished = w.totals.movingMs >= (w.plan ? w.plan.minutes * 54000 : 1200000);
-  return finished && !(w.changes ?? []).some((c) => c.decision.startsWith('reduzir'));
+  return finished && !forcedReductions(w);
 }
 
 /** Quanto a FC máxima fica, no mínimo, acima do pico de uma sessão sustentada. */
@@ -175,6 +192,19 @@ export function mets(kmh: number, inclinePercent: number) {
   return Math.round(metabolicCost(kmh, inclinePercent) * 10) / 10;
 }
 
+/** bpm por MET quando não há FC de repouso para traçar a reta da pessoa. */
+export const DEFAULT_BPM_PER_MET = 15;
+
+/**
+ * Inclinação da reta entre carga e frequência cardíaca, em bpm por MET, a
+ * partir de uma leitura (`bpm` numa carga de `cost` METs) e da FC de repouso.
+ * Fora de 8 a 25, ou sem repouso, vale 15: a mesma conta do plano do dia.
+ */
+export function bpmPerMet(bpm: number, cost: number, rest: number | null) {
+  const slope = rest === null ? NaN : (bpm - rest) / (cost - 1);
+  return inRange(slope, 8, 25) ? slope : DEFAULT_BPM_PER_MET;
+}
+
 /**
  * kcal por minuto a 1 MET, por kg de peso: 3,5 ml de oxigênio por kg por
  * minuto, a 5 kcal por litro.
@@ -204,8 +234,9 @@ export function energyKcal(w: Workout) {
 
 /**
  * As cargas entre as quais a IA escolhe, da mais leve à mais pesada:
- * caminhada plana até 6 km/h, depois rampa a 6 km/h até 8%, depois corrida a
- * 1%. É o caminho que não pede corrida de quem ainda chega à faixa andando.
+ * caminhada plana até 5,6 km/h, depois rampa a 5,6 km/h até 8%, depois corrida
+ * a 1%. É o caminho que não pede corrida de quem ainda chega à faixa andando:
+ * nenhuma linha fica entre o teto da caminhada e o começo da corrida.
  */
 export function loadLadder() {
   const rows: { pace: number; grade: number; mets: number }[] = [];

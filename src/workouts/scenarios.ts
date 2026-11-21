@@ -2,18 +2,28 @@
 // salva. Cada cenário tem um desfecho aceito; a mesma entrada é enviada algumas
 // vezes para medir também a concordância entre repetições.
 
-import { allowedDecisions, pulseFeatures, type Decision, type Reading } from './adaptive';
+import {
+  allowedDecisions,
+  changeLabel,
+  correctedStage,
+  correction,
+  correctionBpm,
+  pulseFeatures,
+  type Decision,
+  type Reading,
+} from './adaptive';
 import { callModel, type Kind } from './ai';
 import {
   emptyLog,
   median,
+  metabolicCost,
   type HeartProfile,
   type Plan,
   type Profile,
   type StageLog,
   type Workout,
 } from './model';
-import { dailyTarget, foxMax, loadLadder } from './physiology';
+import { bpmPerMet, dailyTarget, foxMax, loadLadder } from './physiology';
 import {
   assessBounds,
   assessPrompt,
@@ -69,7 +79,7 @@ type Past = {
 };
 
 function past(profile: Profile, now: number, p: Past): Workout {
-  const plan = sessionPlan(p.session ?? base, p.pace ?? 6, p.grade ?? 2);
+  const plan = sessionPlan(p.session ?? base, p.pace ?? 5.6, p.grade ?? 2.5);
   const hr: HeartProfile = { rest: null, max: foxMax(profile.age), maxSource: 'idade' };
   const zone = dailyTarget(plan, profile, hr);
   let budget = plan.minutes * 60 * (p.completion ?? 1);
@@ -156,11 +166,14 @@ type ReviewCase = {
 };
 
 const hold: Decision[] = ['manter'];
-// Base aeróbica a 6 km/h e 2%: aquecimento (0), esforço de 35 min (1), volta à calma (2).
-const walk = { session: base, pace: 6, grade: 2 };
-// VO₂máx a 6 km/h e 6,5%: aquecimento (0), tiros nas etapas 1, 3, 5 e 7, com recuperação depois de cada um.
-const shots = { session: vo2, pace: 6, grade: 6.5 };
+// Base aeróbica a 5,6 km/h e 2,5%: aquecimento (0), esforço de 35 min (1), volta à calma (2).
+const walk = { session: base, pace: 5.6, grade: 2.5 };
+// VO₂máx a 5,6 km/h e 7%: aquecimento (0), tiros nas etapas 1, 3, 5 e 7, com recuperação depois de cada um.
+const shots = { session: vo2, pace: 5.6, grade: 7 };
 
+// Fora da faixa (117–135 na base) o app corrige sozinho, na primeira medida:
+// esses casos não chegam à IA, e o desfecho é o ajuste que a conta do app dá.
+// Dentro da faixa e abaixo do teto a IA decide se a carga sobe um degrau.
 const reviewCases: ReviewCase[] = [
   // Dentro da faixa, mas 9 bpm abaixo do teto: a pessoa quer treinar no alto dela.
   { name: 'na-faixa-longe-do-teto', ...walk, stage: 1, into: 400, reached: true, atLoad: 380, bpm: [125, 126, 125, 127, 126, 125], expect: ['aumentar inclinação'] },
@@ -179,10 +192,15 @@ const reviewCases: ReviewCase[] = [
     change: { secondsAgo: 150, decision: 'aumentar inclinação', bpm: 124 },
     expect: hold,
   },
-  // Primeira leitura do bloco, aos 2 minutos: 13 bpm abaixo do teto já pedem mais carga.
-  { name: 'primeira-leitura-longe-do-teto', ...walk, stage: 1, into: 128, reached: true, atLoad: 105, bpm: [121, 122, 122, 121, 122, 122], expect: ['aumentar inclinação'] },
+  // Carga nova há menos de 4 minutos, mas 13 bpm abaixo do teto já pedem mais carga.
+  { name: 'carga-nova-longe-do-teto', ...walk, stage: 1, into: 128, reached: true, atLoad: 105, bpm: [121, 122, 122, 121, 122, 122], expect: ['aumentar inclinação'] },
+  // 149 BPM, 14 acima do teto: a rampa sai inteira de uma vez.
   { name: 'acima-sustentado', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [147, 148, 149, 148, 149, 150], expect: ['reduzir inclinação'] },
-  { name: 'acima-marginal', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [137, 138, 137, 138, 137, 138], expect: hold },
+  // 3 bpm acima do teto já bastam: não há tolerância acima da faixa.
+  { name: 'acima-por-pouco', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [137, 138, 137, 138, 137, 138], expect: ['reduzir inclinação'] },
+  // Acima da faixa com a carga nova há 20 s: o alívio não espera a FC estabilizar.
+  { name: 'acima-sem-estabilizar', ...walk, stage: 1, into: 30, reached: true, atLoad: 20, bpm: [139, 140, 140, 141, 141, 142], expect: ['reduzir inclinação'] },
+  // O único intervalo que resta é o de 1 minuto depois de um ajuste.
   {
     name: 'acima-logo-apos-reducao',
     ...walk,
@@ -194,26 +212,29 @@ const reviewCases: ReviewCase[] = [
     change: { secondsAgo: 45, decision: 'reduzir inclinação', bpm: 147 },
     expect: hold,
   },
+  // Abaixo da faixa, mas com 25 s na carga: o BPM ainda é o do aquecimento.
   { name: 'abaixo-cedo-demais', ...walk, stage: 1, into: 40, reached: true, atLoad: 25, bpm: [102, 103, 103, 104, 105, 105], expect: hold },
+  // 107 BPM, 10 abaixo do piso: a carga sobe 1 MET de uma vez, o máximo de uma correção.
   { name: 'abaixo-estavel', ...walk, stage: 1, into: 420, reached: true, atLoad: 400, bpm: [106, 107, 106, 107, 106, 107], expect: ['aumentar inclinação'] },
   { name: 'aquecimento-abaixo', ...walk, stage: 0, into: 120, reached: true, atLoad: 100, bpm: [95, 96, 95, 96, 96, 95], expect: hold },
-  { name: 'volta-a-calma-caindo', ...walk, stage: 2, into: 50, reached: true, atLoad: 30, bpm: [146, 144, 142, 140, 138, 137], expect: hold },
+  // Acima da faixa alivia em qualquer etapa, mesmo com a FC já caindo. A etapa leve para em 3 km/h.
+  { name: 'volta-a-calma-acima-caindo', ...walk, stage: 2, into: 50, reached: true, atLoad: 30, bpm: [146, 144, 142, 140, 138, 137], expect: ['reduzir velocidade'] },
   { name: 'volta-a-calma-presa-acima', ...walk, stage: 2, into: 200, reached: true, atLoad: 180, bpm: [149, 149, 150, 149, 150, 150], expect: ['reduzir velocidade'] },
   // Junto do teto, uma leitura solta não muda a mediana nem pede ajuste.
   { name: 'pico-isolado-no-fim', ...walk, stage: 1, into: 500, reached: true, atLoad: 480, bpm: [132, 133, 132, 133, 133, 165], expect: hold },
   { name: 'abaixo-sem-atingir-alvo', ...walk, stage: 1, into: 400, reached: false, atLoad: 0, bpm: [105, 105, 106, 105, 106, 105], kmh: 5.2, expect: hold },
   { name: 'acima-e-subindo', ...walk, stage: 1, into: 300, reached: true, atLoad: 280, bpm: [141, 141, 142, 142, 143, 143], expect: ['reduzir inclinação'] },
-  // No meio do tiro a FC ainda está subindo: não é hora de aumentar a carga.
+  // No meio do tiro a FC ainda está disparando: não é hora de aumentar a carga.
   { name: 'tiro-abaixo-subindo', ...shots, stage: 1, into: 135, reached: true, atLoad: 125, bpm: [150, 151, 153, 154, 156, 157], expect: hold },
-  // Faltam 90 s, mas vêm mais 3 tiros: o ajuste vale para eles.
   { name: 'tiro-abaixo-estavel', ...shots, stage: 1, into: 150, reached: true, atLoad: 140, bpm: [150, 151, 150, 151, 150, 151], expect: ['aumentar inclinação'] },
-  { name: 'ultimo-tiro-sem-tempo', ...shots, stage: 7, into: 150, reached: true, atLoad: 140, bpm: [150, 151, 150, 151, 150, 151], expect: hold },
   // Correndo, a carga muda pela velocidade.
   { name: 'limiar-correndo-acima', session: threshold, pace: 8, grade: 1, stage: 1, into: 300, reached: true, atLoad: 280, bpm: [172, 173, 172, 173, 174, 173], expect: ['reduzir velocidade'] },
   // Em dia de recuperação a faixa é teto: abaixo dela nada sobe.
   { name: 'recuperacao-abaixo-do-teto', session: recovery, pace: 4.5, grade: 0, stage: 1, into: 600, reached: true, atLoad: 580, bpm: [84, 85, 84, 85, 85, 84], expect: hold },
-  // Caminhando abaixo de 6 km/h, a carga sobe pela velocidade.
-  { name: 'caminhada-abaixo-estavel', session: base, pace: 5, grade: 0, stage: 1, into: 420, reached: true, atLoad: 400, bpm: [104, 105, 104, 105, 104, 105], expect: ['aumentar velocidade'] },
+  // Caminhando abaixo de 5,6 km/h, a carga sobe pela velocidade.
+  { name: 'caminhada-na-faixa-longe-do-teto', session: base, pace: 5, grade: 0, stage: 1, into: 420, reached: true, atLoad: 400, bpm: [124, 125, 124, 125, 124, 125], expect: ['aumentar velocidade'] },
+  // Abaixo da faixa, a velocidade vai ao teto da caminhada e o resto sobe pela rampa.
+  { name: 'caminhada-abaixo-estavel', session: base, pace: 5, grade: 0, stage: 1, into: 420, reached: true, atLoad: 400, bpm: [104, 105, 104, 105, 104, 105], expect: ['aumentar inclinação'] },
 ];
 
 /**
@@ -258,17 +279,29 @@ function reviewInput(c: ReviewCase, now: number) {
       : [],
   };
   const left = stage.seconds - c.into;
-  // As mesmas regras locais da sessão: espera depois de um ajuste e lista de decisões possíveis.
-  if (c.change && c.change.secondsAgo < 60) return { local: 'espera após ajuste' };
-  const features = pulseFeatures(readings, dailyTarget(plan, adult, hr))!;
+  // As mesmas regras locais da sessão: espera depois de um ajuste, correção
+  // fora da faixa e lista de decisões possíveis.
+  if (c.change && c.change.secondsAgo < 60) return { local: 'espera após ajuste', answer: 'manter' };
+  const zone = dailyTarget(plan, adult, hr);
+  const features = pulseFeatures(readings, zone)!;
   const load = {
     stage,
     easy: stage.measure || plan.objective === 'Recuperação',
     reached: c.reached,
     secondsAtLoad: c.atLoad,
   };
+  const fix = correction(features, load);
+  if (fix) {
+    const measured = { at: now, speedKmh: kmh, inclinationPercent: stage.incline, heartRateBpm: null, energyKcal: null, distanceM: null };
+    const slope = bpmPerMet(features.median, metabolicCost(kmh, stage.incline), hr.rest);
+    const revised = correctedStage(stage, fix, correctionBpm(fix, features, zone) / slope, measured);
+    return {
+      local: 'correção do app: ' + revised.speed + ' km/h e ' + revised.incline + '%',
+      answer: revised === stage ? 'manter' : changeLabel(stage, revised),
+    };
+  }
   const allowed = allowedDecisions(features, load);
-  if (allowed.length === 1) return { local: 'regra local: ' + features.position };
+  if (allowed.length === 1) return { local: 'regra local: ' + features.position, answer: 'manter' };
   return {
     allowed,
     prompt: reviewPrompt({ workout: w, index: c.stage, left, load, readings, features, allowed, now }),
@@ -279,12 +312,19 @@ function reviewInput(c: ReviewCase, now: number) {
 export const reviewChecks = (now: number) =>
   reviewCases.map((c) => {
     const input = reviewInput(c, now);
-    return { name: c.name, expect: c.expect, local: input.local ?? null, user: input.prompt?.user ?? null };
+    return {
+      name: c.name,
+      expect: c.expect,
+      local: input.local ?? null,
+      /** O que o app faz sozinho, nos casos que não chegam à IA. */
+      answer: input.answer ?? null,
+      user: input.prompt?.user ?? null,
+    };
   });
 
 async function runReview(c: ReviewCase) {
   const input = reviewInput(c, Date.now());
-  if (!input.prompt) return { answer: 'manter', detail: input.local, called: false };
+  if (!input.prompt) return { answer: input.answer, detail: input.local, called: false };
   const { decision, reason } = await callModel('review', input.prompt, parseReview(input.allowed), {
     journal: false,
   });
@@ -308,61 +348,70 @@ const steady = (now: number, days: number[], p: Omit<Past, 'daysAgo'>) =>
 
 const planCases: PlanCase[] = [
   // Sem nenhum ponto: 1 + (135 − 70) ÷ 15 = 5,3 METs.
-  { name: 'base-sem-historico', session: base, history: () => [], expect: { pace: 6, grade: 2.5 } },
+  { name: 'base-sem-historico', session: base, history: () => [], expect: { pace: 5.6, grade: 3.5 } },
   // Um ponto só (3,5 km/h a 2% com 99 BPM) e repouso de 62: 16 bpm por MET, alvo de 5,5 METs.
   {
     name: 'base-um-ponto-com-repouso',
     session: base,
     history: (now) => [past(adult, now, { daysAgo: 1, session: recovery, pace: 3.5, grade: 2, bpmWork: 99, bpmEasy: 90, rest: 77 })],
-    expect: { pace: 6, grade: 3 },
+    expect: { pace: 5.6, grade: 3.5 },
   },
   // 133 BPM, a 2 do teto de 135: a carga já acertou o alvo.
   {
     name: 'base-junto-do-teto-repete',
     session: base,
-    history: (now) => steady(now, [2, 4, 7], { pace: 6, grade: 2, bpmWork: 133, bpmEasy: 108, drop: 16 }),
-    expect: { pace: 6, grade: 2 },
+    history: (now) => steady(now, [2, 4, 7], { pace: 5.6, grade: 2.5, bpmWork: 133, bpmEasy: 108, drop: 16 }),
+    expect: { pace: 5.6, grade: 2.5 },
     exact: true,
+  },
+  // A última base terminou a 6 km/h, que a escada já não tem: mesmo com 133 BPM, junto do
+  // teto, a carga não se repete. De 4,9 METs, o alvo vai a 5,0: vale a linha de 5,6 km/h e 2,5%.
+  {
+    name: 'base-acima-do-teto-da-caminhada',
+    session: base,
+    history: (now) => steady(now, [2, 4, 7], { pace: 6, grade: 2, bpmWork: 133, bpmEasy: 108, drop: 16 }),
+    expect: { pace: 5.6, grade: 2.5 },
   },
   // 126 BPM está na faixa, mas 9 abaixo do teto: a 15 bpm por MET, o alvo sobe de 4,9 para 5,5 METs.
   {
     name: 'base-na-faixa-sobe-ao-teto',
     session: base,
-    history: (now) => steady(now, [2, 4, 7], { pace: 6, grade: 2, bpmWork: 126, bpmEasy: 104, drop: 16 }),
-    expect: { pace: 6, grade: 3 },
+    history: (now) => steady(now, [2, 4, 7], { pace: 5.6, grade: 2.5, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+    expect: { pace: 5.6, grade: 3.5 },
   },
   // Dois pontos (4,9 METs com 108 e 3,4 com 88): 13 bpm por MET, alvo de 6,9 METs.
   {
     name: 'base-abaixo-da-faixa-sobe',
     session: base,
     history: (now) => [
-      ...steady(now, [2], { pace: 6, grade: 2, bpmWork: 108, bpmEasy: 92, drop: 15 }),
+      ...steady(now, [2], { pace: 5.6, grade: 2.5, bpmWork: 108, bpmEasy: 92, drop: 15 }),
       ...steady(now, [5], { session: recovery, pace: 5, grade: 0, bpmWork: 88, bpmEasy: 82 }),
     ],
-    expect: { pace: 6, grade: 6 },
+    expect: { pace: 5.6, grade: 6.5 },
   },
-  // 5,9 METs deram 146 BPM, com repouso de 70: 15,5 bpm por MET, alvo de 5,2 METs.
+  // 5,8 METs deram 146 BPM, com repouso de 70: 15,8 bpm por MET, alvo de 5,1 METs.
   {
     name: 'base-acima-da-faixa-recua',
     session: base,
-    history: (now) => steady(now, [2], { pace: 6, grade: 4, bpmWork: 146, bpmEasy: 118, drop: 12, rest: 85 }),
-    expect: { pace: 6, grade: 2.5 },
+    history: (now) => steady(now, [2], { pace: 5.6, grade: 4.5, bpmWork: 146, bpmEasy: 118, drop: 12, rest: 85 }),
+    expect: { pace: 5.6, grade: 3 },
   },
   // Primeiro VO₂máx, com pontos de base (4,9 METs, 126) e de recuperação (3,1 METs, 100): alvo de 8,0 METs.
+  // A caminhada a 5,6 km/h para em 7,5 METs (rampa de 8%): entra a primeira linha de corrida.
   {
     name: 'vo2-primeira-vez',
     session: vo2,
     history: (now) => [
-      ...steady(now, [1], { pace: 6, grade: 2, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+      ...steady(now, [1], { pace: 5.6, grade: 2.5, bpmWork: 126, bpmEasy: 104, drop: 16 }),
       ...steady(now, [2], { session: recovery, pace: 4.5, grade: 0, bpmWork: 100, bpmEasy: 92 }),
     ],
-    expect: { pace: 6, grade: 8 },
+    expect: { pace: 7, grade: 1 },
   },
   {
     name: 'limiar-correndo-junto-do-teto',
     session: threshold,
     history: (now) => [
-      ...steady(now, [1], { pace: 6, grade: 2, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+      ...steady(now, [1], { pace: 5.6, grade: 2.5, bpmWork: 126, bpmEasy: 104, drop: 16 }),
       ...steady(now, [7], { session: threshold, pace: 8.5, grade: 1, bpmWork: 160, bpmEasy: 120, drop: 24 }),
     ],
     expect: { pace: 8.5, grade: 1 },
@@ -374,7 +423,7 @@ const planCases: PlanCase[] = [
   {
     name: 'recuperacao-primeira-linha',
     session: recovery,
-    history: (now) => steady(now, [1, 3], { pace: 6, grade: 2, bpmWork: 150, bpmEasy: 120, drop: 16, rest: 85 }),
+    history: (now) => steady(now, [1, 3], { pace: 5.6, grade: 2.5, bpmWork: 150, bpmEasy: 120, drop: 16, rest: 85 }),
     expect: { pace: 3, grade: 0 },
   },
 ];
