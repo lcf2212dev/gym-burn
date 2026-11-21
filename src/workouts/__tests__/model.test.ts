@@ -96,24 +96,36 @@ it('monta as etapas de cada sessão com a estrutura do plano semanal', () => {
   });
 });
 
-it.each(options)('pede BPM no momento certo em %s', (_, option) => {
+it.each(options)('pede BPM a cada 3 minutos de treino, num relógio fixo, em %s', (_, option) => {
   // 10 km/h: o pedido vale também correndo.
   const plan = sessionPlan(option, 10, 1);
   expect(plan.stages.reduce((n, s) => n + s.seconds, 0)).toBe(45 * 60);
-  // A primeira etapa pede a FC de repouso logo no início, só enquanto a janela está aberta.
-  const first = plan.stages[0];
-  expect(currentCue(plan, 0)).toMatchObject({ index: 0, into: 0, measure: true });
+  // O primeiro pedido é a FC de repouso, logo no início e só enquanto a janela está aberta.
+  expect(currentCue(plan, 0)).toMatchObject({ index: 0, into: 0, pulse: 0, measure: true });
   expect(currentCue(plan, 0)?.stage.name).toBe('Aquecimento');
-  expect(currentCue(plan, 90)?.measure).toBe(false);
-  // Fechada a janela do repouso, a primeira etapa volta a aceitar leitura aos 3 minutos.
-  expect(currentCue(plan, 179)?.measure).toBe(false);
-  expect(currentCue(plan, 180)?.measure).toBe(true);
-  // As demais esperam a FC acompanhar a carga: 60 s nas leves, 120 s nas principais.
-  const second = currentCue(plan, first.seconds)!;
-  expect(second).toMatchObject({ index: 1, into: 0, measure: false });
+  expect(currentCue(plan, 0)).not.toHaveProperty('key');
+  expect(currentCue(plan, 89)).toMatchObject({ pulse: 0, measure: true });
+  expect(currentCue(plan, 90)).toMatchObject({ pulse: 0, measure: false });
+  expect(currentCue(plan, 179)).toMatchObject({ pulse: 0, measure: false });
+  // Daí em diante um pedido novo a cada 180 s de treino, sempre aberto.
+  expect(currentCue(plan, 180)).toMatchObject({ pulse: 1, measure: true });
+  expect(currentCue(plan, 359)).toMatchObject({ pulse: 1, measure: true });
+  expect(currentCue(plan, 360)).toMatchObject({ pulse: 2, measure: true });
+  // A troca de etapa não adia nem zera o pedido: o número segue o relógio do treino.
+  const first = plan.stages[0].seconds;
+  const before = currentCue(plan, first - 1)!;
+  const second = currentCue(plan, first)!;
+  expect(second).toMatchObject({ index: 1, into: 0, measure: true });
   expect(second.stage).toMatchObject({ measure: false, speed: 10 });
-  expect(currentCue(plan, first.seconds + 119)?.measure).toBe(false);
-  expect(currentCue(plan, first.seconds + 120)).toMatchObject({ into: 120, measure: true });
+  expect(second.pulse).toBe(Math.floor(first / 180));
+  expect(before.pulse).toBe(Math.floor((first - 1) / 180));
+  // Nem nos últimos segundos de uma etapa o pedido deixa de valer.
+  const off = Array.from({ length: 45 * 60 - 180 }, (_, i) => 180 + i).filter((elapsed) => {
+    const cue = currentCue(plan, elapsed)!;
+    return cue.pulse !== Math.floor(elapsed / 180) || !cue.measure;
+  });
+  expect(off).toEqual([]);
+  expect(currentCue(plan, 45 * 60 - 1)).toMatchObject({ pulse: 14, left: 1, measure: true });
   expect(currentCue(plan, 45 * 60)).toBeNull();
 });
 

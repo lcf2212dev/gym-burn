@@ -1,5 +1,5 @@
 import type { TreadmillSample } from '@/treadmill/types';
-import { currentCue, PULSE_INTERVAL_SECONDS, validBpm } from './model';
+import { currentCue, validBpm } from './model';
 
 export type Cue = NonNullable<ReturnType<typeof currentCue>>;
 export type Guidance = {
@@ -7,15 +7,17 @@ export type Guidance = {
   speedReached: boolean;
   inclineReached: boolean;
   adjusted: boolean;
-  /** Horário do pedido de batimentos em aberto ou, depois de atendido, do último. */
+  /** Desde quando valem os alvos em vigor: o começo da etapa ou o último ajuste de carga. */
+  targetsSince: number;
+  /** Número do pedido de batimentos em vigor: o guia abre um a cada 3 minutos de treino. */
+  bpmSlot: number;
+  /** Horário em que o pedido de batimentos em vigor abriu. */
   bpmRequestedAt: number | null;
   /** Leituras válidas recebidas desde o pedido. */
   bpmCount: number;
   /** Horário da última leitura contada, para não contar a mesma amostra duas vezes. */
   bpmAt: number | null;
   bpmReceived: boolean;
-  /** Segundo da etapa em que o pedido foi atendido: o seguinte abre 3 minutos depois. */
-  bpmDoneInto: number | null;
 };
 
 /**
@@ -23,12 +25,19 @@ export type Guidance = {
  * descartadas pela revisão, que precisa de mais 4.
  */
 export const PULSE_READINGS = 6;
-/** Um pedido repetido só abre se ainda houver este tempo de etapa para segurar o sensor. */
-const PULSE_MIN_LEFT_SECONDS = 30;
 
+/**
+ * O aviso que a tela mostra. Com um pedido de batimentos e um ajuste da
+ * esteira em aberto ao mesmo tempo, vale o mais recente: a etapa que acabou de
+ * começar passa na frente de um pedido antigo, e o pedido novo passa na frente
+ * de um ajuste que a pessoa deixou para lá. Assim nenhum dos dois esconde o
+ * outro por mais de 3 minutos. A FC de repouso, no começo do treino, vem
+ * sempre antes de acelerar.
+ */
 export function pendingAction(g: Guidance | null) {
   if (!g) return null;
-  if (g.bpmRequestedAt !== null && !g.bpmReceived) return 'bpm';
+  const bpm = g.bpmRequestedAt !== null && !g.bpmReceived;
+  if (bpm && (g.adjusted || g.bpmSlot === 0 || g.bpmRequestedAt! > g.targetsSince)) return 'bpm';
   return g.adjusted ? null : 'adjust';
 }
 
@@ -40,17 +49,10 @@ export function advanceGuidance(
 ): Guidance | null {
   if (!cue) return null;
   const stage = previous?.index === cue.index ? previous : null;
-  // Três minutos depois de uma leitura atendida o guia pede outra: o estado do
-  // pedido recomeça do zero, e o aviso reabre.
-  const again =
-    cue.measure &&
-    stage?.bpmDoneInto != null &&
-    cue.into - stage.bpmDoneInto >= PULSE_INTERVAL_SECONDS &&
-    cue.left >= PULSE_MIN_LEFT_SECONDS;
-  const prior: Guidance | null =
-    stage && again
-      ? { ...stage, bpmRequestedAt: null, bpmCount: 0, bpmAt: null, bpmReceived: false, bpmDoneInto: null }
-      : stage;
+  // O pedido de batimentos segue o relógio do treino, não a etapa: a cada 3
+  // minutos abre um novo, do zero, e o aviso reabre. Um pedido sem resposta
+  // atravessa a troca de etapa e é trocado pelo seguinte.
+  const prior = previous?.bpmSlot === cue.pulse ? previous : null;
   const fresh = (at: number | null | undefined) => at != null && at <= now && now - at <= 5000;
   // Os pacotes FTMS podem vir divididos. Cada alvo precisa de uma leitura
   // recente do próprio campo, mesmo quando as notificações continuam chegando.
@@ -64,9 +66,9 @@ export function advanceGuidance(
     fresh(sample.inclineAt) &&
     sample.inclinationPercent !== null &&
     Math.abs(sample.inclinationPercent - cue.stage.incline) < 0.251;
-  const adjusted = !!prior?.adjusted || (speedReached && inclineReached);
-  // Um pedido que a etapa deixou de fazer sem ter sido atendido caduca: é o
-  // caso da FC de repouso, que só vale no início do treino.
+  const adjusted = !!stage?.adjusted || (speedReached && inclineReached);
+  // Um pedido que deixou de valer sem ter sido atendido caduca: é o caso da
+  // FC de repouso, que só vale no início do treino.
   const requested = prior?.bpmRequestedAt ?? null;
   const bpmRequestedAt = cue.measure ? (requested ?? now) : prior?.bpmReceived ? requested : null;
   const counted =
@@ -77,16 +79,16 @@ export function advanceGuidance(
     fresh(sample.at) &&
     validBpm(sample.heartRateBpm);
   const bpmCount = bpmRequestedAt === null ? 0 : (prior?.bpmCount ?? 0) + (counted ? 1 : 0);
-  const bpmReceived = !!prior?.bpmReceived || bpmCount >= PULSE_READINGS;
   return {
     index: cue.index,
     speedReached,
     inclineReached,
     adjusted,
+    targetsSince: stage?.targetsSince ?? now,
+    bpmSlot: cue.pulse,
     bpmRequestedAt,
     bpmCount,
     bpmAt: counted ? sample.at : (prior?.bpmAt ?? null),
-    bpmReceived,
-    bpmDoneInto: bpmReceived ? (prior?.bpmDoneInto ?? cue.into) : null,
+    bpmReceived: !!prior?.bpmReceived || bpmCount >= PULSE_READINGS,
   };
 }

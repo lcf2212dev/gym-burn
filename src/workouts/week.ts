@@ -16,8 +16,8 @@ export type Session = {
 
 /** Faixa dos blocos de esforço de cada intensidade, em % da FC máxima. */
 export const zones: Record<Objective, [number, number]> = {
-  // O plano pede "abaixo de 60–65%": o teto fica em 60 e a revisão só alivia
-  // a carga com a FC alguns bpm acima dele.
+  // O plano pede "abaixo de 60–65%": o teto fica em 60, e o app alivia a carga
+  // assim que a FC passa dele.
   Recuperação: [50, 60],
   'Base aeróbica': [65, 75],
   Limiar: [85, 90],
