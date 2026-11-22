@@ -9,7 +9,7 @@ import { useTreadmill } from '@/treadmill/treadmill-context';
 import { preparePlan, readPlan } from '@/workouts/storage';
 import { generatePlan } from '@/workouts/ai';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
-import { RUN_FROM_KMH, WALK_TOP_KMH, type Plan } from '@/workouts/model';
+import { validLoad, type Plan } from '@/workouts/model';
 import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
 import { describe, sessionMinutes, week, zones, zoneSpan } from '@/workouts/week';
 import { formatDecimal, formatDuration } from '@/utils/format';
@@ -32,8 +32,8 @@ export default function Training() {
     // alvo entre o teto da caminhada e o começo da corrida é de antes desse teto:
     // nos dois casos vale gerar outro.
     const stored = readPlan(source, profile);
-    const unwalkable = stored?.stages.some((s) => s.speed > WALK_TOP_KMH && s.speed < RUN_FROM_KMH);
-    return stored?.zone && !unwalkable ? stored : null;
+    const invalid = stored?.stages.some((s) => !validLoad(s.speed, s.incline));
+    return stored?.zone && !invalid ? stored : null;
   });
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(1);

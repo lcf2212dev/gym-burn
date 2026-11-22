@@ -12,10 +12,11 @@ import { formatClock } from '@/utils/format';
 
 const kindLabel: Record<string, string> = {
   plan: 'Plano do dia',
+  // Antes a IA também revia a carga durante o treino: o diário antigo ainda traz essas chamadas.
   review: 'Revisão durante o treino',
   assess: 'Avaliação',
 };
-const kinds = ['plan', 'review', 'assess'];
+const kinds = ['plan', 'assess'];
 function journal(): AiCall[] {
   try {
     return readCalls();
@@ -27,7 +28,7 @@ function journal(): AiCall[] {
 /**
  * Diário das chamadas à IA e cenários fixos que medem a precisão dela com a
  * chave salva neste aparelho. Também abre por link, para rodar pelo adb:
- * `gymburn://diagnostico?rodar=1&n=3&tipo=review`.
+ * `gymburn://diagnostico?rodar=1&n=3&tipo=plan`.
  */
 export default function Diagnostics() {
   useKeepAwake();
@@ -74,8 +75,8 @@ export default function Diagnostics() {
     <WorkoutPage title="Diagnóstico da IA">
       <Text style={styles.body}>
         Os cenários enviam situações fixas de treino à DeepSeek com a sua chave e comparam a
-        resposta com o desfecho esperado. São {scenarioCount.plan} de plano, {scenarioCount.review}{' '}
-        de revisão e {scenarioCount.assess} de avaliação, 3 vezes cada. Uma rodada completa leva
+        resposta com o desfecho esperado. São {scenarioCount.plan} de plano e{' '}
+        {scenarioCount.assess} de avaliação, 3 vezes cada. Uma rodada completa leva
         vários minutos e custa centavos de dólar do seu saldo.
       </Text>
       <UiButton

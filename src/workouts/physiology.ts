@@ -184,7 +184,7 @@ export function aimBand(zone: Zone, objective: string) {
 
 /**
  * Custo metabólico de uma carga, em METs com uma casa decimal, pelas equações
- * do ACSM: caminhada abaixo de 7 km/h, corrida a partir daí. A frequência
+ * do ACSM: caminhada abaixo de 6 km/h, corrida a partir daí. A frequência
  * cardíaca sobe quase em linha reta com ele, o que permite comparar cargas
  * diferentes.
  */
@@ -234,9 +234,10 @@ export function energyKcal(w: Workout) {
 
 /**
  * As cargas entre as quais a IA escolhe, da mais leve à mais pesada:
- * caminhada plana até 5,6 km/h, depois rampa a 5,6 km/h até 8%, depois corrida
- * a 1%. É o caminho que não pede corrida de quem ainda chega à faixa andando:
- * nenhuma linha fica entre o teto da caminhada e o começo da corrida.
+ * caminhada plana até 5,2 km/h, depois rampa a 5,2 km/h até 7,5%, depois
+ * corrida a 1%, de 6 km/h em diante. É o caminho que não pede corrida de quem
+ * ainda chega à faixa andando: nenhuma linha fica entre o teto da caminhada e
+ * o começo da corrida.
  */
 export function loadLadder() {
   const rows: { pace: number; grade: number; mets: number }[] = [];

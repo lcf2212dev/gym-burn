@@ -4,7 +4,7 @@ import { WorkoutSession } from '../session';
 import { pendingAction } from '../guidance';
 import { makePlan, type Plan } from '../model';
 import { dailyTarget } from '../physiology';
-import { assess, reviewIntensity } from '../ai';
+import { assess } from '../ai';
 import {
   clearData,
   clearSource,
@@ -14,7 +14,7 @@ import {
   saveWorkout,
 } from '../storage';
 
-jest.mock('../ai', () => ({ assess: jest.fn(), reviewIntensity: jest.fn() }));
+jest.mock('../ai', () => ({ assess: jest.fn() }));
 jest.mock('../storage', () => ({
   clearData: jest.fn(),
   clearSource: jest.fn(),
@@ -25,7 +25,6 @@ jest.mock('../storage', () => ({
 }));
 
 const T0 = 1_800_000_000_000;
-type Reply = Awaited<ReturnType<typeof reviewIntensity>>;
 
 // 36 anos: máxima estimada de 184. Em "Base aeróbica", faixa de 101 a 120 BPM.
 function setup() {
@@ -51,11 +50,11 @@ function setup() {
   session.connect();
   let now = T0;
   /** Um segundo de esteira: avança o relógio e entrega uma amostra. */
-  function packet(speedKmh: number, bpm: number | null = null, incline = 0) {
+  function packet(speedKmh: number, bpm: number | null = null, incline = 0, strap = false) {
     now += 1000;
     jest.setSystemTime(now);
     snapshot.samples = [
-      ...snapshot.samples.slice(-119),
+      ...snapshot.samples.slice(-299),
       {
         speedAt: now,
         inclineAt: now,
@@ -63,6 +62,7 @@ function setup() {
         speedKmh,
         inclinationPercent: incline,
         heartRateBpm: bpm,
+        ...(strap ? { heartRateSource: 'strap' as const } : {}),
         energyKcal: null,
         distanceM: null,
       },
@@ -72,11 +72,18 @@ function setup() {
   const walk = (seconds: number, speedKmh: number, bpm: number | null = null, incline = 0) => {
     for (let i = 0; i < seconds; i++) packet(speedKmh, bpm, incline);
   };
+  /** Segundos de esteira com a leitura contínua da cinta em cada amostra. `each` roda depois de cada um. */
+  const strap = (seconds: number, speedKmh: number, bpm: number, incline = 0, each = () => {}) => {
+    for (let i = 0; i < seconds; i++) {
+      packet(speedKmh, bpm, incline, true);
+      each();
+    }
+  };
   /** Uma pegada no sensor com as leituras dadas, uma por segundo. */
   const hold = (speedKmh: number, values: number[], incline = 0) => {
     for (const bpm of values) packet(speedKmh, bpm, incline);
   };
-  return { session, snapshot, notify: () => notify(), walk, hold };
+  return { session, snapshot, notify: () => notify(), walk, hold, strap };
 }
 
 const flush = async () => {
@@ -92,6 +99,8 @@ const short = (warmup: number, reps: number, work: number, recovery: number): Pl
 const continuous = () => short(2, 1, 6, 0);
 // Aquecimento de 120 s, dois blocos de esforço de 120 s, cada um com 60 s de recuperação.
 const intervals = () => short(2, 2, 2, 1);
+// Aquecimento de 120 s e um bloco de esforço de 20 min: dá tempo de a carga estabilizar.
+const long = () => short(2, 1, 20, 0);
 const loads = (plan: Plan | null | undefined) => plan?.stages.map((s) => [s.speed, s.incline]);
 
 beforeEach(() => {
@@ -137,6 +146,8 @@ it('registra o treino livre por etapa, preserva a sessão se a IA falhar e guard
   expect(saved.log![0]).toMatchObject({ ms: 199000, bpmCount: 200, top: 105 });
   // Os batimentos ficam também minuto a minuto, para a linha do tempo do painel.
   expect(saved.beats).toEqual([[6300, 60], [6300, 60], [6300, 60], [2100, 20]]);
+  // E a carga medida: km/h × ms, % × ms e os ms de cada minuto em movimento.
+  expect(saved.loads).toEqual([[236000, 0, 59000], [240000, 0, 60000], [240000, 0, 60000], [80000, 0, 20000]]);
   expect(session.snapshot().error).toBe('sem rede');
   await session.evaluate(saved);
   expect(assess).toHaveBeenCalledTimes(2);
@@ -160,56 +171,60 @@ it('lê a FC de repouso nas primeiras leituras do treino', () => {
   expect(session.snapshot().guidance?.bpmReceived).toBe(true);
 });
 
-it('com a cinta no peito o treino corre sem pedido de batimentos, mede o repouso e revê a carga', async () => {
-  const { session, snapshot, notify } = setup();
-  jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'manter', reason: '' });
+it('com a cinta no peito o treino corre sem pedido de batimentos, mede o repouso e ajusta a carga', () => {
+  const { session, strap } = setup();
   // Aquecimento de 120 s a 4 km/h e um bloco de esforço de 6 min a 5 km/h e 1%.
   session.start(continuous());
-  let now = T0;
   let asked = 0;
-  /** Um segundo de esteira com a leitura contínua da cinta em cada amostra. */
-  const strapWalk = (seconds: number, speedKmh: number, bpm: number, incline = 0) => {
-    for (let i = 0; i < seconds; i++) {
-      now += 1000;
-      jest.setSystemTime(now);
-      snapshot.samples = [
-        ...snapshot.samples.slice(-119),
-        {
-          speedAt: now,
-          inclineAt: now,
-          at: now,
-          speedKmh,
-          inclinationPercent: incline,
-          heartRateBpm: bpm,
-          heartRateSource: 'strap',
-          energyKcal: null,
-          distanceM: null,
-        },
-      ];
-      notify();
-      if (pendingAction(session.snapshot().guidance) === 'bpm') asked++;
-    }
+  const count = () => {
+    if (pendingAction(session.snapshot().guidance) === 'bpm') asked++;
   };
-  strapWalk(120, 4, 80);
+  strap(120, 4, 80, 0, count);
   // A FC de repouso sai das primeiras leituras, sem ninguém segurar o sensor.
   expect(session.snapshot().active?.restBpm).toBe(80);
-  expect(reviewIntensity).not.toHaveBeenCalled();
-  // No bloco de esforço, 10 bpm abaixo do teto: com 90 s na carga a leitura vai à IA.
-  strapWalk(200, 5, 110, 1);
-  await flush();
-
+  expect(session.snapshot().coach).toBe('Etapa leve · 80 BPM');
+  // No bloco de esforço, 10 bpm abaixo do teto. A primeira revisão ainda pega menos de 90 s na carga.
+  strap(70, 5, 110, 1, count);
+  expect(session.snapshot().coach).toBe('10 bpm abaixo do teto · 110 BPM · menos de 90 s nesta carga');
+  expect(session.snapshot().active?.changes).toEqual([]);
+  // Um minuto depois a carga sobe, sem consultar ninguém. Com repouso de 65, são 16 bpm por
+  // MET: os 6 bpm que cabem (3 ficam reservados, a carga é nova) valem 0,37 MET.
+  strap(60, 5, 110, 1, count);
   expect(asked).toBe(0);
-  expect(reviewIntensity).toHaveBeenCalled();
-  expect(jest.mocked(reviewIntensity).mock.calls[0][0]).toMatchObject({
-    index: 1,
-    features: { median: 110, position: 'na faixa' },
-  });
-  expect(session.snapshot().active?.totals.bpmCount).toBeGreaterThan(300);
+  expect(session.snapshot().coach).toBe('10 bpm abaixo do teto · 110 BPM · carga aumentada');
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1.5 });
+  expect(session.snapshot().active?.changes).toEqual([
+    expect.objectContaining({ stage: 1, decision: 'aumentar inclinação', bpm: 110, from: [5, 1], to: [5.2, 1.5] }),
+  ]);
+  // As leituras da cinta ficam contadas à parte no registro.
+  const totals = session.snapshot().active!.totals;
+  expect(totals.bpmCount).toBe(250);
+  expect(totals.strapCount).toBe(250);
+});
+
+it('com a cinta, segundos acima do teto não aliviam a carga; um minuto acima, sim', () => {
+  const { session, strap } = setup();
+  session.start(continuous());
+  strap(120, 4, 80);
+  // 119 BPM, a 1 do teto de 120: no alvo.
+  strap(100, 5, 119, 1);
+  expect(session.snapshot().coach).toBe('No alvo · 119 BPM');
+  // 9 segundos em 123 e de volta a 119: a mediana do minuto não sai da faixa.
+  strap(9, 5, 123, 1);
+  strap(60, 5, 119, 1);
+  expect(session.snapshot().active?.changes).toEqual([]);
+  expect(session.snapshot().coach).toBe('No alvo · 119 BPM');
+  // 123 de verdade, por mais de meio minuto: aí a carga é aliviada.
+  strap(70, 5, 123, 1);
+  expect(session.snapshot().coach).toBe('Acima da faixa · 123 BPM · carga reduzida');
+  // 6 bpm até 3 abaixo do teto, a 20,6 bpm por MET: 0,29 MET, que são 0,1 km/h e meio ponto de rampa.
+  expect(session.snapshot().active?.changes).toEqual([
+    expect.objectContaining({ stage: 1, decision: 'reduzir velocidade', bpm: 123, from: [5, 1], to: [4.9, 0.5] }),
+  ]);
 });
 
 it('pede os batimentos a cada 3 minutos de treino, num relógio que atravessa a troca de etapa', () => {
   const { session, walk } = setup();
-  jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'manter', reason: '' });
   // Aquecimento de 300 s e um bloco de esforço de 1200 s a 5 km/h e 1%.
   session.start(short(5, 1, 20, 0));
   const guidance = () => session.snapshot().guidance!;
@@ -244,47 +259,75 @@ it('pede os batimentos a cada 3 minutos de treino, num relógio que atravessa a 
   expect(pendingAction(guidance())).toBe('bpm');
 });
 
-it('dentro da faixa e longe do teto consulta a IA e sobe a carga; junto do teto ela mantém', async () => {
+it('dentro da faixa e longe do teto o app sobe a carga; junto do teto mantém', () => {
   const { session, walk } = setup();
-  jest
-    .mocked(reviewIntensity)
-    .mockResolvedValueOnce({ decision: 'aumentar velocidade', reason: '10 bpm abaixo do teto' })
-    .mockResolvedValue({ decision: 'manter', reason: '2 bpm abaixo do teto' });
   // Aquecimento de 120 s e um bloco de esforço de 6 min a 5 km/h e 1%, com a faixa de 101 a 120 BPM.
   session.start(continuous());
   walk(121, 4);
-  // Com os alvos atingidos há menos de 2 minutos a FC ainda não estabilizou: resolve sem a IA.
+  // Com os alvos atingidos há menos de 90 s o BPM ainda é o da carga anterior.
   walk(60, 5, null, 1);
   walk(6, 5, 110, 1);
   expect(session.snapshot().coach).toBe('10 bpm abaixo do teto · 110 BPM · menos de 90 s nesta carga');
-  expect(reviewIntensity).not.toHaveBeenCalled();
+  expect(session.snapshot().active?.changes).toEqual([]);
+  // Com 2 minutos na carga, 3 dos 10 bpm ficam reservados e 1 é a folga até o teto: os 6 que
+  // sobram, a 15 bpm por MET, valem 0,4 MET. Cabem 0,2 km/h e meio ponto de rampa.
   walk(60, 5, null, 1);
   walk(6, 5, 110, 1);
-  expect(reviewIntensity).toHaveBeenCalledTimes(1);
-  expect(jest.mocked(reviewIntensity).mock.calls[0][0]).toMatchObject({
-    index: 1,
-    allowed: ['manter', 'aumentar velocidade'],
-    features: { median: 110, position: 'na faixa', belowTop: 10 },
-  });
-  await flush();
-  expect(session.snapshot().coach).toBe('IA · aumentar velocidade · 10 bpm abaixo do teto');
-  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1 });
+  expect(session.snapshot().coach).toBe('10 bpm abaixo do teto · 110 BPM · carga aumentada');
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1.5 });
   expect(session.snapshot().active?.changes).toEqual([
-    expect.objectContaining({ stage: 1, decision: 'aumentar velocidade', bpm: 110 }),
+    { second: 252, stage: 1, decision: 'aumentar inclinação', bpm: 110, from: [5, 1], to: [5.2, 1.5] },
   ]);
-  // Na carga nova há 2 minutos e a 2 bpm do teto: a leitura vai à IA, que mantém.
-  walk(125, 5.2, null, 1);
-  walk(6, 5.2, 118, 1);
-  expect(reviewIntensity).toHaveBeenCalledTimes(2);
-  expect(jest.mocked(reviewIntensity).mock.calls[1][0]).toMatchObject({
-    features: { median: 118, belowTop: 2 },
-  });
-  await flush();
-  expect(session.snapshot().coach).toBe('IA · manter · 2 bpm abaixo do teto');
-  expect(session.snapshot().active?.plan?.stages[1].speed).toBe(5.2);
+  expect(pendingAction(session.snapshot().guidance)).toBe('adjust');
+  // Na carga nova, a 2 bpm do teto: o alvo foi atingido e nada muda.
+  walk(125, 5.2, null, 1.5);
+  walk(6, 5.2, 118, 1.5);
+  expect(session.snapshot().coach).toBe('No alvo · 118 BPM');
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1.5 });
+  expect(session.snapshot().active?.changes).toHaveLength(1);
 });
 
-it('resolve sem a IA o que não tem escolha: etapa leve abaixo da faixa e BPM na faixa', () => {
+it('o ajuste fino sobe pela velocidade até 5,2 km/h e não dá o degrau que passaria do teto', () => {
+  const { session, walk } = setup();
+  session.start(long());
+  walk(121, 4);
+  // 116 BPM com a carga estabilizada (4 min): cabem 3 bpm, 0,2 MET. São 0,2 km/h.
+  walk(245, 5, null, 1);
+  walk(6, 5, 116, 1);
+  expect(session.snapshot().coach).toBe('4 bpm abaixo do teto · 116 BPM · carga aumentada');
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1 });
+  expect(session.snapshot().active?.changes).toEqual([
+    expect.objectContaining({ decision: 'aumentar velocidade', from: [5, 1], to: [5.2, 1] }),
+  ]);
+  // Na velocidade máxima da caminhada só resta a rampa, e meio ponto (0,22 MET) passaria dos 3 bpm que cabem.
+  walk(245, 5.2, null, 1);
+  walk(6, 5.2, 116, 1);
+  expect(session.snapshot().coach).toBe('4 bpm abaixo do teto · 116 BPM · o próximo degrau passaria do teto');
+  expect(session.snapshot().active?.changes).toHaveLength(1);
+  // Com 7 bpm de folga o meio ponto cabe.
+  walk(60, 5.2, null, 1);
+  walk(6, 5.2, 113, 1);
+  expect(session.snapshot().coach).toBe('7 bpm abaixo do teto · 113 BPM · carga aumentada');
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.2, incline: 1.5 });
+  // Carga nova há 2 minutos, a 5 bpm do teto: a FC ainda sobe sozinha, e o app espera.
+  walk(125, 5.2, null, 1.5);
+  walk(6, 5.2, 115, 1.5);
+  expect(session.snapshot().coach).toBe('5 bpm abaixo do teto · 115 BPM · BPM ainda se ajustando à carga');
+  expect(session.snapshot().active?.changes).toHaveLength(2);
+});
+
+it('nos 2 últimos minutos do último bloco a carga não sobe mais', () => {
+  const { session, walk } = setup();
+  session.start(continuous());
+  walk(121, 4);
+  // O bloco de 6 min vai de 2:00 a 8:00: aos 6:10 faltam menos de 2 minutos.
+  walk(245, 5, null, 1);
+  walk(6, 5, 110, 1);
+  expect(session.snapshot().coach).toBe('10 bpm abaixo do teto · 110 BPM · fim do bloco');
+  expect(session.snapshot().active?.changes).toEqual([]);
+});
+
+it('não mexe na carga onde não há o que ajustar: etapa leve abaixo da faixa e BPM na faixa', () => {
   const { session, walk } = setup();
   session.start(continuous());
   walk(3, 4);
@@ -299,7 +342,7 @@ it('resolve sem a IA o que não tem escolha: etapa leve abaixo da faixa e BPM na
   walk(8, 5, 120, 1);
   expect(session.snapshot().guidance?.index).toBe(1);
   expect(session.snapshot().coach).toBe('No teto da faixa · 120 BPM');
-  expect(reviewIntensity).not.toHaveBeenCalled();
+  expect(session.snapshot().active?.changes).toEqual([]);
 });
 
 it('em dia de recuperação a faixa é teto: abaixo dela a carga não sobe', () => {
@@ -313,10 +356,10 @@ it('em dia de recuperação a faixa é teto: abaixo dela a carga não sobe', () 
   walk(30, 5, null, 1);
   walk(8, 5, 100, 1);
   expect(session.snapshot().coach).toBe('Na faixa · 100 BPM');
-  expect(reviewIntensity).not.toHaveBeenCalled();
+  expect(session.snapshot().active?.changes).toEqual([]);
 });
 
-it('acima da faixa corrige na hora sem a IA, leva aos blocos iguais e espera 60 s antes de corrigir de novo', () => {
+it('acima da faixa corrige na hora, leva aos blocos iguais e espera 60 s antes de corrigir de novo', () => {
   const { session, walk } = setup();
   // Aquecimento de 120 s, depois blocos de esforço de 120 s nas etapas 1 e 3.
   session.start(intervals());
@@ -329,12 +372,13 @@ it('acima da faixa corrige na hora sem a IA, leva aos blocos iguais e espera 60 
   expect(session.snapshot().active?.changes).toEqual([]);
   // Na primeira medida, com 11 s na carga e a FC ainda subindo do aquecimento, o app já alivia.
   walk(1, 5, 125, 1);
-  expect(reviewIntensity).not.toHaveBeenCalled();
   const { active, guidance, coach, minimizedCue } = session.snapshot();
   expect(coach).toBe('Acima da faixa · 125 BPM · carga reduzida');
-  // 8 bpm acima de 117 a 15 bpm por MET: 0,53 METs a menos, primeiro a rampa e depois a velocidade.
-  expect(loads(active?.plan)).toEqual([[4, 0], [4.7, 0], [4, 0], [4.7, 0], [4, 0], [4, 0]]);
-  expect(active?.changes).toEqual([{ second: 131, stage: 1, decision: 'reduzir velocidade', bpm: 125 }]);
+  // 8 bpm acima de 117 a 15 bpm por MET: 0,53 METs a menos, que saem da rampa e da velocidade.
+  expect(loads(active?.plan)).toEqual([[4, 0], [4.8, 0], [4, 0], [4.8, 0], [4, 0], [4, 0]]);
+  expect(active?.changes).toEqual([
+    { second: 131, stage: 1, decision: 'reduzir velocidade', bpm: 125, from: [5, 1], to: [4.8, 0] },
+  ]);
   expect(active?.totals.movingMs).toBe(131000);
   expect(saveWorkout).toHaveBeenLastCalledWith(expect.objectContaining({ changes: active?.changes }));
   // O aviso de ajuste reabre, na frente do resto.
@@ -342,18 +386,36 @@ it('acima da faixa corrige na hora sem a IA, leva aos blocos iguais e espera 60 
   expect(pendingAction(guidance!)).toBe('adjust');
   expect(minimizedCue).toBeNull();
   // A FC ainda está respondendo ao ajuste: nada de nova correção no minuto seguinte.
-  walk(30, 4.7, null, 0);
-  walk(10, 4.7, 125, 0);
+  walk(30, 4.8, null, 0);
+  walk(10, 4.8, 125, 0);
   expect(session.snapshot().active?.changes).toHaveLength(1);
-  // Passado o minuto, a pegada seguinte acima da faixa corrige de novo.
-  walk(15, 4.7, null, 0);
-  walk(10, 4.7, 125, 0);
+  // Passado o minuto, a pegada seguinte, ainda 5 bpm acima do teto, corrige de novo.
+  walk(15, 4.8, null, 0);
+  walk(10, 4.8, 125, 0);
   const changes = session.snapshot().active?.changes;
   expect(changes).toHaveLength(2);
   expect(changes?.[1]).toMatchObject({ stage: 1, decision: 'reduzir velocidade', bpm: 125 });
   expect(changes![1].second - changes![0].second).toBeGreaterThanOrEqual(60);
-  expect(session.snapshot().active?.plan?.stages[1].speed).toBeLessThan(4.7);
-  expect(reviewIntensity).not.toHaveBeenCalled();
+  expect(session.snapshot().active?.plan?.stages[1].speed).toBeLessThan(4.8);
+});
+
+it('depois de um alívio, 1 bpm acima do teto espera 3 minutos antes de aliviar de novo', () => {
+  const { session, walk } = setup();
+  session.start(continuous());
+  walk(121, 4);
+  walk(5, 5, null, 1);
+  walk(6, 5, 125, 1);
+  expect(session.snapshot().active?.changes).toHaveLength(1);
+  // Um minuto depois a FC ainda está descendo: 121, a 1 do teto, não pede outro corte.
+  walk(60, 4.8, null, 0);
+  walk(6, 4.8, 121, 0);
+  expect(session.snapshot().coach).toBe('Acima da faixa · 121 BPM · aguardando o efeito da redução');
+  expect(session.snapshot().active?.changes).toHaveLength(1);
+  // Três minutos depois do alívio, se continua acima, a carga desce de novo.
+  walk(115, 4.8, null, 0);
+  walk(6, 4.8, 121, 0);
+  expect(session.snapshot().coach).toBe('Acima da faixa · 121 BPM · carga reduzida');
+  expect(session.snapshot().active?.changes).toHaveLength(2);
 });
 
 it('acima da faixa também corrige em etapa leve, com poucos segundos de pegada', () => {
@@ -364,7 +426,6 @@ it('acima da faixa também corrige em etapa leve, com poucos segundos de pegada'
   walk(5, 4, 125);
   expect(session.snapshot().active?.changes).toEqual([]);
   walk(1, 4, 125);
-  expect(reviewIntensity).not.toHaveBeenCalled();
   expect(session.snapshot().coach).toBe('Acima da faixa · 125 BPM · carga reduzida');
   // Etapa leve não leva o ajuste a outras etapas: o bloco e a volta à calma ficam como estavam.
   // 11 bpm até 3 abaixo do teto pediriam 2,8 km/h: a etapa leve para em 3.
@@ -385,49 +446,19 @@ it('quanto mais longe do teto, maior a redução, e nenhum alvo exige aumento no
   };
   // 8, 13 e 33 bpm acima de 117: 0,53, 0,87 e 2,2 METs a menos.
   expect([125, 130, 150].map((bpm) => reduced(bpm))).toEqual([
-    expect.objectContaining({ speed: 4.7, incline: 0 }),
-    expect.objectContaining({ speed: 4, incline: 0 }),
-    expect.objectContaining({ speed: 1.2, incline: 0 }),
+    expect.objectContaining({ speed: 4.8, incline: 0 }),
+    expect.objectContaining({ speed: 4.1, incline: 0 }),
+    expect.objectContaining({ speed: 1.3, incline: 0 }),
   ]);
   // A pessoa já anda abaixo dos alvos (4,5 km/h e 0,5% no lugar de 5 e 1%): a conta parte do
   // medido, 3,34 METs, e tira dali os mesmos 0,53 METs.
   const slower = reduced(125, 4.5, 0.5);
   expect(slower.speed).toBeLessThanOrEqual(4.5);
   expect(slower.incline).toBeLessThanOrEqual(0.5);
-  expect(slower).toMatchObject({ speed: 3.7, incline: 0 });
+  expect(slower).toMatchObject({ speed: 3.8, incline: 0 });
 });
 
-it('acima da faixa cancela a revisão da IA que ainda não voltou', async () => {
-  const { session, walk } = setup();
-  const pending: ((v: Reply) => void)[] = [];
-  jest.mocked(reviewIntensity).mockImplementation(
-    () =>
-      new Promise((r) => {
-        pending.push(r);
-      }),
-  );
-  session.start(continuous());
-  walk(121, 4);
-  walk(100, 5, null, 1);
-  walk(6, 5, 110, 1);
-  expect(reviewIntensity).toHaveBeenCalledTimes(1);
-  expect(session.snapshot().coach).toBe('IA analisando 110 BPM…');
-  walk(25, 5, null, 1);
-  walk(6, 5, 125, 1);
-  expect(reviewIntensity).toHaveBeenCalledTimes(1);
-  expect(jest.mocked(reviewIntensity).mock.calls[0][1]?.signal?.aborted).toBe(true);
-  expect(session.snapshot().coach).toBe('Acima da faixa · 125 BPM · carga reduzida');
-  const corrected = session.snapshot().active?.plan?.stages[1];
-  expect(corrected).toMatchObject({ speed: 4.7, incline: 0 });
-  // A resposta pedida para a carga antiga chega depois e não muda nada.
-  pending[0]({ decision: 'aumentar velocidade', reason: '' });
-  await flush();
-  expect(session.snapshot().active?.plan?.stages[1]).toEqual(corrected);
-  expect(session.snapshot().coach).toBe('Acima da faixa · 125 BPM · carga reduzida');
-  expect(session.snapshot().active?.changes).toHaveLength(1);
-});
-
-it('abaixo do piso sobe a carga sem a IA, num bloco de esforço com 90 s nos alvos', () => {
+it('abaixo do piso sobe a carga num bloco de esforço com 90 s nos alvos', () => {
   const { session, walk } = setup();
   session.start(continuous());
   walk(121, 4);
@@ -438,10 +469,9 @@ it('abaixo do piso sobe a carga sem a IA, num bloco de esforço com 90 s nos alv
   expect(session.snapshot().active?.changes).toEqual([]);
   walk(30, 5, null, 1);
   walk(6, 5, 95, 1);
-  expect(reviewIntensity).not.toHaveBeenCalled();
   // 16 bpm até o meio da faixa (111) a 15 bpm por MET dariam 1,07 METs: a correção para em 1.
   expect(session.snapshot().coach).toBe('Abaixo da faixa · 95 BPM · carga aumentada');
-  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.6, incline: 2 });
+  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.1, incline: 3 });
   expect(session.snapshot().active?.changes).toEqual([
     expect.objectContaining({ stage: 1, decision: 'aumentar inclinação', bpm: 95 }),
   ]);
@@ -466,7 +496,6 @@ it('abaixo do piso não sobe a carga fora dos alvos nem com a FC ainda subindo',
   expect(rising.session.snapshot().coach).toMatch(/ bpm abaixo do teto · \d+ BPM · BPM ainda subindo$/);
   expect(rising.session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5, incline: 1 });
   expect(rising.session.snapshot().active?.changes).toEqual([]);
-  expect(reviewIntensity).not.toHaveBeenCalled();
 });
 
 it('mostra que a carga já está no limite quando não há o que corrigir', () => {
@@ -477,94 +506,14 @@ it('mostra que a carga já está no limite quando não há o que corrigir', () =
   slow.walk(6, 0.5, 130);
   expect(slow.session.snapshot().coach).toBe('Acima da faixa · 130 BPM · carga já no mínimo');
   expect(slow.session.snapshot().active?.changes).toEqual([]);
-  // Caminhada a 5,6 km/h e 15%: não há rampa nem velocidade de caminhada para pôr.
+  // Caminhada a 5,2 km/h e 15%: não há rampa nem velocidade de caminhada para pôr.
   const steep = setup();
-  steep.session.start({ ...continuous(), stages: continuous().stages.map((s) => (s.measure ? s : { ...s, speed: 5.6, incline: 15 })) });
+  steep.session.start({ ...continuous(), stages: continuous().stages.map((s) => (s.measure ? s : { ...s, speed: 5.2, incline: 15 })) });
   steep.walk(121, 4);
-  steep.walk(100, 5.6, null, 15);
-  steep.walk(6, 5.6, 95, 15);
+  steep.walk(100, 5.2, null, 15);
+  steep.walk(6, 5.2, 95, 15);
   expect(steep.session.snapshot().coach).toBe('Abaixo da faixa · 95 BPM · carga já no máximo');
   expect(steep.session.snapshot().active?.changes).toEqual([]);
-  expect(reviewIntensity).not.toHaveBeenCalled();
-});
-
-it('o aumento de velocidade da IA para em 5,6 km/h, e dali a carga sobe pela rampa', async () => {
-  const { session, walk } = setup();
-  jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'aumentar velocidade', reason: '' });
-  const plan = continuous();
-  session.start({ ...plan, stages: plan.stages.map((s) => (s.measure ? s : { ...s, speed: 5.5 })) });
-  walk(121, 4);
-  walk(100, 5.5, null, 1);
-  walk(6, 5.5, 110, 1);
-  expect(jest.mocked(reviewIntensity).mock.calls[0][0]).toMatchObject({ allowed: ['manter', 'aumentar velocidade'] });
-  await flush();
-  expect(session.snapshot().coach).toBe('IA · aumentar velocidade');
-  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.6, incline: 1 });
-  // Na carga nova, a 5,6 km/h, a IA só pode pedir rampa.
-  jest.mocked(reviewIntensity).mockResolvedValue({ decision: 'aumentar inclinação', reason: '' });
-  walk(100, 5.6, null, 1);
-  walk(6, 5.6, 110, 1);
-  expect(jest.mocked(reviewIntensity).mock.calls[1][0]).toMatchObject({ allowed: ['manter', 'aumentar inclinação'] });
-  await flush();
-  expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5.6, incline: 1.5 });
-});
-
-it('descarta a decisão que chega depois de encerrar e começar outra sessão', async () => {
-  const { session, walk } = setup();
-  let resolve!: (v: Reply) => void;
-  jest.mocked(reviewIntensity).mockImplementationOnce(
-    () =>
-      new Promise((r) => {
-        resolve = r;
-      }),
-  );
-  const plan = continuous();
-  session.start(plan);
-  walk(121, 4);
-  walk(100, 5, null, 1);
-  walk(6, 5, 110, 1);
-  expect(reviewIntensity).toHaveBeenCalledTimes(1);
-  session.finish('Encerrado no app');
-  session.start(plan);
-  resolve({ decision: 'aumentar velocidade', reason: '' });
-  await flush();
-  expect(session.snapshot().active?.plan).toEqual(plan);
-  expect(session.snapshot().coach).toBe('');
-});
-
-it('resposta tardia só vale com leitura recente; nova pegada troca a chamada que ainda espera', async () => {
-  const { session, walk } = setup();
-  const pending: ((v: Reply) => void)[] = [];
-  jest.mocked(reviewIntensity).mockImplementation(
-    () =>
-      new Promise((r) => {
-        pending.push(r);
-      }),
-  );
-  const plan = continuous();
-  session.start(plan);
-  walk(121, 4);
-  walk(100, 5, null, 1);
-  walk(6, 5, 110, 1);
-  expect(pending).toHaveLength(1);
-  // 40 s sem segurar o sensor: a resposta chega sem leitura que a confirme.
-  walk(40, 5, null, 1);
-  pending[0]({ decision: 'aumentar velocidade', reason: '' });
-  await flush();
-  expect(session.snapshot().active?.plan).toEqual(plan);
-  expect(session.snapshot().coach).toBe('Aguardando nova leitura');
-
-  // Nova pegada, e a resposta demora: a pegada seguinte cancela a chamada antiga.
-  walk(6, 5, 110, 1);
-  expect(pending).toHaveLength(2);
-  walk(35, 5, null, 1);
-  walk(6, 5, 110, 1);
-  expect(pending).toHaveLength(3);
-  expect(jest.mocked(reviewIntensity).mock.calls[1][1]?.signal?.aborted).toBe(true);
-  expect(jest.mocked(reviewIntensity).mock.calls[2][1]?.signal?.aborted).toBe(false);
-  pending[2]({ decision: 'aumentar velocidade', reason: '' });
-  await flush();
-  expect(session.snapshot().active?.plan?.stages[1].speed).toBe(5.2);
 });
 
 it('descarta as demonstrações ao abrir e apaga um registro do histórico a pedido', async () => {

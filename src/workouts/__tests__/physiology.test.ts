@@ -5,6 +5,7 @@ import {
   energyCost,
   metabolicCost,
   newWorkout,
+  validLoad,
   type Plan,
   type Workout,
 } from '../model';
@@ -82,27 +83,31 @@ it('planos gravados antes do plano semanal continuam com as faixas da época', (
 });
 
 it('calcula o custo metabólico da carga e monta a escada de cargas', () => {
-  // Caminhada abaixo de 7 km/h, corrida a partir daí.
-  expect([mets(3.5, 2), mets(5, 0), mets(5.6, 0), mets(5.6, 8), mets(7, 1), mets(10, 1)]).toEqual([
-    3.3, 3.4, 3.7, 7.5, 8, 11,
+  // Caminhada abaixo de 6 km/h, corrida a partir daí.
+  expect([mets(3.5, 2), mets(5, 0), mets(5.2, 0), mets(5.2, 7.5), mets(6, 1), mets(10, 1)]).toEqual([
+    3.3, 3.4, 3.5, 6.8, 7, 11,
   ]);
   const ladder = loadLadder();
-  // Caminhada plana até 5,5 km/h de 0,5 em 0,5, depois 5,6 km/h, a velocidade mais alta da caminhada.
-  expect(ladder.slice(0, 7).map((r) => [r.pace, r.grade])).toEqual([
-    [3, 0], [3.5, 0], [4, 0], [4.5, 0], [5, 0], [5.5, 0], [5.6, 0],
+  // Caminhada plana até 5 km/h de 0,5 em 0,5, depois 5,2 km/h, a velocidade mais alta da caminhada.
+  expect(ladder.slice(0, 6).map((r) => [r.pace, r.grade])).toEqual([
+    [3, 0], [3.5, 0], [4, 0], [4.5, 0], [5, 0], [5.2, 0],
   ]);
-  // A rampa sobe a 5,6 km/h, de 0 a 8%.
-  expect(ladder.filter((r) => r.pace === 5.6).map((r) => r.grade)).toEqual(
-    Array.from({ length: 17 }, (_, i) => i / 2),
+  // A rampa sobe a 5,2 km/h, de 0 a 7,5%: dali a corrida a 6 km/h já custa mais.
+  expect(ladder.filter((r) => r.pace === 5.2).map((r) => r.grade)).toEqual(
+    Array.from({ length: 16 }, (_, i) => i / 2),
   );
-  // Nenhuma linha entre o teto da caminhada e o começo da corrida.
-  expect(ladder.filter((r) => r.pace > 5.6 && r.pace < 7)).toEqual([]);
-  expect(ladder.some((r) => r.pace === 6)).toBe(false);
-  // Corrida a 1% de 7 km/h até o máximo da esteira.
-  const running = ladder.filter((r) => r.pace >= 7);
-  expect(running[0]).toEqual({ pace: 7, grade: 1, mets: 8 });
+  // Nenhuma linha entre o teto da caminhada e o começo da corrida: de 5,3 a 5,9 km/h não há alvo.
+  expect(ladder.filter((r) => r.pace > 5.2 && r.pace < 6)).toEqual([]);
+  expect(ladder.some((r) => r.pace === 5.6)).toBe(false);
+  // Corrida a 1% de 6 km/h até o máximo da esteira.
+  const running = ladder.filter((r) => r.pace >= 6);
+  expect(running[0]).toEqual({ pace: 6, grade: 1, mets: 7 });
   expect(running.every((r) => r.grade === 1)).toBe(true);
   expect(ladder[ladder.length - 1]).toMatchObject({ pace: 22, grade: 1 });
+  // Toda linha é uma carga que o guia pode pedir: caminhada até 5,2 km/h, ou corrida com até 2% de rampa.
+  expect(ladder.every((r) => validLoad(r.pace, r.grade))).toBe(true);
+  expect([validLoad(5.2, 15), validLoad(6, 2), validLoad(12, 0)]).toEqual([true, true, true]);
+  expect([validLoad(5.3, 0), validLoad(5.9, 1), validLoad(6, 2.5), validLoad(8, 3)]).toEqual([false, false, false, false]);
   // Cada linha custa mais que a anterior: nenhum custo aparece duas vezes.
   ladder.forEach((row, i) => expect(row.mets).toBeGreaterThan(ladder[i - 1]?.mets ?? 0));
 });
@@ -187,26 +192,26 @@ it('estima as kcal pela carga de cada segundo e pelo peso do perfil', () => {
     }
     return w;
   };
-  // 5,6 km/h a 2% custa 4,627 METs: 45 min × 4,627 × 0,0175 kcal por kg × 78 kg.
-  const walk = moving(5.6, 2, 2700);
-  expect(walk.totals.metMs).toBeCloseTo(4.627 * 2700000, -4);
-  expect(energyKcal(walk)).toBe(284);
+  // 5,2 km/h a 2% custa 4,368 METs: 45 min × 4,368 × 0,0175 kcal por kg × 78 kg.
+  const walk = moving(5.2, 2, 2700);
+  expect(walk.totals.metMs).toBeCloseTo(4.368 * 2700000, -4);
+  expect(energyKcal(walk)).toBe(268);
   // O gasto acompanha o peso; a frequência cardíaca não entra na conta.
-  expect(energyKcal(moving(5.6, 2, 2700, 100))).toBe(364);
+  expect(energyKcal(moving(5.2, 2, 2700, 100))).toBe(344);
   // Correndo vale a equação de corrida: 10 km/h a 1% são 10,95 METs.
   expect(energyKcal(moving(10, 1, 600, 80))).toBe(153);
   expect(energyKcal(newWorkout(profile, 'ble', null))).toBeNull();
-  // Entre 5,6 e 7 km/h o custo vai da equação de caminhada à de corrida sem salto.
-  expect([5.6, 6, 6.5, 6.9, 7].map((kmh) => Math.round(energyCost(kmh, 0) * 100) / 100)).toEqual([
-    3.67, 4.81, 6.24, 7.38, 7.67,
+  // Entre 5,2 e 6 km/h o custo vai da equação de caminhada à de corrida sem salto.
+  expect([5.2, 5.4, 5.6, 5.8, 6].map((kmh) => Math.round(energyCost(kmh, 0) * 100) / 100)).toEqual([
+    3.48, 4.29, 5.1, 5.9, 6.71,
   ]);
-  // Até 5,6 km/h vale a equação de caminhada pura.
-  expect(energyCost(5.6, 2)).toBe(metabolicCost(5.6, 2));
-  // 6 km/h a 2% já está no trecho interpolado: 5,667 METs, 348 kcal em 45 min.
-  expect(energyCost(6, 2)).toBeCloseTo(5.667, 3);
-  expect(energyKcal(moving(6, 2, 2700))).toBe(348);
+  // Até 5,2 km/h vale a equação de caminhada pura.
+  expect(energyCost(5.2, 2)).toBe(metabolicCost(5.2, 2));
+  // 5,6 km/h a 2% já está no trecho interpolado: 5,798 METs, 356 kcal em 45 min.
+  expect(energyCost(5.6, 2)).toBeCloseTo(5.798, 3);
+  expect(energyKcal(moving(5.6, 2, 2700))).toBe(356);
   // O custo que o plano compara continua sendo o da caminhada.
-  expect(mets(6.9, 0)).toBe(4.3);
+  expect(mets(5.9, 0)).toBe(3.8);
   // Registro antigo, sem a soma segundo a segundo: a conta sai da carga média de cada etapa.
   const stage = (kmh: number, incline: number, seconds: number) => ({
     ...emptyLog(),
@@ -218,10 +223,10 @@ it('estima as kcal pela carga de cada segundo e pelo peso do perfil', () => {
   const old: Workout = {
     ...walk,
     totals: { ...walk.totals, metMs: undefined },
-    log: [stage(4, 0, 300), stage(5.6, 2, 2100), stage(4, 0, 300)],
+    log: [stage(4, 0, 300), stage(5.2, 2, 2100), stage(4, 0, 300)],
   };
-  // 10 min a 2,9 METs e 35 min a 4,627 METs.
-  expect(energyKcal(old)).toBe(261);
+  // 10 min a 2,9 METs e 35 min a 4,368 METs.
+  expect(energyKcal(old)).toBe(248);
   // Sem etapas, vale a média da sessão inteira.
-  expect(energyKcal({ ...old, log: undefined })).toBe(284);
+  expect(energyKcal({ ...old, log: undefined })).toBe(268);
 });

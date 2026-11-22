@@ -1,22 +1,16 @@
 // Prompts enviados à DeepSeek e validação das respostas. Tudo aqui é função
 // pura, sem Expo, para ser testado direto e usado pelos cenários de diagnóstico.
 //
-// Três regras valem para os três prompts: o modelo recebe números já
+// Três regras valem para os dois prompts: o modelo recebe números já
 // calculados pelo app (não precisa comparar nem fazer conta), cada opção tem
 // definição escrita, e o formato de saída é descrito por tipo, sem exemplo
 // preenchido que puxe a resposta para um valor.
+//
+// Durante o treino a IA não é consultada: o ajuste da carga é conta do app
+// (`adaptive.ts`), feita na hora e sem depender de internet.
 
 import {
-  decisions,
-  EARLY_GAP_BPM,
-  SETTLED_SECONDS,
-  STEADY_SECONDS,
-  type Decision,
-  type Features,
-  type Load,
-  type Reading,
-} from './adaptive';
-import {
+  acsm,
   evidence,
   inRange,
   levels,
@@ -24,6 +18,8 @@ import {
   MAX_SPEED_KMH,
   median,
   RUN_FROM_KMH,
+  RUN_MAX_INCLINE_PERCENT,
+  validLoad,
   validSession,
   WALK_TOP_KMH,
   type Estimate,
@@ -33,7 +29,6 @@ import {
   type Zone,
 } from './model';
 import {
-  AIM_SPAN_BPM,
   aimBand,
   ageMax,
   dailyTarget,
@@ -48,7 +43,7 @@ import {
 } from './physiology';
 import { describe, sessionMinutes, zones, type Session } from './week';
 
-export const PROMPT_VERSION = '6';
+export const PROMPT_VERSION = '7';
 export type Prompt = { system: string; user: object };
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -77,22 +72,131 @@ function group(w: Workout, indexes: number[]) {
   const ms = sum(logs, (l) => l.ms);
   const inclineDuration = sum(logs, (l) => l.inclineDurationMs);
   const ends = logs.filter((l) => l.tail.length >= 3).map((l) => median(l.tail));
-  // O último bloco guarda os alvos já corrigidos pela revisão durante o treino.
+  // O último bloco guarda os alvos já corrigidos pelos ajustes feitos durante o treino.
   const last = w.plan?.stages[indexes[indexes.length - 1]];
   const kmh = round1((sum(logs, (l) => l.distanceM) * 3600) / ms);
   const inclinePercent = inclineDuration
     ? round1(sum(logs, (l) => l.inclineMs) / inclineDuration)
     : null;
+  // Corrida é o que foi planejado e feito de 6 km/h em diante. Um registro
+  // antigo de caminhada apertada, com alvo abaixo disso e a lona a 6 km/h,
+  // continua sendo caminhada: pela equação de corrida ele custaria 50% a mais.
+  const running = kmh >= RUN_FROM_KMH && (!last || last.speed >= RUN_FROM_KMH);
   return {
     seconds: Math.round(ms / 1000),
     kmh,
     inclinePercent,
-    mets: mets(kmh, inclinePercent ?? 0),
+    mets: round1(acsm(kmh, inclinePercent ?? 0, running)),
     targetKmh: last?.speed ?? null,
     targetInclinePercent: last?.incline ?? null,
     bpmEnd: ends.length ? median(ends) : null,
     bpmReadings: sum(logs, (l) => l.bpmCount),
   };
+}
+
+/** Um trecho de minutos seguidos na mesma carga, dentro de um bloco de esforço. */
+export type Plateau = {
+  /** Minuto do bloco de esforço em que o patamar começou. */
+  fromMinute: number;
+  minutes: number;
+  kmh: number;
+  inclinePercent: number;
+  mets: number;
+  /**
+   * BPM típico do patamar: a mediana dos minutos em que a FC já responde à
+   * carga, sem o primeiro do patamar e sem os 3 primeiros do bloco.
+   */
+  bpm: number;
+};
+
+/** Um minuto com menos de meio minuto de lona andando não diz qual era a carga. */
+const MINUTE_MIN_MS = 30000;
+/** Nos primeiros minutos do bloco a FC ainda vem subindo do trecho leve anterior. */
+const BLOCK_SETTLE_MINUTES = 3;
+/** Patamares de uma sessão que vão para o prompt. */
+const PLATEAU_LIMIT = 8;
+
+/**
+ * Os patamares dos blocos de esforço: minutos seguidos em que a carga medida
+ * (0,1 km/h e 0,5%) foi a mesma, com 2 minutos ou mais e leitura de BPM em
+ * algum minuto em que a FC já responde à carga. Sai da carga e dos batimentos
+ * gravados minuto a minuto; lista vazia nos
+ * registros mais antigos, que não têm a carga por minuto.
+ */
+export function plateaus(w: Workout): Plateau[] {
+  const loads = w.loads ?? [];
+  const beats = w.beats ?? [];
+  if (!w.plan || !loads.length) return [];
+  const found: Plateau[] = [];
+  let start = 0;
+  for (const stage of w.plan.stages) {
+    const end = start + stage.seconds;
+    // Só os minutos inteiros do bloco: os das bordas misturam duas etapas.
+    const first = Math.ceil(start / 60);
+    const last = Math.floor(end / 60);
+    start = end;
+    if (stage.measure) continue;
+    let open: { from: number; kmh: number; incline: number; bpm: (number | null)[] } | null = null;
+    const close = () => {
+      const from = open?.from ?? 0;
+      const settled = (open?.bpm ?? []).filter(
+        (b, i): b is number => b !== null && i >= 1 && from + i >= BLOCK_SETTLE_MINUTES,
+      );
+      if (open && open.bpm.length >= 2 && settled.length)
+        found.push({
+          fromMinute: open.from,
+          minutes: open.bpm.length,
+          kmh: open.kmh,
+          inclinePercent: open.incline,
+          mets: mets(open.kmh, open.incline),
+          bpm: median(settled),
+        });
+      open = null;
+    };
+    for (let minute = first; minute < last; minute++) {
+      const [kmhMs, inclineMs, ms] = loads[minute] ?? [0, 0, 0];
+      if (ms < MINUTE_MIN_MS) {
+        close();
+        continue;
+      }
+      const kmh = round1(kmhMs / ms);
+      const incline = Math.round((2 * inclineMs) / ms) / 2;
+      const [total, count] = beats[minute] ?? [0, 0];
+      if (open && (open.kmh !== kmh || open.incline !== incline)) close();
+      open ??= { from: minute - first, kmh, incline, bpm: [] };
+      open.bpm.push(count ? Math.round(total / count) : null);
+    }
+    close();
+  }
+  return found;
+}
+
+/**
+ * Duração mínima de um patamar de referência. Uma carga alta demais cai em
+ * poucos minutos, quando o BPM passa do teto: valem os patamares de 5 minutos
+ * ou mais e, só se não houver nenhum, os de 3.
+ */
+const REFERENCE_MINUTES = [5, 3];
+
+/**
+ * O patamar de referência de uma sessão contínua: o primeiro patamar longo em
+ * que o BPM ficou no alvo da sessão; se nenhum ficou, o que chegou mais perto.
+ * É a carga que serve de partida para a sessão seguinte. A carga em que a
+ * sessão termina não serve: num bloco longo a FC sobe aos poucos na mesma
+ * carga, e o fim do bloco pede menos carga que o começo.
+ */
+function referencePlateau(w: Workout, zone: Zone & { objective: string }, found: Plateau[]) {
+  if (!w.plan || w.plan.stages.filter((s) => !s.measure).length !== 1) return null;
+  const held = REFERENCE_MINUTES.map((minutes) => found.filter((p) => p.minutes >= minutes)).find(
+    (list) => list.length,
+  );
+  if (!held) return null;
+  const aim = aimBand(zone, zone.objective);
+  const miss = (p: Plateau) => Math.abs(p.bpm - aim.bpm);
+  return (
+    held.find((p) => inRange(p.bpm, aim.low, aim.high)) ??
+    held.reduce((best, p) => (miss(p) < miss(best) ? p : best))
+  );
 }
 
 /** Tudo o que foi medido numa sessão, no formato que os prompts recebem. */
@@ -115,8 +219,12 @@ export function summarize(w: Workout) {
       drops.push(median(before.tail) - median(logs[i].early));
   }
   const changes = w.changes ?? [];
+  const found = plateaus(w);
+  const measured = group(w, work);
+  const reference = referencePlateau(w, zone, found);
   return {
     ...base,
+    bpmSource: (w.totals.strapCount ?? 0) * 2 > w.totals.bpmCount ? 'cinta' : 'sensor de mão',
     objective: zone.objective,
     completionPercent: w.plan
       ? Math.min(100, Math.round((100 * base.movingSeconds) / (w.plan.minutes * 60)))
@@ -132,8 +240,23 @@ export function summarize(w: Workout) {
           above: Math.round((100 * counts[2]) / total),
         }
       : null,
-    work: group(w, work),
+    // Numa sessão contínua gravada minuto a minuto, a carga e o BPM dos blocos
+    // de esforço são os do patamar de referência, não a média do bloco.
+    work:
+      measured && reference
+        ? {
+            ...measured,
+            kmh: reference.kmh,
+            inclinePercent: reference.inclinePercent,
+            mets: reference.mets,
+            targetKmh: reference.kmh,
+            targetInclinePercent: reference.inclinePercent,
+            bpmEnd: reference.bpm,
+            reference: { fromMinute: reference.fromMinute, minutes: reference.minutes },
+          }
+        : measured,
     easy: group(w, easy),
+    plateaus: found.length ? found.slice(0, PLATEAU_LIMIT) : undefined,
     recoveryDrops: drops.slice(0, 6),
     reductions: forcedReductions(w),
     increases: changes.filter((c) => c.decision.startsWith('aumentar')).length,
@@ -178,7 +301,9 @@ export function historyItem(w: Workout, now: number) {
       targetKmh: work.targetKmh,
       targetInclinePercent: work.targetInclinePercent,
       bpmEnd: work.bpmEnd,
+      ...('reference' in work ? { reference: work.reference } : {}),
     },
+    plateaus: s.plateaus,
     zone: s.zone,
     position: work.bpmEnd === null ? null : position(work.bpmEnd, s.zone),
     recoveryDrops: s.recoveryDrops,
@@ -191,25 +316,27 @@ export function historyItem(w: Workout, now: number) {
   };
 }
 
-/** As 5 sessões válidas mais recentes. Fragmentos de segundos ficam de fora. */
-export const recentValid = (history: Workout[]) => history.filter(validSession).slice(0, 5);
+/** As 6 sessões válidas mais recentes. Fragmentos de segundos ficam de fora. */
+export const recentValid = (history: Workout[]) => history.filter(validSession).slice(0, 6);
 
 // --- Plano do dia ----------------------------------------------------------
 
-const PLAN = `Você escolhe a carga (velocidade e inclinação) dos blocos de esforço do treino de esteira de hoje. A sessão do dia, a estrutura e a faixa de frequência cardíaca vêm do plano semanal da pessoa e não mudam: sua tarefa é achar a carga que leva o BPM do fim dos blocos de esforço para o alvo da sessão. Nas sessões de esforço o alvo é o alto da faixa: a pessoa quer treinar o mais perto possível do teto, sem passar dele. Na recuperação ativa a faixa é um teto a não passar, e o alvo fica na parte de baixo dela. A pessoa caminha até ${br(WALK_TOP_KMH)} km/h e só corre a partir de ${RUN_FROM_KMH} km/h: entre esses dois valores não existe carga válida. A esteira é ajustada à mão no painel pela própria pessoa; o app só orienta, lê os batimentos a cada 3 minutos e corrige a carga durante o treino assim que o BPM sai da faixa.
+const PLAN = `Você escolhe a carga (velocidade e inclinação) dos blocos de esforço do treino de esteira de hoje. A sessão do dia, a estrutura e a faixa de frequência cardíaca vêm do plano semanal da pessoa e não mudam: sua tarefa é achar a carga que leva o BPM do fim dos blocos de esforço para o alvo da sessão. Nas sessões de esforço o alvo é o alto da faixa: a pessoa quer treinar o mais perto possível do teto, sem passar dele. Na recuperação ativa a faixa é um teto a não passar, e o alvo fica na parte de baixo dela. A pessoa caminha até ${br(WALK_TOP_KMH)} km/h e só corre a partir de ${RUN_FROM_KMH} km/h: entre esses dois valores não existe carga válida. Correndo, a rampa não passa de ${RUN_MAX_INCLINE_PERCENT}%. A esteira é ajustada à mão no painel pela própria pessoa; o app só orienta. Ele acompanha os batimentos (o tempo todo com a cinta no peito, ou a cada 3 minutos pelo sensor de mão da esteira) e ajusta a carga durante o treino: sobe aos poucos até o alto da faixa e alivia quando o BPM passa do teto. Num bloco longo a frequência cardíaca sobe aos poucos na mesma carga, e por isso o fim do bloco pede menos carga que o começo: a carga que você escolhe é a de partida.
 
 ENTRADA (json)
 - today: data e hora locais.
 - profile: age (anos).
 - hr: restBpm (FC de repouso estimada: a menor leitura do primeiro minuto dos últimos treinos, menos 15 bpm porque a pessoa já está andando; null se nunca medida), maxBpm (FC máxima estimada) e maxSource ("idade" = 220 − idade; "IA" = previsão das avaliações anteriores).
 - session: a sessão de hoje. goal (nome), structure (aquecimento, blocos de esforço e trechos leves), minutes, zone (objective = nome da intensidade; low e high = faixa de BPM dos blocos de esforço) e aim (o alvo dentro da faixa: bpm = o BPM a buscar no fim dos blocos de esforço; low e high = o trecho da faixa em que a carga de uma sessão anterior já acertou o alvo).
-- recent: sessões válidas mais recentes, da mais nova para a mais antiga. Cada uma traz daysAgo (0 = menos de 24 h), goal, plannedMinutes, movingMinutes, completionPercent, work (carga dos blocos de esforço: kmh e inclinePercent realmente feitos, mets = custo metabólico dessa carga, targetKmh e targetInclinePercent = alvos em que o último bloco terminou, e bpmEnd = BPM no fim dos blocos; bpmEnd null = sem leitura), zone e position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions (reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa; os alívios menores, de rotina para quem treina junto do teto, não contam), increases (aumentos de carga durante a sessão), restBpm, level e endedBy. approximate = true marca registros antigos em que work traz médias da sessão inteira.
-- loads: as cargas possíveis hoje, da mais leve à mais pesada, cada uma com pace (km/h), grade (%) e mets. mets é o custo metabólico (1 MET = repouso) pelas equações do ACSM: de caminhada abaixo de ${RUN_FROM_KMH} km/h e de corrida a partir de ${RUN_FROM_KMH} km/h. Nenhuma linha fica acima de ${br(WALK_TOP_KMH)} e abaixo de ${RUN_FROM_KMH} km/h.
+- recent: até 6 sessões válidas mais recentes, da mais nova para a mais antiga. Cada uma traz daysAgo (0 = menos de 24 h), goal, plannedMinutes, movingMinutes, completionPercent, work, plateaus, zone e position (work.bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions (reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa; os alívios menores, de rotina para quem treina junto do teto, não contam), increases (aumentos de carga durante a sessão), restBpm, level e endedBy. approximate = true marca registros antigos em que work traz médias da sessão inteira.
+- work, em cada sessão de recent: a carga de referência dos blocos de esforço. kmh e inclinePercent realmente feitos, mets = custo metabólico dessa carga, targetKmh e targetInclinePercent = a carga a repetir, e bpmEnd = o BPM que essa carga deu (null = sem leitura). Quando work traz reference, a sessão foi contínua e gravada minuto a minuto, e o app já escolheu em plateaus o patamar de referência: o primeiro patamar longo (5 minutos ou mais; sem nenhum assim, 3) em que o BPM ficou no alvo daquela sessão ou, se nenhum ficou, o que chegou mais perto. reference.fromMinute é o minuto do bloco em que ele começou e reference.minutes, quanto durou. Sem reference, work é o conjunto dos blocos de esforço: carga média, alvos em que o último bloco terminou e BPM do fim dos blocos.
+- plateaus, em cada sessão de recent (só nas gravadas minuto a minuto): os trechos de 2 minutos ou mais na mesma carga dentro dos blocos de esforço, na ordem em que aconteceram. Cada um traz fromMinute (minuto do bloco em que começou), minutes, kmh, inclinePercent, mets e bpm (BPM típico do trecho). Mostram como a carga e o BPM andaram na sessão. A conta abaixo usa só work, que já resume esses trechos: não refaça a escolha do patamar.
+- loads: as cargas possíveis hoje, da mais leve à mais pesada, cada uma com pace (km/h), grade (%) e mets. mets é o custo metabólico (1 MET = repouso) pelas equações do ACSM: de caminhada abaixo de ${RUN_FROM_KMH} km/h e de corrida a partir de ${RUN_FROM_KMH} km/h. Nenhuma linha fica acima de ${br(WALK_TOP_KMH)} e abaixo de ${RUN_FROM_KMH} km/h, e as de corrida têm rampa de 1%.
 
 COMO ESCOLHER
 A frequência cardíaca sobe quase em linha reta com os METs. Siga os passos na ordem.
 1. Sessões que contam: as de recent com work.bpmEnd diferente de null. As que têm approximate = true só contam se não houver nenhuma outra. Referência: a mais recente das que contam com o mesmo goal de session; se não houver, a mais recente das que contam, qualquer que seja o goal.
-2. Se a referência tem o mesmo goal de session, o bpmEnd dela está entre session.aim.low e session.aim.high e o work.targetKmh dela é de até ${br(WALK_TOP_KMH)} ou de ${RUN_FROM_KMH} em diante, repita a carga em que ela terminou: pace = work.targetKmh e grade = work.targetInclinePercent. A escolha termina aqui. Com work.targetKmh acima de ${br(WALK_TOP_KMH)} e abaixo de ${RUN_FROM_KMH}, a carga da referência não pode ser repetida: siga para o passo 3.
+2. Se a referência tem o mesmo goal de session, o bpmEnd dela está entre session.aim.low e session.aim.high e a carga de work é válida, repita essa carga: pace = work.targetKmh e grade = work.targetInclinePercent. A escolha termina aqui. A carga de work é válida quando work.targetKmh é de até ${br(WALK_TOP_KMH)} (caminhada, com qualquer rampa), ou quando work.targetKmh é de ${RUN_FROM_KMH} em diante e work.targetInclinePercent é de até ${RUN_MAX_INCLINE_PERCENT} (corrida). Com work.targetKmh acima de ${br(WALK_TOP_KMH)} e abaixo de ${RUN_FROM_KMH}, ou de ${RUN_FROM_KMH} em diante com work.targetInclinePercent acima de ${RUN_MAX_INCLINE_PERCENT}, a carga da referência não pode ser repetida: siga para o passo 3.
 3. Inclinação da reta, em bpm por MET:
 - pegue, entre as sessões que contam, a de menor work.mets e a de maior work.mets; se os mets delas diferem em 1,0 ou mais, use (diferença de bpmEnd) ÷ (diferença de mets) entre as duas;
 - senão, se hr.restBpm não é null, use (bpmEnd da referência − hr.restBpm) ÷ (mets da referência − 1);
@@ -221,7 +348,7 @@ Se o resultado ficar abaixo de 8 ou acima de 25, use 15.
 SAÍDA
 Responda somente com um objeto json, neste formato:
 {"why": "<frase>", "pace": <número>, "grade": <número>}
-- why: uma frase em português do Brasil, com até 160 caracteres, para a pessoa que vai treinar: de que sessão anterior a escolha partiu, o BPM em que ela terminou e o BPM buscado hoje. Escreva em linguagem comum, sem nomes de campos da entrada (nada de "bpmEnd", "mets" ou "aim"). Sem promessa de emagrecimento ou de saúde.
+- why: uma frase em português do Brasil, com até 160 caracteres, para a pessoa que vai treinar: de que sessão anterior a escolha partiu, o BPM que a carga dela deu e o BPM buscado hoje. Escreva em linguagem comum, sem nomes de campos da entrada (nada de "bpmEnd", "mets", "aim" ou "plateaus"). Sem promessa de emagrecimento ou de saúde.
 - pace: de 1 a ${MAX_SPEED_KMH}, em km/h, com uma casa decimal. grade: de 0 a ${MAX_INCLINE_PERCENT}, em %, múltiplo de 0,5. Fora do passo 2, use exatamente os valores de uma linha de loads.`;
 
 export type PlanInput = { profile: Profile; session: Session; history: Workout[]; now: number };
@@ -275,8 +402,8 @@ export function planProcedure({ session, hr, recent, loads }: PlanData) {
     inRange(reference.bpm, session.aim.low, session.aim.high) &&
     targetKmh !== null &&
     targetInclinePercent !== null &&
-    // Uma sessão antiga pode ter terminado numa carga que a escada já não tem.
-    (targetKmh <= WALK_TOP_KMH || targetKmh >= RUN_FROM_KMH)
+    // Uma sessão antiga pode ter terminado numa carga que o guia já não pede.
+    validLoad(targetKmh, targetInclinePercent)
   )
     return { pace: targetKmh, grade: targetInclinePercent, repeat: true };
   const byCost = [...counted].sort((a, b) => a.mets - b.mets);
@@ -331,115 +458,6 @@ export const parsePlan =
     return choice;
   };
 
-// --- Revisão durante o treino ----------------------------------------------
-
-const REVIEW = `Você acompanha um treino de esteira em andamento e decide se a carga da etapa atual deve subir um degrau agora. A sessão segue o plano semanal da pessoa: os blocos de esforço têm uma faixa de frequência cardíaca a cumprir, e a pessoa quer passá-los no alto da faixa, junto do teto (zone.high), sem passar dele. Quando o BPM sai da faixa, o próprio app corrige a carga na hora, sem consultar você: alivia assim que a mediana passa do teto, sem esperar a frequência cardíaca estabilizar, e sobe a carga quando a mediana fica abaixo do piso. Você só é consultado com a mediana dentro da faixa e abaixo do teto, para o ajuste fino até o teto. Passar do teto é o erro mais caro: na dúvida entre aumentar e manter, mantenha. A pessoa ajusta a esteira à mão no painel, e cada mudança que você pedir interrompe o treino com um aviso sonoro.
-
-ENTRADA (json)
-- zone: objective (nome da intensidade), low e high em BPM. É a faixa dos blocos de esforço, calculada sobre a FC máxima estimada.
-- stage: name, kind ("principal" = bloco de esforço), targetKmh, targetInclinePercent, secondsInStage, secondsRemaining, targetsReached (a esteira está nos dois alvos), secondsAtLoad (há quanto tempo está neles) e laterBlocks (blocos de esforço que ainda virão depois deste; um ajuste feito agora vale também para eles).
-- bpm: resumo das leituras válidas do sensor de mão. count, spanSeconds, median, latest, min, max, trend ("subindo", "estável" ou "caindo": compara a segunda metade das leituras com a primeira e só acusa mudança de 2 bpm ou mais), changeBpm (essa diferença), position (mediana em relação à faixa; aqui é sempre "na faixa"), marginBpm (0 dentro da faixa) e belowTopBpm (quantos bpm a mediana está abaixo de zone.high).
-- readings: as mesmas leituras, da mais antiga para a mais nova, com secondsAgo, bpm, kmh e inclinePercent medidos.
-- session: goal (sessão do plano semanal), plannedMinutes, elapsedSeconds, restBpm (FC do primeiro minuto de hoje, ou null) e changes (ajustes de carga já aplicados hoje, pelo app ou por você, com secondsAgo, decision e o bpm que os motivou).
-- profile: age.
-- allowed: as decisões que o app aceita neste momento: "manter" e um aumento. O app só consulta você num bloco de esforço com os alvos atingidos há ${STEADY_SECONDS} s ou mais. Entre velocidade e inclinação, o app já escolheu a que cabe nesta carga.
-
-EFEITO DE CADA DECISÃO
-- "manter": nada muda.
-- "aumentar velocidade": alvo de velocidade +0,2 km/h (na caminhada, sem passar de ${br(WALK_TOP_KMH)} km/h). "aumentar inclinação": alvo de inclinação +0,5%.
-
-COMO DECIDIR
-A frequência cardíaca leva de 2 a 4 minutos para se estabilizar depois de uma mudança de carga, e num bloco longo ela continua subindo aos poucos na mesma carga. Leituras de sensor de mão oscilam 1 ou 2 bpm sem que isso seja tendência. Siga a primeira regra que servir:
-- Mantenha se trend é "subindo": a FC ainda está respondendo e vai chegar mais perto do teto sozinha.
-- Mantenha se secondsRemaining ≤ 120 e laterBlocks = 0: não há tempo para o ajuste fazer efeito.
-- Com stage.secondsAtLoad < ${SETTLED_SECONDS}, a FC ainda sobe alguns bpm sozinha nesta carga: aumente só se belowTopBpm ≥ ${EARLY_GAP_BPM}.
-- Com stage.secondsAtLoad ≥ ${SETTLED_SECONDS}, aumente se belowTopBpm ≥ ${AIM_SPAN_BPM + 1}.
-- Nos demais casos, mantenha: o BPM já está junto do teto, ou ainda vai chegar a ele.
-"Aumente" quer dizer o aumento que estiver em allowed.
-
-SAÍDA
-Responda somente com um objeto json, neste formato:
-{"reason": "<motivo>", "decision": "<decisão>"}
-- reason: até 12 palavras em português do Brasil, citando o dado decisivo.
-- decision: exatamente uma das opções de allowed.`;
-
-export type ReviewInput = {
-  workout: Workout;
-  /** Índice da etapa atual e segundos que faltam nela. */
-  index: number;
-  left: number;
-  load: Load;
-  readings: Reading[];
-  features: Features;
-  allowed: Decision[];
-  now: number;
-};
-
-export function reviewPrompt(i: ReviewInput): Prompt {
-  const w = i.workout;
-  const { stage } = i.load;
-  const zone = dailyTarget(w.plan, w.profile, w.hr);
-  const elapsed = Math.round(w.totals.movingMs / 1000);
-  const f = i.features;
-  return {
-    system: REVIEW,
-    user: {
-      zone,
-      stage: {
-        name: stage.name,
-        kind: stage.measure ? 'leve' : 'principal',
-        targetKmh: stage.speed,
-        targetInclinePercent: stage.incline,
-        secondsInStage: stage.seconds - i.left,
-        secondsRemaining: i.left,
-        targetsReached: i.load.reached,
-        secondsAtLoad: Math.round(i.load.secondsAtLoad),
-        laterBlocks: (w.plan?.stages ?? []).slice(i.index + 1).filter((s) => !s.measure).length,
-      },
-      bpm: {
-        count: f.count,
-        spanSeconds: f.spanSeconds,
-        median: f.median,
-        latest: f.latest,
-        min: f.min,
-        max: f.max,
-        trend: f.trend,
-        changeBpm: f.change,
-        position: f.position,
-        marginBpm: f.margin,
-        belowTopBpm: f.belowTop,
-      },
-      readings: i.readings.map((r) => ({
-        secondsAgo: Math.max(0, Math.round((i.now - r.at) / 1000)),
-        bpm: r.bpm,
-        kmh: r.kmh,
-        inclinePercent: r.incline,
-      })),
-      session: {
-        goal: w.plan?.goal ?? 'Livre',
-        plannedMinutes: w.plan?.minutes ?? null,
-        elapsedSeconds: elapsed,
-        restBpm: w.restBpm ?? null,
-        changes: (w.changes ?? []).map((c) => ({
-          secondsAgo: Math.max(0, elapsed - c.second),
-          decision: c.decision,
-          bpm: c.bpm,
-        })),
-      },
-      profile: { age: w.profile.age },
-      allowed: i.allowed,
-    },
-  };
-}
-
-export const parseReview = (allowed: Decision[]) => (raw: unknown) => {
-  const r = (raw ?? {}) as Record<string, unknown>;
-  const decision = r.decision as Decision;
-  if (!decisions.includes(decision) || !allowed.includes(decision))
-    throw new Error('Resposta de ajuste inválida.');
-  return { decision, reason: typeof r.reason === 'string' ? r.reason.trim().slice(0, 120) : '' };
-};
-
 // --- Avaliação ao fim do treino --------------------------------------------
 
 const ASSESS = `Você avalia uma sessão de esteira já encerrada a partir das medições do app. As sessões guiadas seguem o plano semanal da pessoa, em que cada sessão tem uma faixa de frequência cardíaca a cumprir nos blocos de esforço. Devolve o nível de condicionamento observado, um resumo curto e uma previsão da frequência cardíaca máxima da pessoa.
@@ -448,14 +466,15 @@ ENTRADA (json)
 - profile: age.
 - session: a sessão avaliada.
   - goal (sessão do plano semanal; "Livre" = sem plano), objective (nome da intensidade), plannedMinutes, movingSeconds, completionPercent (null no treino livre), distanceMeters, averageKmh, averageIncline, endedBy (como terminou).
-  - bpmReadings (leituras válidas do sensor de mão, cerca de uma por segundo de contato), bpmCoveragePercent, averageBpm, peakBpm (maior leitura isolada) e validatedPeakBpm (maior mediana de 3 leituras seguidas).
+  - bpmSource ("cinta" = cinta no peito, que lê o tempo todo; "sensor de mão" = sensor da esteira, que só lê enquanto a pessoa o segura), bpmReadings (leituras válidas, cerca de uma por segundo de leitura), bpmCoveragePercent, averageBpm, peakBpm (maior leitura isolada) e validatedPeakBpm (maior mediana de 3 leituras seguidas).
   - zone: low e high, a faixa de BPM dos blocos de esforço. zoneSharePercent: parcela das leituras dos blocos de esforço below, inside e above dessa faixa.
-  - work e easy: resumo dos blocos de esforço e dos blocos leves (aquecimento, recuperações e volta à calma). Cada um traz seconds, kmh e inclinePercent realizados, mets (custo metabólico dessa carga; 1 MET = repouso), targetKmh e targetInclinePercent (alvos em que o último bloco terminou), bpmEnd (mediana das últimas leituras dos blocos, o valor mais próximo do BPM estabilizado) e bpmReadings. null quando não houve o bloco.
-  - stages: o mesmo por etapa, quando a lista é curta.
+  - work e easy: resumo dos blocos de esforço e dos blocos leves (aquecimento, recuperações e volta à calma). Cada um traz seconds, kmh e inclinePercent realizados, mets (custo metabólico dessa carga; 1 MET = repouso), targetKmh e targetInclinePercent (alvos em que o último bloco terminou), bpmEnd (mediana das últimas leituras dos blocos, o valor mais próximo do BPM estabilizado) e bpmReadings. null quando não houve o bloco. Quando work traz reference, a sessão foi contínua e gravada minuto a minuto, e kmh, inclinePercent, mets, os alvos e bpmEnd de work são os do patamar de referência: o primeiro trecho longo (5 minutos ou mais; sem nenhum assim, 3) na mesma carga em que o BPM ficou no alvo da sessão (de 3 bpm abaixo do teto da faixa até ele; em recuperação, a faixa inteira) ou, se nenhum ficou, o que chegou mais perto. reference.fromMinute é o minuto do bloco em que ele começou e reference.minutes, quanto durou.
+  - stages: o mesmo por etapa, quando a lista é curta. Aqui a carga é sempre a média da etapa e bpmEnd, o do fim dela.
+  - plateaus (só nas sessões gravadas minuto a minuto): os trechos de 2 minutos ou mais na mesma carga dentro dos blocos de esforço, em ordem, com fromMinute (minuto do bloco em que começou), minutes, kmh, inclinePercent, mets e bpm (BPM típico do trecho). Num bloco longo é normal a carga subir no começo e descer mais adiante: a frequência cardíaca sobe aos poucos na mesma carga.
   - recoveryDrops: queda em bpm entre o fim de um bloco de esforço e cerca de 1 minuto de recuperação.
   - reductions: reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa. Os alívios menores, de rotina para quem treina junto do teto, não contam. increases: aumentos de carga durante a sessão.
   - restBpm: FC lida no primeiro minuto de hoje. Fica de 10 a 20 bpm acima do repouso real.
-- recent: sessões válidas anteriores, da mais nova para a mais antiga, resumidas: daysAgo (em relação a esta sessão), goal, completionPercent, work (kmh, inclinePercent, mets, bpmEnd), zone, position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions, increases, restBpm e level. approximate = true marca registros antigos em que work traz médias da sessão inteira.
+- recent: até 6 sessões válidas anteriores, da mais nova para a mais antiga, resumidas: daysAgo (em relação a esta sessão), goal, completionPercent, work (kmh, inclinePercent, mets, bpmEnd, com reference quando é o patamar de referência), plateaus, zone, position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions, increases, restBpm e level. approximate = true marca registros antigos em que work traz médias da sessão inteira.
 - heart: os dois números que decidem a FC máxima, já calculados pelo app. ageEstimateBpm é a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade). floorBpm é o piso medido: o maior pico validado de todas as sessões, esta incluída, com 5 bpm a mais quando o pico é de uma sessão concluída sem reductions (quem seguiu até o fim depois do pico não estava no máximo); null se não há pico validado.
 
 NÍVEL (level)
@@ -477,7 +496,7 @@ Sem work.bpmEnd (nenhuma leitura nos blocos de esforço), julgue por averageBpm,
 Nunca use "${levels[0]}": o app trata esse caso sem consultar você.
 
 RESUMO (summary)
-Uma ou duas frases em português do Brasil, com até 300 caracteres, citando números medidos: carga dos blocos de esforço, BPM, faixa, recuperação. Sem diagnóstico, sem VO2max, sem conselho médico e sem promessa.
+Uma ou duas frases em português do Brasil, com até 300 caracteres, citando números medidos: carga dos blocos de esforço, BPM, faixa, recuperação. Com plateaus, pode dizer como a carga andou (por exemplo, em que carga o BPM chegou ao alto da faixa). Sem diagnóstico, sem VO2max, sem conselho médico e sem promessa.
 
 FC MÁXIMA (maxBpm)
 A FC máxima é uma característica da pessoa e não muda de uma sessão para outra. Treino submáximo não a mede: só confirma um piso.

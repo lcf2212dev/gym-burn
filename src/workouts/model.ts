@@ -12,12 +12,22 @@ export type Profile = { age: number; weightKg: number; heightCm: number };
  */
 export const MAX_SPEED_KMH = 22;
 export const MAX_INCLINE_PERCENT = 15;
-// A escada de carga: a caminhada sobe pela velocidade até 5,6 km/h, depois pela
-// inclinação até 8%, e a partir de 7 km/h a pessoa corre. Acima de 5,6 km/h a
-// pessoa já não consegue caminhar: nenhum alvo de caminhada passa disso.
-export const WALK_TOP_KMH = 5.6;
-export const HILL_TOP_PERCENT = 8;
-export const RUN_FROM_KMH = 7;
+// A escada de carga: a caminhada sobe pela velocidade até 5,2 km/h, depois pela
+// inclinação até 7,5%, e a partir de 6 km/h a pessoa corre. De 5,3 a 5,9 km/h
+// não existe alvo: é rápido demais para andar e lento demais para correr. A
+// rampa da escada para em 7,5% porque dali a corrida a 6 km/h já custa mais.
+export const WALK_TOP_KMH = 5.2;
+export const HILL_TOP_PERCENT = 7.5;
+export const RUN_FROM_KMH = 6;
+/** Correndo, a rampa não passa disto: a carga da corrida muda pela velocidade. */
+export const RUN_MAX_INCLINE_PERCENT = 2;
+
+/**
+ * Uma carga que o guia pode pedir: caminhada até 5,2 km/h com qualquer rampa,
+ * ou corrida de 6 km/h em diante com até 2% de rampa.
+ */
+export const validLoad = (kmh: number, inclinePercent: number) =>
+  kmh <= WALK_TOP_KMH || (kmh >= RUN_FROM_KMH && inclinePercent <= RUN_MAX_INCLINE_PERCENT);
 
 /** METs de uma carga pelas equações do ACSM, de caminhada ou de corrida (1 MET é o repouso). */
 export function acsm(kmh: number, inclinePercent: number, running: boolean) {
@@ -31,13 +41,13 @@ export function acsm(kmh: number, inclinePercent: number, running: boolean) {
 
 /**
  * Custo metabólico de uma carga, em METs, como o plano o compara: caminhada
- * abaixo de 7 km/h, corrida a partir daí.
+ * abaixo de 6 km/h, corrida a partir daí.
  */
 export const metabolicCost = (kmh: number, inclinePercent: number) =>
   acsm(kmh, inclinePercent, kmh >= RUN_FROM_KMH);
 
 /**
- * Custo metabólico para a conta de kcal. Entre 5,6 e 7 km/h a equação de
+ * Custo metabólico para a conta de kcal. Entre 5,2 e 6 km/h a equação de
  * caminhada subestima o passo apertado, e a troca seca para a de corrida quase
  * dobraria o gasto de um décimo de km/h para o outro: nesse trecho o custo vai
  * de uma equação à outra em linha reta.
@@ -81,6 +91,8 @@ export type Totals = {
   bpmCount: number;
   bpmSum: number;
   peakBpm: number;
+  /** Quantas das leituras vieram da cinta no peito. Não existe nos registros mais antigos. */
+  strapCount?: number;
   /**
    * Custo metabólico somado segundo a segundo, em METs × ms: a base da
    * estimativa de kcal. Não existe nos registros mais antigos.
@@ -109,8 +121,23 @@ export type StageLog = {
 };
 /** Soma e quantidade das leituras de BPM de um minuto de treino em movimento. */
 export type MinuteBeats = [sum: number, count: number];
-/** Ajuste de carga aplicado durante o treino. */
-export type Change = { second: number; stage: number; decision: string; bpm: number };
+/**
+ * Carga medida num minuto de treino em movimento: a velocidade e a inclinação
+ * somadas no tempo (km/h × ms e % × ms) e os ms que entraram na soma.
+ */
+export type MinuteLoad = [kmhMs: number, inclineMs: number, ms: number];
+/**
+ * Ajuste de carga aplicado durante o treino. `from` e `to` são os alvos de
+ * antes e de depois, como [km/h, %]; não existem nos registros mais antigos.
+ */
+export type Change = {
+  second: number;
+  stage: number;
+  decision: string;
+  bpm: number;
+  from?: [number, number];
+  to?: [number, number];
+};
 export type Workout = {
   id: string;
   started: number;
@@ -129,6 +156,8 @@ export type Workout = {
   changes?: Change[];
   /** As leituras de BPM minuto a minuto, para a linha do tempo do treino. */
   beats?: MinuteBeats[];
+  /** A carga medida minuto a minuto, de onde saem os patamares da sessão. Os registros mais antigos não têm. */
+  loads?: MinuteLoad[];
 };
 export const levels = [
   'Dados insuficientes',
@@ -250,6 +279,7 @@ export function newWorkout(
       bpmCount: 0,
       bpmSum: 0,
       peakBpm: 0,
+      strapCount: 0,
       metMs: 0,
     },
     ended: null,
@@ -272,6 +302,7 @@ function step(sample: TreadmillSample, previous: TreadmillSample | null) {
     speed,
     dt: gap > 0 && gap <= 5000 ? gap : 0,
     bpm: validBpm(sample.heartRateBpm) ? sample.heartRateBpm : null,
+    strap: sample.heartRateSource === 'strap',
   };
 }
 
@@ -286,6 +317,7 @@ export function accumulate(t: Totals, sample: TreadmillSample, previous: Treadmi
     bpmCount: t.bpmCount + (s.bpm === null ? 0 : 1),
     bpmSum: t.bpmSum + (s.bpm ?? 0),
     peakBpm: Math.max(t.peakBpm, s.bpm ?? 0),
+    strapCount: (t.strapCount ?? 0) + (s.bpm !== null && s.strap ? 1 : 0),
     metMs: (t.metMs ?? 0) + energyCost(s.speed, sample.inclinationPercent ?? 0) * s.dt,
   };
 }
@@ -353,6 +385,29 @@ export function logBeats(
   return Array.from({ length: Math.max(beats?.length ?? 0, minute + 1) }, (_, i): MinuteBeats => {
     const [sum, count] = beats?.[i] ?? [0, 0];
     return i === minute ? [sum + bpm, count + 1] : [sum, count];
+  });
+}
+
+/**
+ * Soma a carga medida nesta amostra ao minuto em que o treino está. `elapsed`
+ * são os segundos já feitos em movimento.
+ */
+export function logLoads(
+  loads: MinuteLoad[] | undefined,
+  sample: TreadmillSample,
+  previous: TreadmillSample | null,
+  elapsed: number,
+): MinuteLoad[] {
+  const s = step(sample, previous);
+  if (!s || !s.dt) return loads ?? [];
+  const minute = Math.floor(elapsed / 60);
+  const incline = sample.inclinationPercent ?? 0;
+  return Array.from({ length: Math.max(loads?.length ?? 0, minute + 1) }, (_, i): MinuteLoad => {
+    const [kmhMs, inclineMs, ms] = loads?.[i] ?? [0, 0, 0];
+    // Somas inteiras: o registro é gravado a cada 10 s e não precisa de 15 casas.
+    return i === minute
+      ? [Math.round(kmhMs + s.speed * s.dt), Math.round(inclineMs + incline * s.dt), ms + s.dt]
+      : [kmhMs, inclineMs, ms];
   });
 }
 

@@ -1,5 +1,4 @@
 import type { TreadmillSample } from '@/treadmill/types';
-import { decisions, pulseFeatures, type Reading } from '../adaptive';
 import {
   accumulate,
   currentCue,
@@ -7,6 +6,8 @@ import {
   logStage,
   makePlan,
   newWorkout,
+  type MinuteBeats,
+  type MinuteLoad,
   type Plan,
   type Profile,
   type Stage,
@@ -20,14 +21,13 @@ import {
   historyItem,
   parseAssess,
   parsePlan,
-  parseReview,
   planProcedure,
   planPrompt,
+  plateaus,
   PROMPT_VERSION,
-  reviewPrompt,
   summarize,
 } from '../prompts';
-import { week, zones, type Session } from '../week';
+import { sessionPlan, week, zones, type Session } from '../week';
 
 // 40 anos: FC máxima estimada de 180. Base aeróbica de 117 a 135 BPM, VO₂máx de 162 a 171.
 const profile: Profile = { age: 40, weightKg: 78, heightCm: 175 };
@@ -76,7 +76,7 @@ const planAt = (pace: number, grade: number): Plan => ({
   objective: 'Base aeróbica',
   zone: zones['Base aeróbica'],
 });
-const plan = planAt(5.6, 2.5);
+const plan = planAt(5.2, 3);
 // A pessoa segura o sensor nos últimos 30 s de cada bloco de esforço e por volta de 1 min de recuperação.
 const grip = (work: number, recovery: number) => (stage: Stage | null, _: number, into: number) =>
   !stage
@@ -101,13 +101,14 @@ it('resume a sessão por tipo de bloco, com custo da carga, fim de bloco, recupe
     recoveryDrops: [16, 16],
     reductions: 0,
     validatedPeakBpm: 126,
+    bpmSource: 'sensor de mão',
   });
   expect(s.work).toMatchObject({
-    kmh: 5.6,
-    inclinePercent: 2.5,
-    mets: 4.9,
-    targetKmh: 5.6,
-    targetInclinePercent: 2.5,
+    kmh: 5.2,
+    inclinePercent: 3,
+    mets: 4.8,
+    targetKmh: 5.2,
+    targetInclinePercent: 3,
     bpmEnd: 126,
   });
   expect(s.easy).toMatchObject({ kmh: 4, inclinePercent: 0 });
@@ -117,7 +118,7 @@ it('resume a sessão por tipo de bloco, com custo da carga, fim de bloco, recupe
   expect(historyItem(done(3), NOW)).toMatchObject({
     daysAgo: 3,
     goal: 'Base aeróbica',
-    work: { kmh: 5.6, inclinePercent: 2.5, mets: 4.9, targetKmh: 5.6, targetInclinePercent: 2.5, bpmEnd: 126 },
+    work: { kmh: 5.2, inclinePercent: 3, mets: 4.8, targetKmh: 5.2, targetInclinePercent: 3, bpmEnd: 126 },
     zone: { low: 117, high: 135 },
     position: 'na faixa',
     recoveryDrops: [16, 16],
@@ -166,12 +167,24 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   expect(user.hr).toEqual({ restBpm: null, maxBpm: 180, maxSource: 'idade' });
   expect(user.loads[0]).toEqual({ pace: 3, grade: 0, mets: 2.4 });
   // A escada não tem carga entre o teto da caminhada e o começo da corrida, e o prompt diz isso.
-  expect(user.loads.filter((r) => r.pace > 5.6 && r.pace < 7)).toEqual([]);
-  expect(system).toContain('A pessoa caminha até 5,6 km/h e só corre a partir de 7 km/h');
-  expect(system).toContain('Nenhuma linha fica acima de 5,6 e abaixo de 7 km/h.');
-  expect(system).toContain('o work.targetKmh dela é de até 5,6 ou de 7 em diante');
-  expect(system).toContain('Com work.targetKmh acima de 5,6 e abaixo de 7, a carga da referência não pode ser repetida');
-  expect(PROMPT_VERSION).toBe('6');
+  expect(user.loads.filter((r) => r.pace > 5.2 && r.pace < 6)).toEqual([]);
+  expect(system).toContain('A pessoa caminha até 5,2 km/h e só corre a partir de 6 km/h');
+  expect(system).toContain('Nenhuma linha fica acima de 5,2 e abaixo de 6 km/h, e as de corrida têm rampa de 1%.');
+  // Correndo, a rampa não passa de 2%: a escada só tem corrida a 1%, e o prompt diz o limite.
+  expect(user.loads.filter((r) => r.pace >= 6).every((r) => r.grade === 1)).toBe(true);
+  expect(system).toContain('Correndo, a rampa não passa de 2%.');
+  expect(system).toContain(
+    'work.targetKmh é de até 5,2 (caminhada, com qualquer rampa), ou quando work.targetKmh é de 6 em diante e work.targetInclinePercent é de até 2 (corrida)',
+  );
+  expect(system).toContain(
+    'Com work.targetKmh acima de 5,2 e abaixo de 6, ou de 6 em diante com work.targetInclinePercent acima de 2, a carga da referência não pode ser repetida',
+  );
+  // O prompt já não fala em leitura só de 3 em 3 minutos: com a cinta ela é contínua.
+  expect(system).toContain('o tempo todo com a cinta no peito');
+  expect(PROMPT_VERSION).toBe('7');
+  // Vão até 6 sessões válidas, e não mais 5.
+  const seven = [1, 2, 3, 4, 5, 6, 7].map((days) => done(days));
+  expect(data(base, seven).recent.map((r) => r.daysAgo)).toEqual([1, 2, 3, 4, 5, 6]);
   // Do perfil só vai a idade.
   expect(user.profile).toEqual({ age: 40 });
   expect(JSON.stringify(user)).not.toMatch(/weightKg|heightCm|activity/);
@@ -179,145 +192,196 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
 });
 
 it('a conta do plano repete a carga que ficou junto do teto da faixa e recalcula pela reta de FC por MET', () => {
-  // Sem nenhuma sessão: 1 + (135 − 70) ÷ 15 = 5,3 METs, e 5,6 km/h a 3,5% custa 5,3.
-  expect(planProcedure(data(base, []))).toEqual({ pace: 5.6, grade: 3.5, repeat: false });
+  // Sem nenhuma sessão: 1 + (135 − 70) ÷ 15 = 5,3 METs, e 5,2 km/h a 4% custa 5,3.
+  expect(planProcedure(data(base, []))).toEqual({ pace: 5.2, grade: 4, repeat: false });
   // Mesma sessão com 133 BPM, a 2 do teto de 135: repete os alvos em que ela terminou.
-  expect(planProcedure(data(base, [done(2, 133)]))).toEqual({ pace: 5.6, grade: 2.5, repeat: true });
-  // 126 BPM está na faixa, mas 9 abaixo do teto: a 15 bpm por MET, o alvo sobe de 4,9 para 5,5 METs.
-  expect(planProcedure(data(base, [done(2)]))).toEqual({ pace: 5.6, grade: 3.5, repeat: false });
-  // 105 BPM a 4,9 METs, sem repouso: 15 bpm por MET, alvo de 6,9 METs.
-  expect(planProcedure(data(base, [done(2, 105, 95)]))).toEqual({ pace: 5.6, grade: 6.5, repeat: false });
-  // Com repouso de 70 a reta é da própria pessoa: 9 bpm por MET, alvo de 8,2 METs. A rampa a
-  // 5,6 km/h para em 7,5 METs e não há carga até a corrida: a escolha é correr a 7 km/h.
-  const rested = (restBpm: number) => [{ ...done(2, 105, 95), restBpm }];
-  expect(planProcedure(data(base, rested(85)))).toEqual({ pace: 7, grade: 1, repeat: false });
+  expect(planProcedure(data(base, [done(2, 133)]))).toEqual({ pace: 5.2, grade: 3, repeat: true });
+  // 126 BPM está na faixa, mas 9 abaixo do teto: a 15 bpm por MET, o alvo sobe de 4,8 para 5,4 METs.
+  expect(planProcedure(data(base, [done(2)]))).toEqual({ pace: 5.2, grade: 4, repeat: false });
+  // 106 BPM a 4,8 METs, sem repouso: 15 bpm por MET, alvo de 6,7 METs.
+  expect(planProcedure(data(base, [done(2, 106, 95)]))).toEqual({ pace: 5.2, grade: 7, repeat: false });
+  // Com repouso de 70 a reta é da própria pessoa: 9,5 bpm por MET, alvo de 7,9 METs. A rampa a
+  // 5,2 km/h para em 6,8 METs e não há carga até a corrida: a escolha é correr a 6,5 km/h.
+  const rested = (restBpm: number) => [{ ...done(2, 106, 95), restBpm }];
+  expect(planProcedure(data(base, rested(85)))).toEqual({ pace: 6.5, grade: 1, repeat: false });
   // Uma reta fora de 8 a 25 bpm por MET é leitura ruim: vale 15.
-  expect(planProcedure(data(base, rested(115)))).toMatchObject({ pace: 5.6, grade: 6.5 });
-  // Acima da faixa (151 BPM): alvo de 3,8 METs, e a carga recua para a caminhada plana a 5,6 km/h.
-  expect(planProcedure(data(base, [done(2, 151, 130)]))).toMatchObject({ pace: 5.6, grade: 0 });
-  // Primeiro VO₂máx, com pontos de 4,9 METs (126) e 3,1 METs (100): 14 bpm por MET, alvo de 8,0 METs.
+  expect(planProcedure(data(base, rested(115)))).toMatchObject({ pace: 5.2, grade: 7 });
+  // Acima da faixa (151 BPM): alvo de 3,7 METs, e a carga recua para 5,2 km/h a 0,5%.
+  expect(planProcedure(data(base, [done(2, 151, 130)]))).toMatchObject({ pace: 5.2, grade: 0.5 });
+  // Primeiro VO₂máx, com pontos de 4,8 METs (126) e 3,1 METs (100): 15 bpm por MET, alvo de 7,7 METs.
   const two = [done(1), done(2, 100, 92, planAt(4.5, 0))];
-  expect(planProcedure(data(vo2, two))).toEqual({ pace: 7, grade: 1, repeat: false });
+  expect(planProcedure(data(vo2, two))).toEqual({ pace: 6.5, grade: 1, repeat: false });
   // Registro antigo só conta quando não há outro.
   const old = { ...done(1, 150, 130), log: undefined, changes: undefined, hr: undefined };
-  expect(planProcedure(data(base, [old, done(2, 133)]))).toEqual({ pace: 5.6, grade: 2.5, repeat: true });
+  expect(planProcedure(data(base, [old, done(2, 133)]))).toEqual({ pace: 5.2, grade: 3, repeat: true });
   // Em recuperação a faixa inteira serve: 100 BPM, dentro de 90–108, repete a carga.
   const easy = done(2, 100, 92, { ...planAt(4.5, 0), goal: 'Recuperação ativa', objective: 'Recuperação', zone: zones['Recuperação'] });
   expect(planProcedure(data(week[3].session!, [easy]))).toEqual({ pace: 4.5, grade: 0, repeat: true });
 });
 
-it('uma referência que terminou entre 5,6 e 7 km/h não é repetida: a carga sai da reta', () => {
-  // Sessão antiga a 6 km/h e 2% (4,9 METs) com 133 BPM, dentro do alvo de 132 a 135.
-  // Repetir pediria 6 km/h, que a escada já não tem: 4,9 + 2 ÷ 15 = 5,0 METs, 5,6 km/h a 2,5%.
-  const six = done(2, 133, 110, planAt(6, 2));
-  expect(historyItem(six, NOW).work).toMatchObject({ targetKmh: 6, targetInclinePercent: 2, mets: 4.9, bpmEnd: 133 });
-  expect(planProcedure(data(base, [six]))).toEqual({ pace: 5.6, grade: 2.5, repeat: false });
-  // A 6 km/h e 2,5% (5,1 METs) com 134 BPM: alvo de 5,2 METs, 5,6 km/h a 3%.
-  expect(planProcedure(data(base, [done(2, 134, 110, planAt(6, 2.5))]))).toEqual({
-    pace: 5.6,
+it('uma referência que terminou entre 5,2 e 6 km/h não é repetida: a carga sai da reta', () => {
+  // Sessão antiga a 5,6 km/h e 2% (4,6 METs) com 133 BPM, dentro do alvo de 132 a 135.
+  // Repetir pediria 5,6 km/h, que a escada já não tem: 4,6 + 2 ÷ 15 = 4,7 METs, 5,2 km/h a 2,5%.
+  const old = done(2, 133, 110, planAt(5.6, 2));
+  expect(historyItem(old, NOW).work).toMatchObject({ targetKmh: 5.6, targetInclinePercent: 2, mets: 4.6, bpmEnd: 133 });
+  expect(planProcedure(data(base, [old]))).toEqual({ pace: 5.2, grade: 2.5, repeat: false });
+  // A 5,6 km/h e 2,5% (4,9 METs) com 134 BPM: alvo de 5,0 METs, 5,2 km/h a 3%.
+  expect(planProcedure(data(base, [done(2, 134, 110, planAt(5.6, 2.5))]))).toEqual({
+    pace: 5.2,
     grade: 3,
     repeat: false,
   });
-  // Nas duas pontas do vão a repetição continua: 5,6 km/h e 7 km/h.
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.6, 2.5))]))).toEqual({
-    pace: 5.6,
-    grade: 2.5,
+  // Nas duas pontas do vão a repetição continua: 5,2 km/h e 6 km/h.
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.2, 3))]))).toEqual({
+    pace: 5.2,
+    grade: 3,
     repeat: true,
   });
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(7, 1))]))).toEqual({ pace: 7, grade: 1, repeat: true });
-  // Logo acima de 5,6 e logo abaixo de 7 também recalculam.
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.7, 2))]))).toMatchObject({ repeat: false });
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6.9, 1))]))).toMatchObject({ repeat: false });
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 1))]))).toEqual({ pace: 6, grade: 1, repeat: true });
+  // Correndo, a rampa não passa de 2%: uma corrida a 2% se repete, e uma a 2,5% é recalculada
+  // (7,4 METs + 2 ÷ 15 = 7,5 METs: corrida a 6,5 km/h e 1%).
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 2))]))).toEqual({ pace: 6, grade: 2, repeat: true });
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 2.5))]))).toEqual({ pace: 6.5, grade: 1, repeat: false });
+  expect(() => parsePlan(data(base, [done(2, 133, 110, planAt(6, 2.5))]))({ pace: 6, grade: 2.5 })).toThrow();
+  // Caminhando, a rampa continua livre.
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.2, 9))]))).toEqual({ pace: 5.2, grade: 9, repeat: true });
+  // Logo acima de 5,2 e logo abaixo de 6 também recalculam.
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.3, 2))]))).toMatchObject({ repeat: false });
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.9, 1))]))).toMatchObject({ repeat: false });
+  // Uma caminhada antiga com alvo de 5,7 km/h e a lona a 6 continua contando como caminhada
+  // (4,4 METs), e não como corrida a 6 km/h (7,0 METs): o custo errado entortaria a reta.
+  const brisk = simulate(planAt(5.7, 1), grip(139, 110), 2000, NOW - 2 * DAY);
+  const fast = {
+    ...brisk,
+    log: brisk.log!.map((l, i) => (planAt(5.7, 1).stages[i].measure ? l : { ...l, distanceM: (6 * l.ms) / 3600 })),
+  };
+  expect(historyItem(fast, NOW).work).toMatchObject({ kmh: 6, targetKmh: 5.7, mets: 4.4 });
+  // Planejada e feita a 6 km/h, é corrida.
+  expect(historyItem(done(2, 150, 120, planAt(6, 1)), NOW).work).toMatchObject({ kmh: 6, mets: 7 });
   // Sem repetição exata, a resposta da IA pode cair na linha vizinha; a carga antiga é recusada.
-  const parse = parsePlan(data(base, [six]));
-  expect(parse({ pace: 5.6, grade: 2.5 })).toMatchObject({ pace: 5.6, grade: 2.5 });
-  expect(parse({ pace: 5.6, grade: 3 })).toMatchObject({ grade: 3 });
-  expect(() => parse({ pace: 6, grade: 2 })).toThrow();
+  const parse = parsePlan(data(base, [old]));
+  expect(parse({ pace: 5.2, grade: 2.5 })).toMatchObject({ pace: 5.2, grade: 2.5 });
+  expect(parse({ pace: 5.2, grade: 3 })).toMatchObject({ grade: 3 });
+  expect(() => parse({ pace: 5.6, grade: 2 })).toThrow();
 });
 
 it('confere a resposta do plano com a conta do app, aceitando número em texto', () => {
-  // A conta dá 5,6 km/h a 6,5%.
-  const parse = parsePlan(data(base, [done(2, 105, 95)]));
-  expect(parse({ why: ' 105 BPM a 4,9 METs. ', pace: '5,6', grade: '6,5' })).toEqual({
-    why: '105 BPM a 4,9 METs.',
-    pace: 5.6,
-    grade: 6.5,
+  // A conta dá 5,2 km/h a 7%.
+  const parse = parsePlan(data(base, [done(2, 106, 95)]));
+  expect(parse({ why: ' 106 BPM a 4,8 METs. ', pace: '5,2', grade: '7' })).toEqual({
+    why: '106 BPM a 4,8 METs.',
+    pace: 5.2,
+    grade: 7,
   });
   // A linha vizinha da escada passa: é um arredondamento no meio da conta.
-  expect(parse({ pace: 5.6, grade: 6 }).grade).toBe(6);
-  expect(parse({ pace: 5.6, grade: 7 }).grade).toBe(7);
+  expect(parse({ pace: 5.2, grade: 6.5 }).grade).toBe(6.5);
+  expect(parse({ pace: 5.2, grade: 7.5 }).grade).toBe(7.5);
   // Mais longe que isso é erro de conta: a chamada é repetida.
-  expect(() => parse({ pace: 5.6, grade: 7.5 })).toThrow();
+  expect(() => parse({ pace: 5.2, grade: 6 })).toThrow();
   // Uma carga entre o teto da caminhada e a corrida não está na escada.
-  expect(() => parse({ pace: 6, grade: 6.5 })).toThrow();
+  expect(() => parse({ pace: 5.6, grade: 7 })).toThrow();
   expect(() => parse({ pace: 9, grade: 1 })).toThrow();
   expect(() => parse({ pace: 40, grade: 1 })).toThrow();
-  expect(() => parse({ pace: 5.6 })).toThrow();
+  expect(() => parse({ pace: 5.2 })).toThrow();
   expect(() => parse(null)).toThrow();
   // A repetição da sessão anterior tem de ser exata.
   const repeat = parsePlan(data(base, [done(2, 133)]));
-  expect(repeat({ pace: 5.6, grade: 2.5 })).toMatchObject({ pace: 5.6, grade: 2.5 });
-  expect(() => repeat({ pace: 5.6, grade: 3 })).toThrow();
+  expect(repeat({ pace: 5.2, grade: 3 })).toMatchObject({ pace: 5.2, grade: 3 });
+  expect(() => repeat({ pace: 5.2, grade: 3.5 })).toThrow();
 });
 
-it('a revisão envia leituras relativas, o resumo já calculado e só aceita o aumento permitido', () => {
-  const workout = { ...done(0), changes: [{ second: 1500, stage: 1, decision: 'reduzir inclinação', bpm: 146 }] };
-  const stage = plan.stages[3];
-  const readings: Reading[] = [126, 127, 127, 128].map((bpm, i) => ({
-    bpm,
-    at: NOW - (3 - i) * 1000,
-    kmh: 5.6,
-    incline: 2.5,
-  }));
-  const features = pulseFeatures(readings, { low: 117, high: 135 })!;
-  const allowed = ['manter', 'aumentar inclinação'] as const;
-  const input = {
-    workout,
-    index: 3,
-    left: 200,
-    load: { stage, easy: false, reached: true, secondsAtLoad: 300 },
-    readings,
-    features,
-    allowed: [...allowed],
-    now: NOW,
+// Uma sessão contínua de 45 min (5 de aquecimento, 35 de esforço, 5 de volta à calma) gravada
+// minuto a minuto. `ramp` diz como a carga andou no bloco: [minutos, rampa, BPM] de cada trecho.
+function recorded(ramp: [number, number, number][], daysAgo = 2, endBpm = 131): Workout {
+  const continuous: Plan = sessionPlan(base, 5.2, ramp[ramp.length - 1][1]);
+  const w = simulate(continuous, grip(endBpm, 110), 2800, NOW - daysAgo * DAY);
+  const loads: MinuteLoad[] = [];
+  const beats: MinuteBeats[] = [];
+  const minute = (kmh: number, grade: number, bpm: number) => {
+    loads.push([kmh * 60000, grade * 60000, 60000]);
+    beats.push([bpm * 60, 60]);
   };
-  const { system, user } = reviewPrompt(input);
-  expect(user).toMatchObject({
-    zone: { objective: 'Base aeróbica', low: 117, high: 135 },
-    stage: {
-      name: 'Base aeróbica 2/2',
-      kind: 'principal',
-      targetKmh: 5.6,
-      targetInclinePercent: 2.5,
-      secondsInStage: stage.seconds - 200,
-      secondsRemaining: 200,
-      secondsAtLoad: 300,
-      laterBlocks: 0,
-    },
-    // A IA só é consultada com a mediana dentro da faixa e abaixo do teto.
-    bpm: { count: 4, median: 127, position: 'na faixa', marginBpm: 0, belowTopBpm: 8 },
-    readings: [{ secondsAgo: 3, bpm: 126 }, { secondsAgo: 2 }, { secondsAgo: 1 }, { secondsAgo: 0, bpm: 128 }],
-    // As correções do app entram no histórico de ajustes do dia.
-    session: { goal: 'Base aeróbica', changes: [{ decision: 'reduzir inclinação', bpm: 146 }] },
-    profile: { age: 40 },
-    allowed,
-  });
-  // No primeiro bloco ainda vem outro igual: um ajuste feito ali vale para ele.
-  expect(reviewPrompt({ ...input, index: 1 }).user).toMatchObject({ stage: { laterBlocks: 1 } });
-  // O prompt fala só em manter e aumentar: reduzir é com o app, que corrige sozinho fora da faixa.
-  for (const option of decisions.filter((d) => !d.startsWith('reduzir')))
-    expect(system).toContain('"' + option + '"');
-  expect(system).not.toMatch(/reduzir|reduza/i);
-  expect(system).toContain('o próprio app corrige a carga na hora, sem consultar você');
-  const parse = parseReview([...allowed]);
-  expect(parse({ reason: ' 8 bpm abaixo do teto ', decision: 'aumentar inclinação' })).toEqual({
-    decision: 'aumentar inclinação',
-    reason: '8 bpm abaixo do teto',
-  });
-  // Uma decisão válida mas fora da lista do momento é rejeitada, para a chamada ser repetida.
-  expect(() => parse({ decision: 'aumentar velocidade' })).toThrow();
-  expect(() => parse({ decision: 'reduzir inclinação' })).toThrow();
-  expect(() => parse({ decision: 'parar' })).toThrow();
+  for (let m = 0; m < 5; m++) minute(4, 0, 95);
+  for (const [minutes, grade, bpm] of ramp) for (let m = 0; m < minutes; m++) minute(5.2, grade, bpm);
+  for (let m = 0; m < 5; m++) minute(4, 0, 110);
+  return { ...w, loads, beats };
+}
+
+it('os patamares saem da carga e dos batimentos minuto a minuto', () => {
+  const w = recorded([[4, 2, 126], [8, 3, 133], [10, 2.5, 134], [13, 2, 133]]);
+  expect(plateaus(w)).toEqual([
+    { fromMinute: 0, minutes: 4, kmh: 5.2, inclinePercent: 2, mets: 4.4, bpm: 126 },
+    { fromMinute: 4, minutes: 8, kmh: 5.2, inclinePercent: 3, mets: 4.8, bpm: 133 },
+    { fromMinute: 12, minutes: 10, kmh: 5.2, inclinePercent: 2.5, mets: 4.6, bpm: 134 },
+    { fromMinute: 22, minutes: 13, kmh: 5.2, inclinePercent: 2, mets: 4.4, bpm: 133 },
+  ]);
+  // O BPM do patamar é a mediana dos minutos depois do primeiro, em que a FC ainda se ajusta.
+  const settling = { ...w, beats: w.beats!.map((b, m): MinuteBeats => (m === 9 ? [120 * 60, 60] : b)) };
+  expect(plateaus(settling)[1]).toMatchObject({ fromMinute: 4, bpm: 133 });
+  // Um trecho de 1 minuto é passagem, e um minuto com a lona quase toda parada corta o patamar.
+  const passing = recorded([[4, 2, 126], [1, 2.5, 129], [30, 3, 133]]);
+  expect(plateaus(passing).map((p) => [p.fromMinute, p.minutes, p.inclinePercent])).toEqual([
+    [0, 4, 2],
+    [5, 30, 3],
+  ]);
+  const paused = { ...w, loads: w.loads!.map((l, m): MinuteLoad => (m === 20 ? [5.2 * 20000, 2.5 * 20000, 20000] : l)) };
+  expect(plateaus(paused).map((p) => [p.fromMinute, p.minutes, p.inclinePercent])).toEqual([
+    [0, 4, 2],
+    [4, 8, 3],
+    [12, 3, 2.5],
+    [16, 6, 2.5],
+    [22, 13, 2],
+  ]);
+  // Sem leitura de BPM depois do primeiro minuto o trecho não vira patamar.
+  const blind = { ...w, beats: w.beats!.map((b, m): MinuteBeats => (m >= 9 && m < 17 ? [0, 0] : b)) };
+  expect(plateaus(blind).map((p) => p.fromMinute)).toEqual([0, 12, 22]);
+  // Os registros mais antigos não têm a carga por minuto.
+  expect(plateaus(done(2))).toEqual([]);
+  expect(summarize(done(2)).plateaus).toBeUndefined();
+  expect(historyItem(done(2), NOW).work).not.toHaveProperty('reference');
+});
+
+it('numa sessão contínua a carga de referência é o primeiro patamar no alvo, não a carga do fim', () => {
+  // A carga subiu de 2% para 3%, onde o BPM chegou ao alvo (132 a 135), e desceu de volta a 2%
+  // com a FC subindo aos poucos. A sessão terminou a 2% com 131 BPM.
+  const w = recorded([[4, 2, 126], [8, 3, 133], [10, 2.5, 134], [13, 2, 133]]);
+  const reference = {
+    kmh: 5.2,
+    inclinePercent: 3,
+    mets: 4.8,
+    targetKmh: 5.2,
+    targetInclinePercent: 3,
+    bpmEnd: 133,
+    reference: { fromMinute: 4, minutes: 8 },
+  };
+  expect(summarize(w).work).toMatchObject(reference);
+  expect(historyItem(w, NOW)).toMatchObject({ work: reference, position: 'na faixa' });
+  expect(historyItem(w, NOW).plateaus).toHaveLength(4);
+  // A partida de hoje repete os 3% do patamar, e não os 2% em que a sessão acabou.
+  expect(planProcedure(data(base, [w]))).toEqual({ pace: 5.2, grade: 3, repeat: true });
+  // Sem nenhum patamar no alvo vale o que chegou mais perto: 128 BPM a 2,5% (4,6 METs).
+  // 4,6 + 7 ÷ 15 = 5,07 METs: 5,2 km/h a 3,5%.
+  const short = recorded([[10, 2, 120], [25, 2.5, 128]], 2, 128);
+  expect(historyItem(short, NOW).work).toMatchObject({ inclinePercent: 2.5, bpmEnd: 128, reference: { fromMinute: 10 } });
+  expect(planProcedure(data(base, [short]))).toEqual({ pace: 5.2, grade: 3.5, repeat: false });
+  // Um patamar curto no alvo não serve de referência: 4 minutos a 3,5% com 134 BPM é carga
+  // alta demais, que logo passou do teto. Vale o primeiro de 5 minutos ou mais, a 3%.
+  const brief = recorded([[4, 2.5, 124], [4, 3.5, 134], [27, 3, 133]], 2, 133);
+  expect(historyItem(brief, NOW).work).toMatchObject({ inclinePercent: 3, bpmEnd: 133, reference: { fromMinute: 8 } });
+  // Sem nenhum patamar de 5 minutos valem os de 3.
+  const choppy = recorded([[4, 2.5, 124], [4, 3.5, 134], [4, 3, 133], [4, 3.5, 135], [4, 3, 133], [4, 2.5, 131], [4, 3, 133], [4, 2.5, 132], [3, 2, 130]]);
+  expect(historyItem(choppy, NOW).work).toMatchObject({ inclinePercent: 3.5, bpmEnd: 134, reference: { fromMinute: 4, minutes: 4 } });
+  // Com mais de um bloco de esforço a referência continua sendo o fim dos blocos.
+  const blocks = { ...done(2, 133), loads: w.loads, beats: w.beats };
+  expect(historyItem(blocks, NOW).work).not.toHaveProperty('reference');
+  expect(historyItem(blocks, NOW).work).toMatchObject({ targetInclinePercent: 3, bpmEnd: 133 });
+  // A avaliação recebe os patamares da sessão e de onde vieram os batimentos.
+  const strapped = { ...w, totals: { ...w.totals, strapCount: w.totals.bpmCount } };
+  const { system, user } = assessPrompt({ workout: strapped, history: [] });
+  expect(user).toMatchObject({ session: { bpmSource: 'cinta', work: reference } });
+  expect((user as { session: { plateaus: unknown[] } }).session.plateaus).toHaveLength(4);
+  expect(system).toContain('plateaus');
+  expect(system).not.toMatch(/leituras válidas do sensor de mão/);
 });
 
 it('a avaliação recebe só os dois números que decidem a FC máxima e prende a previsão aos limites', () => {
@@ -327,7 +391,7 @@ it('a avaliação recebe só os dois números que decidem a FC máxima e prende 
   const { system, user } = assessPrompt(input);
   expect(user).toMatchObject({
     profile: { age: 40 },
-    session: { goal: 'Base aeróbica', work: { bpmEnd: 126, mets: 4.9 }, recoveryDrops: [16, 16] },
+    session: { goal: 'Base aeróbica', work: { bpmEnd: 126, mets: 4.8 }, recoveryDrops: [16, 16] },
     recent: [{ daysAgo: 2 }, { daysAgo: 4, level: 'Em adaptação' }],
     // Pico de 126 em sessões concluídas sem redução: piso de 131, abaixo da estimativa pela idade.
     heart: { ageEstimateBpm: 180, floorBpm: 131 },
