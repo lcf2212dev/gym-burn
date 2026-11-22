@@ -2,8 +2,8 @@
 // da sessão do dia, a leitura dos batimentos contra o alvo e a carga contra o
 // alvo. Aqui só há conta e texto; as telas só desenham.
 
-import type { Stage, Zone } from './model';
-import { describe, type Session } from './week';
+import { levels, type MinuteBeats, type Stage, type Workout, type Zone } from './model';
+import { describe, heartZones, sessionMinutes, week, type Session } from './week';
 
 /** Etapas iguais do plano numa linha só, como "4 × 4:00 VO₂máx". */
 export type StageGroup = {
@@ -102,4 +102,53 @@ export function heartStatus({
 /** A carga lida da esteira bate com a do guia, a menos do arredondamento do painel. */
 export function onTarget(actual: number | null, target: number | null) {
   return actual !== null && target !== null && Math.abs(actual - target) < 0.05 + 1e-9;
+}
+
+/** Treinos e tempo em movimento dos últimos `days` dias. */
+export function recentActivity(history: Workout[], now: number, days = 21) {
+  const since = now - days * 24 * 60 * 60 * 1000;
+  const recent = history.filter((w) => w.started >= since);
+  return { count: recent.length, movingMs: recent.reduce((sum, w) => sum + w.totals.movingMs, 0) };
+}
+
+/** Duração em horas e minutos, como "1 h 15 min"; abaixo de uma hora, só os minutos. */
+export function formatHours(ms: number) {
+  const minutes = Math.round(ms / 60000);
+  const [hours, rest] = [Math.floor(minutes / 60), minutes % 60];
+  return [hours ? hours + ' h' : '', rest || !hours ? rest + ' min' : ''].filter(Boolean).join(' ');
+}
+
+/**
+ * O degrau do nível da IA, de 0 (em adaptação) a 2 (base consistente). Sem
+ * avaliação, ou com dados insuficientes, não há degrau.
+ */
+export function levelStep(level: string | undefined) {
+  const index = levels.indexOf(level as (typeof levels)[number]);
+  return index > 0 ? index - 1 : null;
+}
+
+/** A média de BPM de cada minuto da sessão; `null` no minuto sem leitura. */
+export function minuteColumns(beats: MinuteBeats[] | undefined, minutes: number) {
+  return Array.from({ length: minutes }, (_, minute) => {
+    const [sum, count] = beats?.[minute] ?? [0, 0];
+    return count ? Math.round(sum / count) : null;
+  });
+}
+
+/** A zona de um batimento, de 0 (Z1) a 4 (Z5), pela FC máxima. */
+export function zoneOf(bpm: number, max: number) {
+  return Math.max(0, heartZones.findLastIndex((zone) => bpm >= (max * zone.from) / 100));
+}
+
+/** Acerto dos cenários, em porcentagem inteira. */
+export function scorePercent(correct: number, runs: number) {
+  return runs ? Math.round((100 * correct) / runs) : 0;
+}
+
+/** O treino de hoje no plano semanal, em uma linha, para o rodapé da tela inicial. */
+export function todayLine(day: number) {
+  const { day: name, session } = week[day];
+  return (
+    'Hoje · ' + name + ' · ' + (session ? session.goal + ' · ' + sessionMinutes(session) + ' min' : 'descanso')
+  );
 }

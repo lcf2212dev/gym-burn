@@ -17,16 +17,19 @@ import type { Notice } from '@/treadmill/types';
 
 import { AmbientGlow } from '@/components/ambient-glow';
 import { BrandMark } from '@/components/brand-mark';
+import { Card } from '@/components/card';
 import { DeviceRow } from '@/components/device-row';
+import { IconBadge, StatusPill, type IconName } from '@/components/kit';
 import { NoticeBanner } from '@/components/notice-banner';
 import { Pill } from '@/components/pill';
 import { SectionLabel } from '@/components/section-label';
 import { Surface } from '@/components/surface';
-import { WorkoutLinks } from '@/components/workout-ui';
 import { UiButton } from '@/components/ui-button';
 import {
   BodyType,
+  Glass,
   LabelType,
+  Metric,
   MaxContentWidth,
   Neon,
   Spacing,
@@ -36,7 +39,10 @@ import {
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { looksLikeMatrixConsole } from '@/treadmill/t600x';
 import { useTheme } from '@/hooks/use-theme';
+import { useStrap } from '@/heart/strap-context';
 import { useTreadmill, useTreadmillActions } from '@/treadmill/treadmill-context';
+import { todayLine } from '@/workouts/briefing';
+import { useWorkout } from '@/workouts/context';
 
 /** Diâmetro do radar: cabe na largura de 360dp com o cartão e as margens. */
 const RADAR_SIZE = 168;
@@ -88,13 +94,12 @@ export function ConnectScreen() {
     }
   }, [actions, phase, scan]);
 
+  // O dia de abertura da tela, para a linha do treino de hoje no rodapé.
+  const [today] = useState(() => new Date().getDay());
   const version = Constants.expoConfig?.version ?? null;
   const footnote = (version ? 'versão ' + version : 'gym burn') + ' · somente leitura';
   const scanning = scan !== 'idle';
   const connecting = phase === 'connecting';
-  // Com a lista de esteiras na tela o rodapé fica embaixo dela; no palco da
-  // busca, que ocupa a tela até o fim, a mesma linha vai dentro do cartão.
-  const staged = connecting || visibleDevices.length === 0;
   const connectingName = device?.name ?? null;
   const hasFtms = visibleDevices.some((found) => found.advertisesFtms);
 
@@ -113,15 +118,22 @@ export function ConnectScreen() {
         keyboardShouldPersistTaps="handled">
         <View style={styles.content}>
           <View style={styles.header}>
-            <Pressable
-              onLongPress={actions.openDemo}
-              delayLongPress={700}
-              hitSlop={10}
-              accessibilityRole="button"
-              accessibilityLabel="Gym Burn"
-              accessibilityHint="Toque longo abre o modo demonstração">
-              <BrandMark size="md" subtitle="monitor de esteira" />
-            </Pressable>
+            <View style={styles.brand}>
+              <Pressable
+                onLongPress={actions.openDemo}
+                delayLongPress={700}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel="Gym Burn"
+                accessibilityHint="Toque longo abre o modo demonstração">
+                <BrandMark size="md" subtitle="monitor de esteira" />
+              </Pressable>
+              <StatusPill
+                icon="bluetooth"
+                color={connecting ? Neon.volt : scanning ? Neon.cyan : theme.textSecondary}
+                label={connecting ? 'Conectando' : scanning ? 'Procurando' : 'Busca parada'}
+              />
+            </View>
             <Text style={[styles.title, TitleType, { color: theme.text }]} accessibilityRole="header">
               Encontre sua esteira
             </Text>
@@ -130,8 +142,6 @@ export function ConnectScreen() {
             </Text>
           </View>
 
-          <UiButton label="Treino do dia" onPress={() => router.push('/treino')} />
-          <WorkoutLinks />
           <NoticeBanner notice={bannerNotice} onDismiss={actions.dismissNotice} />
 
           {connecting ? (
@@ -140,7 +150,6 @@ export function ConnectScreen() {
               detail="Conectando e lendo os dados da esteira. Mantenha o celular perto do painel."
               color={Neon.volt}
               active
-              footnote={footnote}
             />
           ) : visibleDevices.length === 0 ? (
             <ScanStage
@@ -153,10 +162,9 @@ export function ConnectScreen() {
               color={Neon.cyan}
               active={scanning}
               action={scanning ? undefined : { label: 'Procurar de novo', onPress: actions.startScan }}
-              footnote={footnote}
             />
           ) : (
-            <View style={styles.devices}>
+            <Card accent={Neon.cyan} style={styles.devices}>
               <SectionLabel
                 label="Esteiras encontradas"
                 accent={Neon.cyan}
@@ -197,17 +205,89 @@ export function ConnectScreen() {
                   style={styles.rescan}
                 />
               )}
-            </View>
+            </Card>
           )}
+          <Shortcuts />
 
-          {staged ? null : (
-            <Text style={[styles.footnote, styles.footer, LabelType, { color: theme.textMuted }]}>
-              {footnote}
-            </Text>
-          )}
+          <Text style={[styles.footnote, LabelType, { color: theme.textMuted }]}>{footnote}</Text>
         </View>
       </ScrollView>
+      {/* A ação principal fica presa no rodapé, com o treino de hoje embaixo. */}
+      <View style={[styles.actions, { borderColor: theme.border }]}>
+        <UiButton icon="target" label="Treino do dia" onPress={() => router.push('/treino')} />
+        <Text style={[styles.today, { color: theme.textSecondary }]}>{todayLine(today)}</Text>
+      </View>
     </SafeAreaView>
+  );
+}
+
+/**
+ * Os atalhos da tela inicial, cada um com o resumo do que há lá dentro: o
+ * perfil, o último nível da IA, a cinta e a prévia do painel.
+ */
+function Shortcuts() {
+  const router = useRouter();
+  const theme = useTheme();
+  const profile = useWorkout((s) => s.profile);
+  const history = useWorkout((s) => s.history);
+  const strap = useStrap((s) => s.saved);
+  const bpm = useStrap((s) => (s.phase === 'connected' ? s.bpm : null));
+  const real = history.filter((w) => w.source === 'ble');
+  const level = real.find((w) => w.estimate && w.estimate.level !== 'Dados insuficientes')?.estimate
+    ?.level;
+  const items: {
+    icon: IconName;
+    label: string;
+    sub: string;
+    color: string;
+    href: '/perfil' | '/evolucao' | '/cinta' | '/previa';
+  }[] = [
+    {
+      icon: 'user',
+      label: 'Perfil',
+      sub: profile
+        ? profile.age + ' anos · ' + String(profile.weightKg).replace('.', ',') + ' kg'
+        : 'Informe seus dados',
+      color: Neon.cyan,
+      href: '/perfil',
+    },
+    {
+      icon: 'trending-up',
+      label: 'Evolução',
+      sub:
+        level ??
+        (real.length ? real.length + (real.length === 1 ? ' treino' : ' treinos') : 'Nenhum treino ainda'),
+      color: Neon.violet,
+      href: '/evolucao',
+    },
+    {
+      icon: 'heart',
+      label: 'Cinta',
+      sub: strap ? (bpm !== null ? bpm + ' bpm agora' : (strap.name ?? 'Pareada')) : 'Nenhuma pareada',
+      color: Metric.heart,
+      href: '/cinta',
+    },
+    { icon: 'eye', label: 'Prévia', sub: 'Painel simulado', color: Neon.amber, href: '/previa' },
+  ];
+  return (
+    <View style={styles.shortcuts}>
+      {items.map((item) => (
+        <Pressable
+          key={item.href}
+          accessibilityRole="button"
+          accessibilityLabel={item.label + '. ' + item.sub}
+          onPress={() => router.push(item.href)}
+          style={({ pressed }) => [styles.shortcut, pressed && styles.pressed]}>
+          <IconBadge icon={item.icon} color={item.color} size={36} />
+          <View style={styles.shortcutText}>
+            <Text style={[styles.shortcutLabel, TitleType, { color: theme.text }]}>{item.label}</Text>
+            <Text style={[styles.shortcutSub, { color: theme.textSecondary }]} numberOfLines={1}>
+              {item.sub}
+            </Text>
+          </View>
+        </Pressable>
+      ))}
+    </View>
   );
 }
 
@@ -217,8 +297,6 @@ interface ScanStageProps {
   color: string;
   active: boolean;
   action?: { label: string; onPress: () => void };
-  /** Linha discreta no pé do cartão. */
-  footnote: string;
 }
 
 /**
@@ -239,7 +317,7 @@ function compareDevices(a: ScannedDevice, b: ScannedDevice): number {
  * O palco da busca: radar, o que está acontecendo e, se parado, o botão. Ocupa
  * a altura que sobra da tela, com o conteúdo no centro.
  */
-function ScanStage({ title, detail, color, active, action, footnote }: ScanStageProps) {
+function ScanStage({ title, detail, color, active, action }: ScanStageProps) {
   const theme = useTheme();
 
   return (
@@ -260,9 +338,6 @@ function ScanStage({ title, detail, color, active, action, footnote }: ScanStage
           accessibilityLabel="Procurar esteiras de novo"
         />
       ) : null}
-      <Text style={[styles.footnote, styles.stageFootnote, LabelType, { color: theme.textMuted }]}>
-        {footnote}
-      </Text>
     </Surface>
   );
 }
@@ -430,6 +505,41 @@ const styles = StyleSheet.create({
   header: {
     gap: Spacing.two,
   },
+  brand: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
+  },
+  shortcuts: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
+  shortcut: {
+    flexBasis: '47%',
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minHeight: 60,
+    padding: Spacing.three,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: withAlpha('#FFFFFF', 0.07),
+    backgroundColor: Glass.card,
+  },
+  pressed: { opacity: 0.7 },
+  shortcutText: { flex: 1, gap: 1 },
+  shortcutLabel: { fontSize: 17, lineHeight: 20, letterSpacing: 0.4 },
+  shortcutSub: { fontSize: 12, lineHeight: 16 },
+  actions: {
+    width: '100%',
+    maxWidth: MaxContentWidth,
+    alignSelf: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: 16,
+    gap: 10,
+    borderTopWidth: 1,
+  },
+  today: { fontSize: 12, lineHeight: 16, textAlign: 'center' },
   title: {
     fontSize: 40,
     lineHeight: 44,
@@ -443,13 +553,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: Spacing.three,
-    paddingVertical: Spacing.six,
-  },
-  stageFootnote: {
-    position: 'absolute',
-    bottom: Spacing.three,
-    left: 0,
-    right: 0,
+    paddingVertical: Spacing.five,
   },
   footnote: {
     fontSize: 10,
@@ -501,8 +605,5 @@ const styles = StyleSheet.create({
   },
   rescan: {
     marginTop: Spacing.two,
-  },
-  footer: {
-    paddingVertical: Spacing.three,
   },
 });

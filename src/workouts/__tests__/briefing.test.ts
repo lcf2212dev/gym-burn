@@ -1,5 +1,17 @@
-import { groupStages, heartStatus, onTarget, structureFacts } from '../briefing';
-import { makePlan } from '../model';
+import {
+  formatHours,
+  groupStages,
+  heartStatus,
+  levelStep,
+  minuteColumns,
+  onTarget,
+  recentActivity,
+  scorePercent,
+  structureFacts,
+  todayLine,
+  zoneOf,
+} from '../briefing';
+import { makePlan, newWorkout, type Workout } from '../model';
 import { week, zoneIndexes } from '../week';
 
 describe('etapas agrupadas', () => {
@@ -109,5 +121,81 @@ describe('carga contra o alvo', () => {
   it('sem leitura ou sem alvo não está no alvo', () => {
     expect(onTarget(null, 9.5)).toBe(false);
     expect(onTarget(9.5, null)).toBe(false);
+  });
+});
+
+describe('atividade recente', () => {
+  const profile = { age: 35, heightCm: 175, weightKg: 75 };
+  const day = 24 * 60 * 60 * 1000;
+  const now = 1_800_000_000_000;
+  const at = (daysAgo: number, minutes: number): Workout => {
+    const w = newWorkout(profile, 'ble', null);
+    return { ...w, started: now - daysAgo * day, totals: { ...w.totals, movingMs: minutes * 60000 } };
+  };
+
+  it('conta os treinos e o tempo em movimento dos últimos 21 dias', () => {
+    expect(recentActivity([at(1, 45), at(20, 30), at(22, 45)], now)).toEqual({
+      count: 2,
+      movingMs: 75 * 60000,
+    });
+  });
+
+  it('não conta nada num histórico vazio', () => {
+    expect(recentActivity([], now)).toEqual({ count: 0, movingMs: 0 });
+  });
+
+  it('escreve o tempo em horas e minutos', () => {
+    expect(formatHours(75 * 60000)).toBe('1 h 15 min');
+    expect(formatHours(45 * 60000)).toBe('45 min');
+    expect(formatHours(120 * 60000)).toBe('2 h');
+  });
+});
+
+describe('nível da IA', () => {
+  it('põe os três níveis em degraus, do mais baixo ao mais alto', () => {
+    expect(levelStep('Em adaptação')).toBe(0);
+    expect(levelStep('Base em formação')).toBe(1);
+    expect(levelStep('Base consistente')).toBe(2);
+  });
+
+  it('não tem degrau sem dados ou sem avaliação', () => {
+    expect(levelStep('Dados insuficientes')).toBeNull();
+    expect(levelStep(undefined)).toBeNull();
+  });
+});
+
+describe('batimentos por minuto', () => {
+  it('dá a média de cada minuto e nada onde não houve leitura', () => {
+    expect(minuteColumns([[300, 3], [0, 0], [130, 1]], 5)).toEqual([100, null, 130, null, null]);
+  });
+
+  it('aceita um registro sem leituras guardadas', () => {
+    expect(minuteColumns(undefined, 2)).toEqual([null, null]);
+  });
+
+  it('acha a zona de um batimento pela FC máxima', () => {
+    expect(zoneOf(92, 185)).toBe(0);
+    expect(zoneOf(111, 185)).toBe(1);
+    expect(zoneOf(140, 185)).toBe(2);
+    expect(zoneOf(160, 185)).toBe(3);
+    expect(zoneOf(172, 185)).toBe(4);
+    expect(zoneOf(200, 185)).toBe(4);
+  });
+});
+
+describe('placar do diagnóstico', () => {
+  it('dá o acerto em porcentagem inteira', () => {
+    expect(scorePercent(22, 24)).toBe(92);
+    expect(scorePercent(0, 0)).toBe(0);
+  });
+});
+
+describe('treino de hoje, em uma linha', () => {
+  it('diz o dia, o treino e a duração', () => {
+    expect(todayLine(2)).toBe('Hoje · Terça · VO₂máx · 45 min');
+  });
+
+  it('avisa do descanso no domingo', () => {
+    expect(todayLine(0)).toBe('Hoje · Domingo · descanso');
   });
 });

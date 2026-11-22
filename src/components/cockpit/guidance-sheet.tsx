@@ -5,7 +5,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
 import { Kicker } from '@/components/card';
 import type { IconName } from '@/components/cockpit/icon-label';
-import { Colors, Fonts, MaxContentWidth, Metric, TitleType, withAlpha } from '@/constants/theme';
+import {
+  Colors,
+  MaxContentWidth,
+  Metric,
+  NumeralType,
+  TitleType,
+  neonGlow,
+  withAlpha,
+} from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { pendingAction, PULSE_READINGS } from '@/workouts/guidance';
@@ -70,9 +78,12 @@ function Target({
           <Lucide name={icon} size={15} color={color} />
           <Text style={styles.label}>{action}</Text>
         </View>
-        <Text style={[styles.target, { color }]}>{target}</Text>
+        <Text style={[styles.target, { color }, neonGlow(color, 18, 0.35)]}>{target}</Text>
       </View>
-      <Text style={styles.detail}>{reached ? 'Atingida' : 'Atual  ' + actual}</Text>
+      <View style={styles.actual}>
+        <Kicker color={reached ? DONE : undefined}>{reached ? 'Atingida' : 'Atual'}</Kicker>
+        <Text style={styles.actualValue}>{actual}</Text>
+      </View>
     </View>
   );
 }
@@ -167,24 +178,27 @@ export function GuidanceSheet() {
                     ? 'Ligue a lona na velocidade mínima e segure os sensores antes de acelerar. Essa leitura é o ponto de partida para a IA calcular a carga dos próximos treinos.'
                     : 'Apoie as mãos no sensor quando estiver confortável e segure por uns 10 segundos.'}
                 </Text>
-                <View style={styles.inline}>
-                  <Lucide name="hand" size={26} color={Metric.heart} />
-                  <View
-                    style={styles.dots}
-                    accessible
-                    accessibilityLabel={
-                      'Leituras recebidas: ' +
-                      Math.min(g.bpmCount, PULSE_READINGS) +
-                      ' de ' +
-                      PULSE_READINGS
-                    }>
-                    {Array.from({ length: PULSE_READINGS }, (_, i) => (
-                      <View key={i} style={[styles.dot, i < g.bpmCount && styles.dotOn]} />
-                    ))}
+                <View
+                  style={styles.readings}
+                  accessible
+                  accessibilityLabel={
+                    'Leituras recebidas: ' +
+                    Math.min(g.bpmCount, PULSE_READINGS) +
+                    ' de ' +
+                    PULSE_READINGS
+                  }>
+                  <View style={styles.flex}>
+                    <Kicker color={Metric.heart}>Leituras recebidas</Kicker>
+                    <View style={styles.dots}>
+                      {Array.from({ length: PULSE_READINGS }, (_, i) => (
+                        <View key={i} style={[styles.dot, i < g.bpmCount && styles.dotOn]} />
+                      ))}
+                    </View>
                   </View>
-                  <Text style={styles.detail}>
-                    {Math.min(g.bpmCount, PULSE_READINGS)} de {PULSE_READINGS} leituras
+                  <Text style={[styles.count, neonGlow(Metric.heart, 18, 0.4)]}>
+                    {Math.min(g.bpmCount, PULSE_READINGS)}
                   </Text>
+                  <Text style={styles.countOf}>de {PULSE_READINGS}</Text>
                 </View>
                 <Text style={styles.detail}>O aviso fecha sozinho.</Text>
               </>
@@ -223,33 +237,35 @@ export function GuidanceSheet() {
 }
 
 const styles = StyleSheet.create({
-  overlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#00000060' },
+  overlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: withAlpha(Colors.dark.surfaceSunken, 0.72) },
   sheet: {
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
     maxHeight: '85%',
-    backgroundColor: '#141B25',
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
+    backgroundColor: Colors.dark.surfaceRaised,
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    borderTopWidth: 1,
+    borderColor: withAlpha('#FFFFFF', 0.1),
     paddingHorizontal: 20,
     paddingTop: 10,
   },
   handle: {
     alignSelf: 'center',
-    width: 36,
+    width: 44,
     height: 4,
     borderRadius: 2,
-    backgroundColor: '#546170',
+    backgroundColor: Colors.dark.borderStrong,
     marginBottom: 14,
   },
-  body: { gap: 10 },
+  body: { gap: 14 },
   heading: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-  title: { ...TitleType, fontSize: 28, color: Colors.dark.text },
+  title: { ...TitleType, fontSize: 32, lineHeight: 36, color: Colors.dark.text },
   badge: {
-    width: 60,
-    height: 60,
-    borderRadius: 18,
+    width: 56,
+    height: 56,
+    borderRadius: 17,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
@@ -259,21 +275,30 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 14,
     borderTopWidth: 1,
-    borderColor: Colors.dark.borderStrong,
-    paddingTop: 10,
+    borderColor: Colors.dark.border,
+    paddingTop: 12,
   },
   inline: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dots: { flexDirection: 'row', gap: 6 },
-  dot: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
+  // As leituras recebidas: uma cápsula por leitura e a contagem em número grande.
+  readings: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 6,
+    padding: 14,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: withAlpha(Metric.heart, 0.6),
+    borderColor: withAlpha(Metric.heart, 0.28),
+    backgroundColor: Colors.dark.surfaceSunken,
   },
+  dots: { flexDirection: 'row', gap: 6, marginTop: 8, marginBottom: 6 },
+  dot: { flex: 1, maxWidth: 34, height: 10, borderRadius: 5, backgroundColor: Colors.dark.borderStrong },
   dotOn: { backgroundColor: Metric.heart },
+  count: { ...NumeralType, fontSize: 44, lineHeight: 46, color: Metric.heart },
+  countOf: { ...NumeralType, fontSize: 17, lineHeight: 20, paddingBottom: 6, color: Colors.dark.textSecondary },
   flex: { flex: 1 },
-  label: { fontSize: 14, color: Colors.dark.text },
+  label: { fontSize: 14, color: Colors.dark.textSecondary },
   detail: { fontSize: 14, lineHeight: 20, color: '#B9C5D5' },
-  target: { fontFamily: Fonts.numeral, fontSize: 31 },
+  target: { ...NumeralType, fontSize: 44, lineHeight: 48 },
+  actual: { alignItems: 'flex-end' },
+  actualValue: { ...NumeralType, fontSize: 22, lineHeight: 26, color: Colors.dark.text },
 });

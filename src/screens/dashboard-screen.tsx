@@ -6,6 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AmbientGlow } from '@/components/ambient-glow';
 import { Card, Kicker } from '@/components/card';
+import { StatusPill } from '@/components/kit';
 import { ConsoleCard, DataFieldsCard, EquipmentCard } from '@/components/cockpit/info-cards';
 import { LoadTiles } from '@/components/cockpit/load-tiles';
 import { MetricTiles } from '@/components/cockpit/metric-grid';
@@ -15,6 +16,7 @@ import { MinuteChart, ZoneCard } from '@/components/cockpit/zone-card';
 import {
   BodyType,
   Fonts,
+  Glass,
   LabelType,
   MaxContentWidth,
   Metric,
@@ -116,33 +118,52 @@ export function DashboardScreen() {
         showsVerticalScrollIndicator={false}
         contentInsetAdjustmentBehavior="automatic">
         <View style={styles.content}>
-          <View style={styles.header}>
-            <Pressable
-              accessibilityRole="header"
-              accessibilityHint="Toque longo abre os dados da esteira"
-              onLongPress={() => setDetails(true)}
-              style={styles.headerText}>
-              <Kicker color={Metric.speed}>Gym Burn</Kicker>
-              <Text style={[styles.deviceName, TitleType]} numberOfLines={1}>
-                {deviceName ?? 'Esteira'}
-              </Text>
-            </Pressable>
-            <View style={styles.headerSide}>
-              <StatusDot live={live} />
+          {details ? (
+            <View style={styles.bar}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Desconectar da esteira"
-                onPress={actions.disconnect}
-                disabled={disconnecting}
-                hitSlop={8}
-                style={styles.disconnect}>
-                <Lucide name="unplug" size={13} color="#C5CFDC" />
-                <Text style={styles.disconnectText}>
-                  {disconnecting ? 'Saindo…' : 'Desconectar'}
+                accessibilityLabel="Voltar ao painel"
+                onPress={() => setDetails(false)}
+                style={styles.round}>
+                <Lucide name="chevron-left" size={22} color="#F3F7FF" />
+              </Pressable>
+              <Text accessibilityRole="header" style={[styles.barTitle, TitleType]} numberOfLines={1}>
+                Dados da esteira
+              </Text>
+              <StatusPill
+                color={live ? Neon.mint : Neon.amber}
+                label={live ? 'Conectado' : 'Aguardando dados'}
+              />
+            </View>
+          ) : (
+            <View style={styles.header}>
+              <Pressable
+                accessibilityRole="header"
+                accessibilityHint="Toque longo abre os dados da esteira"
+                onLongPress={() => setDetails(true)}
+                style={styles.headerText}>
+                <Kicker color={Metric.speed}>Gym Burn</Kicker>
+                <Text style={[styles.deviceName, TitleType]} numberOfLines={1}>
+                  {deviceName ?? 'Esteira'}
                 </Text>
               </Pressable>
+              <View style={styles.headerSide}>
+                <StatusDot live={live} />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Desconectar da esteira"
+                  onPress={actions.disconnect}
+                  disabled={disconnecting}
+                  hitSlop={8}
+                  style={styles.disconnect}>
+                  <Lucide name="unplug" size={13} color="#C5CFDC" />
+                  <Text style={styles.disconnectText}>
+                    {disconnecting ? 'Saindo…' : 'Desconectar'}
+                  </Text>
+                </Pressable>
+              </View>
             </View>
-          </View>
+          )}
 
           {status.stoppedBySafetyKey ? (
             <View style={[styles.safety, { borderColor: withAlpha('#FF3B4E', 0.5) }]}>
@@ -175,12 +196,6 @@ export function DashboardScreen() {
             </>
           ) : (
             <>
-              <Pressable
-                accessibilityRole="button"
-                onPress={() => setDetails(false)}
-                style={styles.navButton}>
-                <Text style={styles.navText}>‹ Voltar ao painel</Text>
-              </Pressable>
               <SpeedHero
                 metrics={metrics}
                 speedRange={capabilities?.speedRange ?? T600X_SPEED_RANGE}
@@ -364,6 +379,16 @@ const styles = StyleSheet.create({
     color: Metric.speed,
     marginTop: 2,
   },
-  navButton: { minHeight: 44, justifyContent: 'center' },
-  navText: { color: Neon.cyan, fontSize: 15 },
+  bar: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingTop: Spacing.one },
+  round: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#222B38',
+    backgroundColor: Glass.card,
+  },
+  barTitle: { flex: 1, fontSize: 28, lineHeight: 32, color: '#F3F7FF' },
 });

@@ -1,9 +1,12 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Alert, Keyboard, Text } from 'react-native';
-import { Field, styles, WorkoutPage } from '@/components/workout-ui';
+import { Alert, Keyboard, StyleSheet, Text, TextInput, View, type TextInputProps } from 'react-native';
+import { Card, Kicker } from '@/components/card';
+import { Divider, IconKicker, ListRow, StatusPill } from '@/components/kit';
 import { UiButton } from '@/components/ui-button';
-import { Card } from '@/components/card';
+import { Field, styles, WorkoutPage } from '@/components/workout-ui';
+import { Colors, Metric, Neon, NumeralType, TitleType, ZoneColors, neonGlow } from '@/constants/theme';
+import { useStrap } from '@/heart/strap-context';
 import { hasApiKey, saveApiKey } from '@/workouts/ai';
 import { validProfile } from '@/workouts/model';
 import { heartProfile } from '@/workouts/physiology';
@@ -14,6 +17,7 @@ export default function ProfileScreen() {
   const profile = useWorkout((s) => s.profile);
   const history = useWorkout((s) => s.history);
   const session = useWorkoutSession();
+  const strap = useStrap((s) => s.saved);
   const [age, setAge] = useState(profile?.age.toString() ?? '');
   const [weight, setWeight] = useState(profile?.weightKg.toString().replace('.', ',') ?? '');
   const [height, setHeight] = useState(profile?.heightCm.toString() ?? '');
@@ -88,74 +92,97 @@ export default function ProfileScreen() {
     }
   }
   return (
-    <WorkoutPage title="Meu perfil" back={!!profile}>
-      <Text style={styles.body}>
-        Seu perfil fica neste celular. Ao usar a IA, a DeepSeek recebe sua idade e o resumo dos
-        treinos, com as frequências de repouso e máxima estimadas. Durante o treino nada é
-        enviado: o ajuste da carga é feito no próprio celular.
-      </Text>
-      <Field
-        label="Idade (anos)"
-        keyboardType="number-pad"
-        value={age}
-        onChangeText={setAge}
-        maxLength={3}
-      />
-      <Field
-        label="Peso (kg)"
-        keyboardType="decimal-pad"
-        value={weight}
-        onChangeText={setWeight}
-        maxLength={6}
-      />
-      <Field
-        label="Altura (cm)"
-        keyboardType="decimal-pad"
-        value={height}
-        onChangeText={setHeight}
-        maxLength={6}
-      />
-      <UiButton label="Salvar perfil" onPress={save} />
-      {!!error && (
-        <Text accessibilityRole="alert" style={styles.error}>
-          {error}
+    <WorkoutPage
+      title="Meu perfil"
+      back={!!profile}
+      accessory={<StatusPill icon="lock" color={Neon.mint} label="Neste celular" />}
+      footer={
+        <>
+          {!!error && (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {error}
+            </Text>
+          )}
+          <UiButton icon="check" label="Salvar perfil" onPress={save} />
+        </>
+      }>
+      <Card hero accent={Neon.cyan} style={local.hero}>
+        <IconKicker icon="user" color={Neon.cyan}>
+          Seus dados
+        </IconKicker>
+        <View style={local.fields}>
+          <Stat label="Idade" unit="anos" keyboardType="number-pad" value={age} onChangeText={setAge} maxLength={3} />
+          <Stat label="Peso" unit="kg" keyboardType="decimal-pad" value={weight} onChangeText={setWeight} maxLength={6} />
+          <Stat label="Altura" unit="cm" keyboardType="decimal-pad" value={height} onChangeText={setHeight} maxLength={6} />
+        </View>
+        <Text style={local.note}>
+          Seu perfil fica neste celular. Ao usar a IA, a DeepSeek recebe sua idade e o resumo dos
+          treinos, com as frequências de repouso e máxima estimadas. Durante o treino nada é
+          enviado: o ajuste da carga é feito no próprio celular.
         </Text>
-      )}
+      </Card>
       {hr && (
-        <Card style={styles.card}>
-          <Text style={styles.heading}>Frequência cardíaca</Text>
-          <Text style={styles.body}>
-            Repouso:{' '}
-            {hr.rest
-              ? hr.rest +
-                ' BPM estimados: a menor leitura do primeiro minuto dos últimos treinos, menos 15 de quem já está andando.'
-              : 'ainda não medida. O guia lê no primeiro minuto do próximo treino.'}
-          </Text>
-          <Text style={styles.body}>
-            Máxima: {hr.max} BPM,{' '}
-            {hr.maxSource === 'IA'
-              ? 'prevista pela IA nas últimas avaliações.'
-              : 'estimada pela idade até a primeira avaliação da IA.'}
-          </Text>
+        <Card accent={Metric.heart} style={local.card}>
+          <IconKicker icon="heart-pulse" color={Metric.heart}>
+            Frequência cardíaca
+          </IconKicker>
+          <View style={local.rates}>
+            <Rate
+              label="Repouso"
+              value={hr.rest ? String(hr.rest) : '—'}
+              color={Colors.dark.text}
+              note={
+                hr.rest
+                  ? 'A menor leitura do primeiro minuto dos últimos treinos, menos 15 de quem já está andando.'
+                  : 'Ainda não medida. O guia lê no primeiro minuto do próximo treino.'
+              }
+            />
+            <View style={local.rule} />
+            <Rate
+              label="Máxima"
+              value={String(hr.max)}
+              color={Metric.heart}
+              note={
+                hr.maxSource === 'IA'
+                  ? 'Prevista pela IA nas últimas avaliações.'
+                  : 'Estimada pela idade até a primeira avaliação da IA.'
+              }
+            />
+          </View>
+          {/* As cinco zonas da pessoa, de 10 em 10 pontos da FC máxima. */}
+          <View style={local.zones} accessible accessibilityLabel="Zonas de frequência cardíaca">
+            {ZoneColors.map((color, zone) => (
+              <View key={zone} style={local.zone}>
+                <View style={[local.zoneBar, { backgroundColor: color }]} />
+                <Text style={local.zoneName}>Z{zone + 1}</Text>
+                <Text style={local.zoneRange}>
+                  {Math.round((hr.max * (50 + zone * 10)) / 100)}–{Math.round((hr.max * (60 + zone * 10)) / 100)}
+                </Text>
+              </View>
+            ))}
+          </View>
         </Card>
       )}
-      <Card style={styles.card}>
-        <Text style={styles.heading}>Cinta de batimentos</Text>
-        <Text style={styles.body}>
-          Com uma cinta no peito o app lê os batimentos direto dela, o tempo todo. Sem ela, valem
-          os do sensor de mão da esteira.
-        </Text>
-        <UiButton variant="ghost" label="Configurar cinta" onPress={() => router.push('/cinta')} />
-      </Card>
-      <Card style={styles.card}>
-        <Text style={styles.heading}>DeepSeek</Text>
+      <Card style={local.list}>
+        <ListRow
+          icon="heart"
+          color={Metric.heart}
+          title="Cinta de batimentos"
+          sub={strap ? (strap.name ?? 'Cinta') + ' · pareada' : 'Nenhuma pareada: valem os do sensor de mão'}
+          onPress={() => router.push('/cinta')}
+        />
+        <Divider />
         {configured && !editing ? (
-          <>
-            <Text style={styles.body}>Chave pessoal configurada neste aparelho.</Text>
-            <UiButton variant="ghost" label="Trocar chave" onPress={() => setEditing(true)} />
-          </>
+          <ListRow
+            icon="key-round"
+            color={Neon.volt}
+            title="Chave da DeepSeek"
+            sub="Configurada neste aparelho"
+            right={<Text style={local.action}>Trocar</Text>}
+            onPress={() => setEditing(true)}
+          />
         ) : (
-          <>
+          <View style={local.key}>
             <Field
               label="Chave pessoal da DeepSeek"
               value={key}
@@ -169,28 +196,99 @@ export default function ProfileScreen() {
             <UiButton
               label="Salvar chave"
               variant="outline"
+              color={Neon.volt}
               onPress={configure}
               busy={busy}
               disabled={!key.trim()}
             />
-          </>
+          </View>
         )}
-        <UiButton
-          variant="ghost"
-          label="Diagnóstico da IA"
+        <Divider />
+        <ListRow
+          icon="terminal"
+          color={Neon.violet}
+          title="Diagnóstico da IA"
+          sub="Cenários e diário das chamadas"
           onPress={() => router.push('/diagnostico')}
         />
+        {!!profile && (
+          <>
+            <Divider />
+            <ListRow
+              icon="trash-2"
+              color={Neon.red}
+              title="Apagar perfil e treinos"
+              sub="Histórico, plano do dia e diário da IA. A chave continua salva."
+              onPress={erase}
+            />
+          </>
+        )}
       </Card>
-      {!!profile && (
-        <Card style={styles.card}>
-          <Text style={styles.heading}>Dados neste celular</Text>
-          <Text style={styles.body}>
-            Apaga perfil, histórico de treinos, plano do dia e diário da IA, para começar de novo. A
-            chave da DeepSeek continua salva.
-          </Text>
-          <UiButton variant="ghost" label="Apagar perfil e treinos" onPress={erase} />
-        </Card>
-      )}
     </WorkoutPage>
   );
 }
+
+/** Um dado do perfil num bloco: o rótulo, o número para digitar e a unidade. */
+function Stat({ label, unit, ...props }: TextInputProps & { label: string; unit: string }) {
+  return (
+    <View style={local.field}>
+      {/* A unidade vai no rótulo: o número fica com a largura toda do bloco. */}
+      <Kicker>
+        {label} · {unit}
+      </Kicker>
+      <TextInput
+        accessibilityLabel={label + ' em ' + unit}
+        placeholder="—"
+        placeholderTextColor={Colors.dark.textMuted}
+        style={local.input}
+        {...props}
+      />
+    </View>
+  );
+}
+
+function Rate({ label, value, color, note }: { label: string; value: string; color: string; note: string }) {
+  return (
+    <View style={local.rate} accessible accessibilityLabel={label + ': ' + value + ' BPM. ' + note}>
+      <Kicker>{label}</Kicker>
+      <View style={local.fieldValue}>
+        <Text style={[local.rateValue, { color }, neonGlow(color, 18, 0.35)]}>{value}</Text>
+        <Text style={local.unit}>BPM</Text>
+      </View>
+      <Text style={local.rateNote}>{note}</Text>
+    </View>
+  );
+}
+
+const local = StyleSheet.create({
+  hero: { padding: 18, gap: 12 },
+  card: { gap: 12 },
+  list: { gap: 8 },
+  fields: { flexDirection: 'row', gap: 8 },
+  field: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 2,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: Colors.dark.borderStrong,
+    backgroundColor: Colors.dark.surfaceSunken,
+  },
+  fieldValue: { flexDirection: 'row', alignItems: 'baseline', gap: 4 },
+  input: { ...NumeralType, minHeight: 44, padding: 0, fontSize: 28, color: Colors.dark.text },
+  unit: { fontSize: 12, color: Colors.dark.textSecondary },
+  note: { fontSize: 13, lineHeight: 19, color: Colors.dark.textSecondary },
+  rates: { flexDirection: 'row', gap: 14 },
+  rate: { flex: 1, gap: 1 },
+  rateValue: { ...NumeralType, fontSize: 44, lineHeight: 46 },
+  rateNote: { fontSize: 12, lineHeight: 16, color: Colors.dark.textSecondary },
+  rule: { width: 1, backgroundColor: Colors.dark.border },
+  zones: { flexDirection: 'row', gap: 2 },
+  zone: { flex: 1, alignItems: 'center', gap: 3 },
+  zoneBar: { alignSelf: 'stretch', height: 10, borderRadius: 3 },
+  zoneName: { ...NumeralType, fontSize: 12, lineHeight: 14, color: Colors.dark.textSecondary },
+  zoneRange: { ...NumeralType, fontSize: 11, lineHeight: 12, color: Colors.dark.textMuted },
+  key: { gap: 10, paddingVertical: 4 },
+  action: { ...TitleType, fontSize: 14, letterSpacing: 1, textTransform: 'uppercase', color: Neon.volt },
+});
