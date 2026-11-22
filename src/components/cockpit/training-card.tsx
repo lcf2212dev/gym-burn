@@ -2,7 +2,7 @@ import { Lucide } from '@react-native-vector-icons/lucide';
 import { useRouter } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card, Kicker } from '@/components/card';
-import { Colors, Fonts, Metric, Neon, NumeralType, TitleType } from '@/constants/theme';
+import { Colors, Fonts, Neon, NumeralType, TitleType, neonGlow } from '@/constants/theme';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { currentCue } from '@/workouts/model';
 import { pendingAction } from '@/workouts/guidance';
@@ -10,8 +10,9 @@ import { formatDuration, formatDecimal } from '@/utils/format';
 
 /**
  * O que a pessoa precisa ver do guia de relance: em que etapa está, quanto
- * falta nela e a carga a pôr no painel. A faixa de batimentos e o que a IA
- * decidiu ficam no cartão da zona.
+ * falta nela, o andamento do treino e o que vem a seguir. A carga da etapa
+ * fica nos blocos de velocidade e inclinação; a faixa de batimentos, no
+ * medidor.
  */
 export function TrainingCard() {
   const router = useRouter();
@@ -21,6 +22,7 @@ export function TrainingCard() {
   const elapsed = Math.floor((active?.totals.movingMs ?? 0) / 1000);
   const plan = active?.plan;
   const cue = plan && currentCue(plan, elapsed);
+  const next = plan && cue ? plan.stages[cue.index + 1] : undefined;
   return (
     <Card padded={false} style={styles.card} accent={Neon.volt}>
       <View style={styles.line}>
@@ -43,12 +45,9 @@ export function TrainingCard() {
           </Text>
         </View>
         {cue ? (
-          <View style={styles.right}>
+          <View style={styles.right} accessible accessibilityLabel={'Faltam ' + formatDuration(cue.left) + ' na etapa'}>
+            <Text style={styles.small}>na etapa</Text>
             <Text style={styles.clock}>{formatDuration(cue.left)}</Text>
-            <View style={styles.kicker}>
-              <Lucide name="timer" size={12} color={Colors.dark.textSecondary} />
-              <Text style={styles.small}>na etapa</Text>
-            </View>
           </View>
         ) : (
           <Pressable
@@ -74,27 +73,18 @@ export function TrainingCard() {
             />
           </View>
           <View style={styles.line}>
-            <View
-              style={[styles.targets, styles.flex]}
-              accessible
-              accessibilityLabel={
-                'Alvo: ' +
-                formatDecimal(cue.stage.speed, 1) +
-                ' quilômetros por hora, inclinação ' +
-                formatDecimal(cue.stage.incline, 1) +
-                ' por cento'
-              }>
-              <Text style={styles.small}>Alvo</Text>
-              <View style={styles.kicker}>
-                <Lucide name="gauge" size={15} color={Metric.speed} />
-                <Text style={styles.target}>{formatDecimal(cue.stage.speed, 1)} km/h</Text>
-              </View>
-              <View style={styles.kicker}>
-                <Lucide name="trending-up" size={15} color={Metric.incline} />
-                <Text style={styles.target}>{formatDecimal(cue.stage.incline, 1)}%</Text>
-              </View>
-            </View>
-            {pendingAction(guidance) && (
+            <Text style={[styles.small, styles.flex]} numberOfLines={1}>
+              {next
+                ? 'A seguir · ' +
+                  next.name +
+                  ' · ' +
+                  formatDuration(next.seconds) +
+                  ' · ' +
+                  formatDecimal(next.speed, 1) +
+                  ' km/h'
+                : 'Última etapa'}
+            </Text>
+            {pendingAction(guidance) ? (
               <Pressable
                 accessibilityRole="button"
                 onPress={() => session.minimizeCue(null)}
@@ -102,6 +92,10 @@ export function TrainingCard() {
                 style={styles.action}>
                 <Text style={styles.link}>Ver aviso</Text>
               </Pressable>
+            ) : (
+              <Text style={styles.total}>
+                {formatDuration(elapsed)} de {formatDuration(Math.round(plan.minutes * 60))}
+              </Text>
             )}
           </View>
         </>
@@ -110,22 +104,21 @@ export function TrainingCard() {
   );
 }
 const styles = StyleSheet.create({
-  card: { paddingHorizontal: 16, paddingVertical: 11, gap: 7 },
-  line: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  card: { paddingHorizontal: 16, paddingVertical: 8, gap: 6 },
+  line: { flexDirection: 'row', alignItems: 'flex-end', gap: 12 },
   flex: { flex: 1 },
   kicker: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  targets: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  right: { alignItems: 'flex-end' },
-  heading: { ...TitleType, fontSize: 24, color: Colors.dark.text },
-  clock: { ...NumeralType, fontSize: 26, color: Neon.volt },
-  small: { color: Colors.dark.textSecondary, fontSize: 12 },
-  target: { color: Colors.dark.text, fontSize: 15 },
+  right: { flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
+  heading: { ...TitleType, fontSize: 28, lineHeight: 32, color: Colors.dark.text },
+  clock: { ...NumeralType, fontSize: 40, lineHeight: 42, color: Neon.volt, ...neonGlow(Neon.volt, 18, 0.45) },
+  small: { color: Colors.dark.textSecondary, fontSize: 12, lineHeight: 16, paddingBottom: 6 },
+  total: { ...NumeralType, fontSize: 14, lineHeight: 16, color: Colors.dark.text, paddingBottom: 6 },
   track: {
-    backgroundColor: Colors.dark.borderStrong,
-    height: 3,
+    backgroundColor: Colors.dark.border,
+    height: 4,
     borderRadius: 2,
   },
-  fill: { height: 3, borderRadius: 2, backgroundColor: Neon.volt },
+  fill: { height: 4, borderRadius: 2, backgroundColor: Neon.volt },
   primary: {
     justifyContent: 'center',
     minHeight: 44,

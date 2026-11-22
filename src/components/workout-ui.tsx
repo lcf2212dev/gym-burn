@@ -9,28 +9,33 @@ import {
   type TextInputProps,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Lucide } from '@react-native-vector-icons/lucide';
 import type { ReactNode } from 'react';
-import { Colors, MaxContentWidth, Neon, TitleType } from '@/constants/theme';
+import { Colors, Glass, MaxContentWidth, Neon, TitleType } from '@/constants/theme';
 import { useStrap } from '@/heart/strap-context';
 
 const colors = Colors.dark;
 /**
  * Página rolável das telas de treino. `footer` fica preso no rodapé, com
  * margem própria: é onde vai a ação principal, para a tela não terminar com o
- * conteúdo encostado na borda.
+ * conteúdo encostado na borda. Com `accessory`, o topo vira uma barra só:
+ * voltar, título e o acessório à direita (o estado da cinta ou da esteira).
  */
 export function WorkoutPage({
   title,
   children,
   back = true,
   footer,
+  accessory,
 }: {
   title: string;
   children: ReactNode;
   back?: boolean;
   footer?: ReactNode;
+  accessory?: ReactNode;
 }) {
   const router = useRouter();
+  const leave = () => (router.canGoBack() ? router.back() : router.replace('/'));
   return (
     <SafeAreaView style={styles.page}>
       <ScrollView
@@ -38,17 +43,32 @@ export function WorkoutPage({
         // Com rodapé fixo, a folga do fim da página é a dele.
         contentContainerStyle={[styles.scroll, !!footer && styles.scrollAboveFooter]}
         keyboardShouldPersistTaps="handled">
-        {back && (
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
-            style={styles.link}>
-            <Text style={styles.linkText}>‹ Voltar</Text>
-          </Pressable>
+        {accessory ? (
+          <View style={styles.bar}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Voltar"
+              onPress={leave}
+              style={styles.round}>
+              <Lucide name="chevron-left" size={22} color={colors.text} />
+            </Pressable>
+            <Text accessibilityRole="header" style={styles.barTitle} numberOfLines={1}>
+              {title}
+            </Text>
+            {accessory}
+          </View>
+        ) : (
+          <>
+            {back && (
+              <Pressable accessibilityRole="button" onPress={leave} style={styles.link}>
+                <Text style={styles.linkText}>‹ Voltar</Text>
+              </Pressable>
+            )}
+            <Text accessibilityRole="header" style={styles.title}>
+              {title}
+            </Text>
+          </>
         )}
-        <Text accessibilityRole="header" style={styles.title}>
-          {title}
-        </Text>
         {children}
       </ScrollView>
       {!!footer && <View style={styles.footer}>{footer}</View>}
@@ -80,6 +100,8 @@ export function WorkoutLinks() {
     { label: 'Perfil', href: '/perfil' },
     { label: 'Evolução', href: '/evolucao' },
     { label: strap, href: '/cinta' },
+    // O painel do treino com dados simulados, para ver a tela sem ir à academia.
+    { label: 'Prévia do treino', href: '/previa' },
   ] as const;
   return (
     <View style={styles.row}>
@@ -119,6 +141,18 @@ export const styles = StyleSheet.create({
     paddingBottom: 40,
     gap: 16,
   },
+  bar: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  round: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: Glass.card,
+  },
+  barTitle: { ...TitleType, flex: 1, fontSize: 28, lineHeight: 32, color: colors.text },
   title: { ...TitleType, fontSize: 38, color: colors.text },
   heading: { ...TitleType, fontSize: 25, color: colors.text },
   metric: { ...TitleType, fontSize: 36, color: Neon.volt },

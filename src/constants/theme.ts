@@ -73,6 +73,15 @@ export const Neon = {
   violet: Metric.distance,
 } as const;
 
+/**
+ * A cor de cada zona de frequência cardíaca, da Z1 à Z5: do frio ao quente. É
+ * a mesma no medidor, na lista da semana e no gráfico por minuto.
+ */
+export const ZoneColors = ['#8FA3BF', Metric.incline, '#3DE8A0', '#FFC24B', '#FF5B6B'] as const;
+
+/** A mira dentro da faixa do dia: um vermelho mais vivo que o da Z5, para não se confundir com ela. */
+export const AimColor = '#FF1F4F';
+
 /** Cor do texto sobre um fundo saturado. */
 export const OnAccent = '#080B0F';
 

@@ -7,11 +7,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AmbientGlow } from '@/components/ambient-glow';
 import { Card, Kicker } from '@/components/card';
 import { ConsoleCard, DataFieldsCard, EquipmentCard } from '@/components/cockpit/info-cards';
-import { MetricGrid } from '@/components/cockpit/metric-grid';
+import { LoadTiles } from '@/components/cockpit/load-tiles';
+import { MetricTiles } from '@/components/cockpit/metric-grid';
 import { SpeedHero } from '@/components/cockpit/speed-hero';
 import { TrainingCard } from '@/components/cockpit/training-card';
-import { VitalsRow } from '@/components/cockpit/vitals-row';
-import { ZoneCard } from '@/components/cockpit/zone-card';
+import { MinuteChart, ZoneCard } from '@/components/cockpit/zone-card';
 import {
   BodyType,
   Fonts,
@@ -77,9 +77,9 @@ function InlineNotice() {
 }
 
 /**
- * O cockpit: o guia do treino, os três números que se leem de longe
- * (velocidade, inclinação e batimentos), a grade do treino e a faixa de
- * frequência cardíaca. Um toque longo no nome da esteira abre a identidade do
+ * O cockpit: a etapa do guia, o medidor das zonas com os batimentos de agora,
+ * a carga lida da esteira (velocidade e inclinação), os batimentos minuto a
+ * minuto e os totais do treino. Um toque longo no nome da esteira abre a identidade do
  * equipamento e a lista honesta do que o firmware manda ou não.
  *
  * O app não tem botão de comando: quem controla a lona é o painel da esteira.
@@ -168,9 +168,10 @@ export function DashboardScreen() {
           {!details ? (
             <>
               <TrainingCard />
-              <VitalsRow metrics={metrics} />
-              <MetricGrid metrics={metrics} />
               <ZoneCard />
+              <LoadTiles metrics={metrics} />
+              <MinuteChart />
+              <MetricTiles metrics={metrics} />
             </>
           ) : (
             <>
@@ -216,12 +217,11 @@ const styles = StyleSheet.create({
   },
   scroll: {
     flexGrow: 1,
-    paddingHorizontal: Spacing.four,
-    paddingTop: Spacing.one,
-    paddingBottom: Spacing.two,
+    // O painel ocupa a tela inteira, a 12 de cada área segura.
+    padding: Spacing.three,
   },
-  // Quatro blocos com folga entre eles: guia, números de relance, métricas e
-  // zonas. Os três primeiros têm altura fixa; o das zonas fica com o que sobra
+  // Cinco blocos com folga entre eles: etapa, medidor, carga, batimentos por
+  // minuto e totais. Só o gráfico por minuto estica: ele fica com o que sobra
   // da tela, para o painel caber inteiro sem rolar.
   content: {
     flexGrow: 1,

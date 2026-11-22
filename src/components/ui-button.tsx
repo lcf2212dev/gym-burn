@@ -1,3 +1,5 @@
+import { Lucide } from '@react-native-vector-icons/lucide';
+import type { ComponentProps } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -32,6 +34,8 @@ export interface UiButtonProps {
   variant?: ButtonVariant;
   /** Cor de acento em `outline`; fixa em lima no `primary`. */
   color?: string;
+  /** Ícone antes do rótulo; some enquanto o botão está ocupado. */
+  icon?: ComponentProps<typeof Lucide>['name'];
   disabled?: boolean;
   busy?: boolean;
   accessibilityLabel?: string;
@@ -51,6 +55,7 @@ export function UiButton({
   onPress,
   variant = 'primary',
   color,
+  icon,
   disabled = false,
   busy = false,
   accessibilityLabel,
@@ -89,7 +94,11 @@ export function UiButton({
         disabled && styles.disabled,
         style,
       ]}>
-      {busy ? <ActivityIndicator size="small" color={foreground} /> : null}
+      {busy ? (
+        <ActivityIndicator size="small" color={foreground} />
+      ) : icon ? (
+        <Lucide name={icon} size={18} color={foreground} />
+      ) : null}
       <Text style={[styles.label, { color: foreground }, labelStyle]} numberOfLines={1}>
         {label}
       </Text>

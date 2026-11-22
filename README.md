@@ -30,7 +30,7 @@ mostrada é a da T600X real: o app lê o módulo BLE que ela expõe.
 - **assina a telemetria** de Treadmill Data (`0x2ACD`), Machine Status (`0x2ADA`) e Training Status
   (`0x2AD3`), e lê a identidade e as capacidades do equipamento ao conectar;
 - **atualiza o cockpit cerca de uma vez por segundo**, com velocidade, inclinação, batimentos,
-  tempo, distância, calorias e MET;
+  tempo, distância e calorias;
 - **guarda as 300 leituras mais recentes** de velocidade, inclinação e frequência cardíaca (de 2 a
   5 minutos), de onde saem o ajuste da carga e o cartão da zona de batimentos;
 - **traduz os eventos do console** (início, parada, pausa, mudança de alvo feita no painel, chave de
@@ -52,7 +52,6 @@ Em resumo: ele informa; ele não comanda.
 | Frequência cardíaca | bpm | Treadmill Data (0x2ACD); 0 vira `—` (sem contato) |
 | Tempo decorrido | mm:ss / h:mm:ss | Treadmill Data (0x2ACD) |
 | Distância total | km | Treadmill Data (0x2ACD), em metros |
-| Ritmo | min/km | calculado pelo app a partir da velocidade |
 | Velocidade média | km/h | Treadmill Data (0x2ACD) — a T600X não envia; aparece `—` |
 | Energia total | kcal | Treadmill Data (0x2ACD) |
 | Gasto por hora | kcal/h | Treadmill Data (0x2ACD) |
@@ -64,14 +63,15 @@ Em resumo: ele informa; ele não comanda.
 | O que a esteira declara medir | — | Fitness Machine Feature (0x2ACC) |
 | Faixas de velocidade e inclinação | km/h, % | Supported Speed Range (0x2AD4) e Supported Inclination Range (0x2AD5) |
 
-O cockpit mostra o guia do treino (etapa, tempo que falta e carga a pôr no painel), velocidade,
-inclinação e batimentos com a unidade ao lado, a grade de métricas e o cartão da zona: a faixa de
-batimentos da sessão, a última leitura, o que o guia fez com a carga e a linha do tempo do treino. A linha do
-tempo tem uma coluna por minuto, preenchida à medida que as leituras de BPM chegam, sobre as cinco
-zonas de frequência cardíaca (Z1 a Z5, de 10 em 10 pontos percentuais a partir de 50% da FC
-máxima), com o alvo do dia em destaque. A velocidade média é
-calculada pelo app, pela distância e pelo tempo que a esteira informa, porque este modelo não a
-envia. Um toque longo no nome da esteira abre o cartão do equipamento e a lista dos campos que o
+O cockpit mostra a etapa do guia (tempo que falta nela, andamento do treino e a etapa seguinte), o
+medidor das zonas de frequência cardíaca, a carga lida da esteira (velocidade e inclinação, com o
+alvo da etapa ao lado do rótulo), os batimentos minuto a minuto e os totais de tempo, distância e
+calorias. O medidor é um arco com as cinco zonas (Z1 a Z5, de 10 em 10 pontos percentuais a partir
+de 50% da FC máxima): a faixa do dia fica acesa, a mira dentro dela aparece num vermelho mais vivo
+e uma seta do lado de fora aponta a última leitura, que vai no centro com o que ela diz do alvo. O
+gráfico por minuto tem uma coluna por minuto, na cor da zona, preenchida à medida que as leituras
+de BPM chegam, com a faixa do dia ao fundo e, no eixo, o que o guia fez com a carga. O painel
+ocupa a tela inteira, e só o gráfico por minuto estica para preenchê-la. Um toque longo no nome da esteira abre o cartão do equipamento e a lista dos campos que o
 modelo não envia. A referência completa dos campos e das escalas está em
 [docs/dados-da-esteira.md](docs/dados-da-esteira.md).
 

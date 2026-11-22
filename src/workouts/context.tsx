@@ -21,6 +21,26 @@ export function WorkoutProvider({
   useEffect(() => session.connect(), [session]);
   return <Context.Provider value={session}>{children}</Context.Provider>;
 }
+/**
+ * Troca o estado do treino por um fixo, para a prévia do painel. As telas leem
+ * `state` como leriam a sessão; o resto da sessão de verdade continua por trás.
+ */
+export function WorkoutPreviewProvider({
+  state,
+  children,
+}: {
+  state: ReturnType<WorkoutSession['snapshot']>;
+  children: ReactNode;
+}) {
+  const live = useWorkoutSession();
+  const [frozen] = useState((): WorkoutSession =>
+    Object.create(live, {
+      snapshot: { value: () => state },
+      subscribe: { value: () => () => {} },
+    }),
+  );
+  return <Context.Provider value={frozen}>{children}</Context.Provider>;
+}
 export function useWorkoutSession() {
   const session = useContext(Context);
   if (!session) throw new Error('Sessão de treino indisponível.');
