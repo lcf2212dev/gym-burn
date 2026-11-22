@@ -1,8 +1,9 @@
 import { Lucide } from '@react-native-vector-icons/lucide';
 import { Redirect, useRouter } from 'expo-router';
-import { useState, type ComponentProps, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card, Kicker } from '@/components/card';
+import { StatusPill, type IconName } from '@/components/kit';
 import { UiButton } from '@/components/ui-button';
 import { styles, WorkoutPage } from '@/components/workout-ui';
 import { ZoneGauge } from '@/components/zones/zone-gauge';
@@ -334,40 +335,6 @@ export default function Training() {
   );
 }
 
-type IconName = ComponentProps<typeof Lucide>['name'];
-
-/** O estado de um aparelho no alto da tela: um ponto ou um ícone na cor do estado, e o texto. */
-function StatusPill({
-  label,
-  color,
-  icon,
-  onPress,
-}: {
-  label: string;
-  color: string;
-  icon?: IconName;
-  onPress?: () => void;
-}) {
-  const body = (
-    <View
-      style={[local.pill, { borderColor: withAlpha(color, 0.35), backgroundColor: withAlpha(color, 0.08) }]}>
-      {icon ? (
-        <Lucide name={icon} size={12} color={color} />
-      ) : (
-        <View style={[local.dot, { backgroundColor: color }]} />
-      )}
-      <Text style={local.pillText}>{label}</Text>
-    </View>
-  );
-  return onPress ? (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} hitSlop={8}>
-      {body}
-    </Pressable>
-  ) : (
-    body
-  );
-}
-
 /** O alto do cartão principal: de onde vem o treino, o nome dele e a duração. */
 function HeroHead({
   icon,
@@ -462,17 +429,6 @@ const local = StyleSheet.create({
   kicker: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   hint: { fontSize: 12, lineHeight: 16, textAlign: 'center', color: Colors.dark.textSecondary },
   centered: { textAlign: 'center', fontSize: 13, lineHeight: 18 },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    height: 32,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  pillText: { ...NumeralType, fontSize: 15, letterSpacing: 0.4, color: Colors.dark.text },
   hero: { padding: 18, gap: 12 },
   heroHead: { flexDirection: 'row', alignItems: 'flex-end', gap: 12 },
   title: { ...TitleType, fontSize: 42, lineHeight: 44, color: Colors.dark.text },

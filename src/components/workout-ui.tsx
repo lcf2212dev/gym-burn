@@ -12,7 +12,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Lucide } from '@react-native-vector-icons/lucide';
 import type { ReactNode } from 'react';
 import { Colors, Glass, MaxContentWidth, Neon, TitleType } from '@/constants/theme';
-import { useStrap } from '@/heart/strap-context';
 
 const colors = Colors.dark;
 /**
@@ -45,13 +44,15 @@ export function WorkoutPage({
         keyboardShouldPersistTaps="handled">
         {accessory ? (
           <View style={styles.bar}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Voltar"
-              onPress={leave}
-              style={styles.round}>
-              <Lucide name="chevron-left" size={22} color={colors.text} />
-            </Pressable>
+            {back && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Voltar"
+                onPress={leave}
+                style={styles.round}>
+                <Lucide name="chevron-left" size={22} color={colors.text} />
+              </Pressable>
+            )}
             <Text accessibilityRole="header" style={styles.barTitle} numberOfLines={1}>
               {title}
             </Text>
@@ -85,35 +86,6 @@ export function Field({ label, ...props }: TextInputProps & { label: string }) {
         style={styles.input}
         {...props}
       />
-    </View>
-  );
-}
-
-export function WorkoutLinks() {
-  const router = useRouter();
-  const connected = useStrap((s) => s.phase === 'connected');
-  const bpm = useStrap((s) => s.bpm);
-  // Com a cinta conectada o próprio atalho mostra a leitura: dá para conferir
-  // que ela está funcionando antes de subir na esteira.
-  const strap = connected && bpm !== null ? 'Cinta · ' + bpm + ' bpm' : 'Cinta';
-  const links = [
-    { label: 'Perfil', href: '/perfil' },
-    { label: 'Evolução', href: '/evolucao' },
-    { label: strap, href: '/cinta' },
-    // O painel do treino com dados simulados, para ver a tela sem ir à academia.
-    { label: 'Prévia do treino', href: '/previa' },
-  ] as const;
-  return (
-    <View style={styles.row}>
-      {links.map(({ label, href }) => (
-        <Pressable
-          key={href}
-          accessibilityRole="button"
-          style={styles.link}
-          onPress={() => router.push(href)}>
-          <Text style={styles.linkText}>{label}</Text>
-        </Pressable>
-      ))}
     </View>
   );
 }
