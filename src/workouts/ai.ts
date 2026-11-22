@@ -5,12 +5,9 @@ import {
   assessPrompt,
   parseAssess,
   parsePlan,
-  parseReview,
   planPrompt,
   PROMPT_VERSION,
-  reviewPrompt,
   type Prompt,
-  type ReviewInput,
 } from './prompts';
 import { saveCall } from './storage';
 import { sessionPlan, type Session } from './week';
@@ -26,12 +23,12 @@ export async function saveApiKey(value: string) {
   });
 }
 
-export type Kind = 'plan' | 'review' | 'assess';
+export type Kind = 'plan' | 'assess';
 
-// As três chamadas usam o mesmo modelo, sempre com raciocínio ligado. Muda o
-// esforço: `high` para montar o plano, `low` durante o treino (a resposta
-// precisa chegar enquanto as leituras ainda valem) e `max` na avaliação, que
-// roda depois do treino e pode demorar.
+// As duas chamadas usam o mesmo modelo, sempre com raciocínio ligado. Muda o
+// esforço: `high` para montar o plano e `max` na avaliação, que roda depois do
+// treino e pode demorar. Durante o treino a IA não é chamada: o ajuste da
+// carga é conta do app.
 //
 // Não vai `temperature`: a API da DeepSeek ignora esse parâmetro com raciocínio
 // ligado. O único controle de amostragem que vale nesse modo é `top_p`, aceito
@@ -39,9 +36,8 @@ export type Kind = 'plan' | 'review' | 'assess';
 const MODEL = 'deepseek-flash';
 const MAX_TOKENS = 393216; // o máximo aceito pela API
 const RETRIES = 3;
-const settings: Record<Kind, { effort: 'low' | 'high' | 'max'; timeoutMs: number }> = {
+const settings: Record<Kind, { effort: 'high' | 'max'; timeoutMs: number }> = {
   plan: { effort: 'high', timeoutMs: 300_000 },
-  review: { effort: 'low', timeoutMs: 300_000 },
   assess: { effort: 'max', timeoutMs: 2_400_000 },
 };
 
@@ -180,9 +176,9 @@ export async function callModel<T>(
 
 /**
  * O plano de hoje para uma sessão do plano semanal. A estrutura e a faixa vêm
- * da sessão; a IA escolhe a carga dos blocos de esforço. Não há teto além do
- * que a esteira alcança: a resposta é conferida com a conta do app, e a
- * revisão durante o treino corrige o que a frequência cardíaca mostrar.
+ * da sessão; a IA escolhe a carga de partida dos blocos de esforço. Não há
+ * teto além do que a esteira alcança: a resposta é conferida com a conta do
+ * app, e o ajuste durante o treino corrige o que a frequência cardíaca mostrar.
  */
 export async function generatePlan(
   profile: Profile,
@@ -199,8 +195,4 @@ export async function generatePlan(
 export function assess(w: Workout, history: Workout[], options?: CallOptions): Promise<Estimate> {
   const input = { workout: w, history };
   return callModel('assess', assessPrompt(input), parseAssess(assessBounds(input)), options);
-}
-
-export function reviewIntensity(input: ReviewInput, options?: CallOptions) {
-  return callModel('review', reviewPrompt(input), parseReview(input.allowed), options);
 }

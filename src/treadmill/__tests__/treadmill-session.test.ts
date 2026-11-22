@@ -679,15 +679,15 @@ describe('métricas', () => {
     });
   });
 
-  it('guarda no máximo 120 amostras, uma por notificação', async () => {
+  it('guarda no máximo 300 amostras, uma por notificação', async () => {
     const { transport, session } = makeSession();
     const connection = await connectFake(transport, session);
-    for (let index = 0; index < 130; index++) {
+    for (let index = 0; index < 310; index++) {
       await jest.advanceTimersByTimeAsync(1000);
       connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
     }
     const samples = session.getSnapshot().samples;
-    expect(samples).toHaveLength(120);
+    expect(samples).toHaveLength(300);
     expect(samples.at(-1)!.at).toBe(Date.now());
   });
 });

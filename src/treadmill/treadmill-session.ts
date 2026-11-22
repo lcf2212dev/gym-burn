@@ -50,8 +50,12 @@ const READ_TIMEOUT_MS = 2000;
 /** A busca para sozinha depois deste tempo, para não gastar bateria. */
 const DEFAULT_SCAN_TIMEOUT_MS = 30_000;
 
-/** Amostras no gráfico ao vivo. */
-const MAX_SAMPLES = 120;
+/**
+ * Amostras guardadas. A revisão da carga usa o último minuto de leituras da
+ * cinta, e a esteira manda mais de um pacote por segundo: 300 cobrem esse
+ * minuto com folga.
+ */
+const MAX_SAMPLES = 300;
 
 /** Eventos do console guardados (o mais novo primeiro). */
 const MAX_CONSOLE_EVENTS = 8;

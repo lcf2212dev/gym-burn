@@ -1,6 +1,5 @@
 import { advanceGuidance, pendingAction, PULSE_READINGS, type Guidance } from '../guidance';
 import {
-  allowedDecisions,
   changeLabel,
   correctedStage,
   correction,
@@ -8,7 +7,7 @@ import {
   MAX_RAISE_METS,
   pulseFeatures,
   pulseWindow,
-  revisedStage,
+  raiseRoom,
 } from '../adaptive';
 import { currentCue, metabolicCost, PULSE_INTERVAL_SECONDS, type Stage } from '../model';
 import { sessionPlan, week } from '../week';
@@ -38,7 +37,8 @@ const work = plan.stages[1];
 const pulses = (start: number, values: number[]) =>
   values.map((bpm, i) => sample(start + i * 1000, work.speed, work.incline, bpm));
 /** O resumo de uma pegada: as 2 primeiras leituras caem e as demais são `values`. */
-const grip = (values: number[]) => pulseFeatures(pulseWindow(pulses(0, [99, 99, ...values]), 0, 0), zone)!;
+const grip = (values: number[]) =>
+  pulseFeatures(pulseWindow(pulses(0, [99, 99, ...values]), 0, (values.length + 1) * 1000), zone)!;
 const steady = (bpm: number) => grip([bpm, bpm, bpm, bpm, bpm, bpm]);
 
 it('fecha apenas após os dois alvos contemporâneos e não reabre o ajuste concluído', () => {
@@ -246,7 +246,7 @@ it('o pedido da FC de repouso caduca quando a janela fecha sem leitura', () => {
   expect(pendingAction(lapsed)).toBe('adjust');
 });
 
-it('a janela de leituras descarta as 2 primeiras de cada pegada e as de antes da etapa', () => {
+it('a janela do sensor de mão descarta as 2 primeiras de cada pegada e as de antes da etapa', () => {
   const samples = [
     ...pulses(0, [140, 130, 112, 113]),
     sample(4000),
@@ -255,16 +255,58 @@ it('a janela de leituras descarta as 2 primeiras de cada pegada e as de antes da
     sample(7000),
     ...pulses(8000, [125, 120, 114, 115, 116]),
   ];
-  expect(pulseWindow(samples, 0, 0).map((r) => r.bpm)).toEqual([112, 113, 114, 115, 116]);
-  expect(pulseWindow(samples, 0, 8000).map((r) => r.bpm)).toEqual([114, 115, 116]);
+  expect(pulseWindow(samples, 0, 12000).map((r) => r.bpm)).toEqual([112, 113, 114, 115, 116]);
+  // Só valem as leituras dos últimos 12 s, e menos de 4 não bastam para rever a carga.
+  expect(pulseWindow(samples, 0, 16000).map((r) => r.bpm)).toEqual([]);
+  expect(pulseWindow([...samples, ...pulses(13000, [117, 118])], 0, 16000).map((r) => r.bpm)).toEqual([
+    114, 115, 116, 117, 118,
+  ]);
   // Leituras de antes do início da etapa não contam nem para abrir a pegada.
-  expect(pulseWindow(samples, 9000, 0).map((r) => r.bpm)).toEqual([115, 116]);
-  expect(pulseWindow([sample(0, 0, 0, 100), sample(1000, 0, 0, 100), sample(2000, 0, 0, 100)], 0, 0)).toEqual([]);
+  expect(pulseWindow([...samples, ...pulses(13000, [117, 118])], 9000, 14000).map((r) => r.bpm)).toEqual([
+    115, 116, 117, 118,
+  ]);
+  // Depois de 12 s sem leitura não há o que rever, e com a lona parada nada conta.
+  expect(pulseWindow(samples, 0, 25000)).toEqual([]);
+  const still = [0, 1, 2, 3, 4, 5].map((i) => sample(i * 1000, 0, 0, 100));
+  expect(pulseWindow(still, 0, 5000)).toEqual([]);
+  // No máximo 10 leituras, as mais novas.
+  const long = pulses(0, Array.from({ length: 12 }, (_, i) => 100 + i));
+  expect(pulseWindow(long, 0, 11000).map((r) => r.bpm)).toEqual([102, 103, 104, 105, 106, 107, 108, 109, 110, 111]);
+});
+
+it('com a cinta a janela é o último minuto inteiro, e um pico de segundos não muda a mediana', () => {
+  const strap = (start: number, values: number[]) =>
+    values.map((bpm, i): TreadmillSample => ({
+      ...sample(start + i * 1000, work.speed, work.incline, bpm),
+      heartRateSource: 'strap',
+    }));
+  const flat = (seconds: number, bpm: number) => Array.from({ length: seconds }, () => bpm);
+  // 90 s de cinta: valem os últimos 60 s (61 leituras, das duas pontas), sem descartar nenhuma.
+  const samples = strap(0, [...flat(30, 100), ...flat(60, 115)]);
+  const window = pulseWindow(samples, 0, 89000);
+  expect(window).toHaveLength(61);
+  expect(window[0]).toMatchObject({ at: 29000, bpm: 100 });
+  expect(pulseFeatures(window, zone)).toMatchObject({ count: 61, spanSeconds: 60, median: 115, position: 'na faixa' });
+  // 9 segundos em 119 dentro de um minuto em 116: a mediana continua na faixa.
+  const blip = strap(0, [...flat(51, 116), ...flat(9, 119)]);
+  expect(pulseFeatures(pulseWindow(blip, 0, 59000), zone)).toMatchObject({ median: 116, position: 'na faixa' });
+  // Mais da metade do minuto acima do teto, aí sim.
+  const over = strap(0, [...flat(25, 116), ...flat(35, 119)]);
+  expect(pulseFeatures(pulseWindow(over, 0, 59000), zone)).toMatchObject({ median: 119, position: 'acima', margin: 2 });
+  // A tendência compara as duas metades do minuto.
+  const rising = strap(0, [...flat(30, 108), ...flat(30, 111)]);
+  expect(pulseFeatures(pulseWindow(rising, 0, 59000), zone)).toMatchObject({ change: 3, trend: 'subindo' });
+  // Menos de 40 s de leituras na etapa ainda não dizem o BPM da carga.
+  expect(pulseWindow(strap(0, flat(39, 110)), 0, 38000)).toEqual([]);
+  expect(pulseWindow(strap(0, flat(41, 110)), 0, 40000)).toHaveLength(41);
+  expect(pulseWindow(samples, 60000, 89000)).toEqual([]);
+  // A cinta caiu e a pessoa segurou o sensor: valem as regras do sensor de mão.
+  const mixed = [...strap(0, flat(60, 110)), ...pulses(66000, [120, 119, 112, 113, 112, 113])];
+  expect(pulseWindow(mixed, 0, 71000).map((r) => r.bpm)).toEqual([112, 113, 112, 113]);
 });
 
 it('resume as leituras em mediana, tendência e posição na faixa', () => {
-  const features = (values: number[]) =>
-    pulseFeatures(pulseWindow(pulses(0, [99, 99, ...values]), 0, 0), zone);
+  const features = grip;
   // Uma leitura solta (150) não tira a mediana da faixa.
   expect(features([110, 111, 150, 110, 112])).toMatchObject({
     count: 5,
@@ -293,40 +335,52 @@ it('resume as leituras em mediana, tendência e posição na faixa', () => {
 });
 
 const load = { stage: work, easy: false, reached: true, secondsAtLoad: 300 };
-const at = (speed: number, incline: number) => ({ ...load, stage: { ...work, speed, incline } });
 const stageAt = (speed: number, incline: number): Stage => ({ ...work, speed, incline });
 
-it('só oferece à IA um aumento dentro da faixa e abaixo do teto, já escolhendo entre velocidade e inclinação', () => {
+it('dentro da faixa a carga só ganha os bpm que cabem até o teto, e nada quando já está no alvo', () => {
   const [below, inside, top, above] = [steady(90), steady(110), steady(117), steady(130)];
-  // O alvo é o teto da faixa: dentro dela, mas abaixo dele, a carga ainda pode subir.
   expect(inside).toMatchObject({ position: 'na faixa', belowTop: 7 });
   expect(above).toMatchObject({ position: 'acima', belowTop: -13 });
-  expect(allowedDecisions(inside, load)).toEqual(['manter', 'aumentar velocidade']);
-  expect(allowedDecisions(steady(99), load)).toEqual(['manter', 'aumentar velocidade']);
-  expect(allowedDecisions(top, load)).toEqual(['manter']);
-  // Fora da faixa quem corrige é o app: nada vai à IA, e redução nunca é oferecida.
-  expect(allowedDecisions(below, load)).toEqual(['manter']);
-  expect(allowedDecisions(above, load)).toEqual(['manter']);
-  expect(allowedDecisions(above, { ...load, easy: true, secondsAtLoad: 0 })).toEqual(['manter']);
-  // Abaixo de 5,6 km/h a caminhada sobe pela velocidade.
-  expect(allowedDecisions(inside, at(5.5, 3))).toEqual(['manter', 'aumentar velocidade']);
-  // De 5,6 km/h até a corrida a carga sobe pela rampa, até o máximo da esteira.
-  expect(allowedDecisions(inside, at(5.6, 0))).toEqual(['manter', 'aumentar inclinação']);
-  expect(allowedDecisions(inside, at(5.6, 8))).toEqual(['manter', 'aumentar inclinação']);
-  expect(allowedDecisions(inside, at(5.6, 14.5))).toEqual(['manter', 'aumentar inclinação']);
-  expect(allowedDecisions(inside, at(5.6, 15))).toEqual(['manter']);
-  // Um alvo antigo entre 5,6 e 7 km/h também sobe pela rampa, nunca pela velocidade.
-  expect(allowedDecisions(inside, at(6, 2))).toEqual(['manter', 'aumentar inclinação']);
-  expect(allowedDecisions(inside, at(6.9, 1))).toEqual(['manter', 'aumentar inclinação']);
-  // Correndo, tudo é pela velocidade, sem o teto antigo de 9 km/h.
-  expect(allowedDecisions(inside, at(7, 1))).toEqual(['manter', 'aumentar velocidade']);
-  expect(allowedDecisions(inside, at(12, 1))).toEqual(['manter', 'aumentar velocidade']);
-  expect(allowedDecisions(inside, at(22, 1))).toEqual(['manter']);
+  // Carga estabilizada (4 min ou mais): cabe a distância até o teto, menos 1 bpm de folga.
+  expect(raiseRoom(inside, load)).toBe(6);
+  // Longe do teto a folga é um quinto da distância: de 18 bpm, ficam 4.
+  expect(raiseRoom(steady(99), load)).toBe(14);
+  expect(raiseRoom(steady(107), load)).toBe(8);
+  expect(raiseRoom(steady(113), load)).toBe(3);
+  // A 3 bpm do teto, ou menos, o alvo já foi atingido.
+  expect(raiseRoom(steady(114), load)).toBe(0);
+  expect(raiseRoom(top, load)).toBe(0);
+  // Com menos de 4 minutos na carga a FC ainda sobe uns 3 bpm sozinha: eles ficam reservados.
+  expect(raiseRoom(inside, { ...load, secondsAtLoad: 239 })).toBe(3);
+  expect(raiseRoom(steady(111), { ...load, secondsAtLoad: 239 })).toBe(0);
+  expect(raiseRoom(steady(111), { ...load, secondsAtLoad: 240 })).toBe(5);
+  // Fora da faixa quem age é a correção, não o ajuste fino.
+  expect(raiseRoom(below, load)).toBe(0);
+  expect(raiseRoom(above, load)).toBe(0);
+  // Com a FC ainda subindo ela chega mais perto do teto sozinha.
+  const rising = grip([104, 105, 106, 108, 109, 110]);
+  expect(rising).toMatchObject({ position: 'na faixa', trend: 'subindo' });
+  expect(raiseRoom(rising, load)).toBe(0);
+  // Com o minuto inteiro da cinta, 1 bpm entre as metades (2 bpm por minuto) já é subida.
+  const minute = (first: number, second: number) =>
+    pulseFeatures(
+      Array.from({ length: 60 }, (_, i) => ({ bpm: i < 30 ? first : second, at: i * 1000, kmh: 5, incline: 1.5 })),
+      zone,
+    )!;
+  expect(minute(110, 110)).toMatchObject({ count: 60, change: 0, trend: 'estável' });
+  expect(raiseRoom(minute(110, 110), load)).toBe(6);
+  expect(minute(109, 110)).toMatchObject({ change: 1, trend: 'estável' });
+  expect(raiseRoom(minute(109, 110), load)).toBe(0);
+  // Caindo, ou no sensor de mão (poucas leituras), 1 bpm é ruído.
+  expect(raiseRoom(minute(111, 110), load)).toBeGreaterThan(0);
+  expect(raiseRoom(grip([109, 109, 109, 110, 110, 110]), load)).toBeGreaterThan(0);
   // A carga só sobe em etapa principal, nos alvos, há 90 s ou mais.
-  expect(allowedDecisions(inside, { ...load, easy: true })).toEqual(['manter']);
-  expect(allowedDecisions(inside, { ...load, reached: false })).toEqual(['manter']);
-  expect(allowedDecisions(inside, { ...load, secondsAtLoad: 89 })).toEqual(['manter']);
-  expect(allowedDecisions(inside, { ...load, secondsAtLoad: 90 })).toEqual(['manter', 'aumentar velocidade']);
+  expect(raiseRoom(inside, { ...load, easy: true })).toBe(0);
+  expect(raiseRoom(inside, { ...load, reached: false })).toBe(0);
+  expect(raiseRoom(inside, { ...load, secondsAtLoad: 89 })).toBe(0);
+  expect(raiseRoom(inside, { ...load, secondsAtLoad: 90 })).toBe(3);
+  // Nos 2 últimos minutos do último bloco o aumento não teria tempo de fazer efeito.
+  expect(raiseRoom(inside, { ...load, closing: true })).toBe(0);
 });
 
 it('fora da faixa o app corrige sozinho: alivia acima do teto sempre e sobe abaixo do piso só com a carga estável', () => {
@@ -354,6 +408,23 @@ it('fora da faixa o app corrige sozinho: alivia acima do teto sempre e sobe abai
   expect(correction(rising, load)).toBeNull();
 });
 
+it('nos 3 minutos depois de um alívio, outro só sai com excesso claro e a FC sem cair', () => {
+  const fallingAbove = grip([130, 129, 128, 126, 124, 122]);
+  // 1 ou 2 bpm acima do teto com um alívio recente: a FC ainda está respondendo a ele.
+  expect(correction(steady(118), load, 60)).toBeNull();
+  expect(correction(steady(119), load, 179)).toBeNull();
+  // Passados os 3 minutos, o mesmo excesso alivia de novo.
+  expect(correction(steady(118), load, 180)).toBe('aliviar');
+  // 3 bpm ou mais acima do teto não esperam.
+  expect(correction(steady(120), load, 60)).toBe('aliviar');
+  expect(correction(steady(130), load, 61)).toBe('aliviar');
+  // A não ser que a FC já esteja caindo: é o alívio anterior fazendo efeito.
+  expect(correction(fallingAbove, load, 60)).toBeNull();
+  expect(correction(fallingAbove, load, 180)).toBe('aliviar');
+  // A espera não segura a subida abaixo do piso.
+  expect(correction(steady(90), load, 60)).toBe('subir');
+});
+
 it('o tamanho da correção sai da distância do BPM até o alvo', () => {
   // Aliviando, o BPM volta para 3 abaixo do teto: 130 − (117 − 3).
   expect(correctionBpm('aliviar', steady(130), zone)).toBe(16);
@@ -369,136 +440,185 @@ it('a correção anda pela escada de cargas, proporcional à distância, sem exi
   // Os exemplos dos cenários: 40 anos, faixa de 117 a 135 e 15 bpm por MET.
   const fix = (stage: Stage, kind: 'aliviar' | 'subir', bpm: number) =>
     correctedStage(stage, kind, bpm / 15, sample(0, stage.speed, stage.incline));
-  expect(fix(stageAt(5.6, 2.5), 'aliviar', 149 - 132)).toEqual(stageAt(5.6, 0));
-  expect(fix(stageAt(5.6, 2.5), 'aliviar', 138 - 132)).toEqual(stageAt(5.6, 1.5));
+  expect(fix(stageAt(5.2, 3), 'aliviar', 149 - 132)).toEqual(stageAt(5.2, 0.5));
+  expect(fix(stageAt(5.2, 3), 'aliviar', 138 - 132)).toEqual(stageAt(5.2, 2));
   // Subindo, uma correção não passa de 1 MET: 19 e 21 bpm pediriam 1,27 e 1,4.
-  expect(fix(stageAt(5.6, 2.5), 'subir', 126 - 107)).toEqual(stageAt(5.6, 4.5));
-  expect(fix(stageAt(5, 0), 'subir', 126 - 105)).toEqual(stageAt(5.6, 1));
+  expect(fix(stageAt(5.2, 3), 'subir', 126 - 107)).toEqual(stageAt(5.2, 5));
+  expect(fix(stageAt(5, 0), 'subir', 126 - 105)).toEqual(stageAt(5.2, 2));
   // Correndo só a velocidade muda: no limiar, 173 BPM a 8 km/h e 1% (faixa de 153 a 162).
   expect(fix(stageAt(8, 1), 'aliviar', 173 - 159)).toEqual(stageAt(7, 1));
   expect(fix(stageAt(10, 1), 'aliviar', 15)).toEqual(stageAt(8.9, 1));
   expect(fix(stageAt(10, 1), 'subir', 15)).toEqual(stageAt(11, 1));
-  // Quanto mais longe da faixa, maior o degrau: a caminhada perde a rampa e depois a velocidade.
+  // Quanto mais longe da faixa, maior o degrau: abaixo de 4,9 km/h a caminhada é plana.
   expect([8, 13, 33].map((bpm) => fix(stageAt(5, 1), 'aliviar', bpm))).toEqual([
-    stageAt(4.7, 0),
-    stageAt(4, 0),
-    stageAt(1.2, 0),
+    stageAt(4.8, 0),
+    stageAt(4.1, 0),
+    stageAt(1.3, 0),
   ]);
-  // O custo cai ao menos o pedido, e um décimo de km/h a menos de redução já não bastaria.
+  // O corte fica o mais perto possível do pedido: no máximo 0,03 MET aquém, e nunca um degrau além.
   for (const bpm of [8, 13, 33]) {
     const mets = bpm / 15;
     const after = fix(stageAt(5, 1), 'aliviar', bpm);
-    const before = metabolicCost(5, 1);
-    expect(before - metabolicCost(after.speed, after.incline)).toBeGreaterThanOrEqual(mets);
-    expect(before - metabolicCost(Math.round((after.speed + 0.1) * 10) / 10, 0)).toBeLessThan(mets);
+    const cut = metabolicCost(5, 1) - metabolicCost(after.speed, after.incline);
+    expect(cut).toBeGreaterThanOrEqual(mets - 0.03);
+    expect(cut).toBeLessThan(mets + 0.05);
   }
   // Subindo, o custo não passa do pedido, e o degrau seguinte passaria.
   const raised = fix(stageAt(5, 1), 'subir', 12);
-  expect(raised).toEqual(stageAt(5.6, 1.5));
-  expect(metabolicCost(5.6, 1.5) - metabolicCost(5, 1)).toBeLessThanOrEqual(12 / 15);
-  expect(metabolicCost(5.6, 2) - metabolicCost(5, 1)).toBeGreaterThan(12 / 15);
-  // A caminhada nunca passa de 5,6 km/h, e por maior que seja a distância a correção para em 1 MET.
+  expect(raised).toEqual(stageAt(5.2, 2.5));
+  expect(metabolicCost(5.2, 2.5) - metabolicCost(5, 1)).toBeLessThanOrEqual(12 / 15);
+  expect(metabolicCost(5.2, 3) - metabolicCost(5, 1)).toBeGreaterThan(12 / 15);
+  // A caminhada nunca passa de 5,2 km/h, e por maior que seja a distância a correção para em 1 MET.
   expect(MAX_RAISE_METS).toBe(1);
-  expect(fix(stageAt(5, 0), 'subir', 75)).toEqual(stageAt(5.6, 1));
-  expect(metabolicCost(5.6, 1) - metabolicCost(5, 0)).toBeLessThanOrEqual(1);
-  expect(metabolicCost(5.6, 1.5) - metabolicCost(5, 0)).toBeGreaterThan(1);
+  expect(fix(stageAt(5, 0), 'subir', 75)).toEqual(stageAt(5.2, 2));
+  expect(metabolicCost(5.2, 2) - metabolicCost(5, 0)).toBeLessThanOrEqual(1);
+  expect(metabolicCost(5.2, 2.5) - metabolicCost(5, 0)).toBeGreaterThan(1);
   expect(fix(stageAt(10, 1), 'subir', 75)).toEqual(stageAt(11, 1));
-  // Um pedido pequeno ainda vale um degrau.
+  // Numa correção fora da faixa um pedido pequeno ainda vale um degrau.
   expect(fix(stageAt(5, 0), 'subir', 0.1)).toEqual(stageAt(5.1, 0));
-  expect(fix(stageAt(5.6, 2), 'subir', 0.1)).toEqual(stageAt(5.6, 2.5));
+  expect(fix(stageAt(5.2, 2), 'subir', 0.1)).toEqual(stageAt(5.2, 2.5));
   expect(fix(stageAt(10, 1), 'subir', 0.1)).toEqual(stageAt(10.1, 1));
   // No limite da esteira a etapa volta como estava.
-  const steep = stageAt(5.6, 15);
+  const steep = stageAt(5.2, 15);
   expect(fix(steep, 'subir', 15)).toBe(steep);
   const fastest = stageAt(22, 1);
   expect(fix(fastest, 'subir', 15)).toBe(fastest);
   const slowest = stageAt(1, 0);
   expect(fix(slowest, 'aliviar', 15)).toBe(slowest);
   // A pessoa já anda abaixo dos alvos: a redução parte do que a esteira mede, e nenhum alvo fica acima disso.
-  const below = correctedStage(stageAt(5.6, 2.5), 'aliviar', 0.2, sample(0, 5.04, 1.2));
+  const below = correctedStage(stageAt(5.2, 3), 'aliviar', 0.2, sample(0, 5.04, 1.2));
   expect(below).toEqual(stageAt(5, 0.5));
   expect(below.speed).toBeLessThanOrEqual(5.04);
   expect(below.incline).toBeLessThanOrEqual(1.2);
   // Dentro da tolerância do guia vale o alvo: a esteira informa 4,995% quando está em 5%.
-  expect(correctedStage(stageAt(5.6, 5), 'aliviar', 0.2, sample(0, 5.59, 4.995))).toEqual(stageAt(5.6, 4.5));
+  expect(correctedStage(stageAt(5.2, 5), 'aliviar', 0.2, sample(0, 5.19, 4.995))).toEqual(stageAt(5.2, 4.5));
   // Uma etapa leve não desce de 3 km/h, a linha mais leve da escada; abaixo disso ela fica como está.
   const easy = (speed: number): Stage => ({ ...stageAt(speed, 0), measure: true });
-  expect(correctedStage(easy(4), 'aliviar', 0.3, sample(0, 4, 0))).toEqual(easy(3.3));
+  expect(correctedStage(easy(4), 'aliviar', 0.3, sample(0, 4, 0))).toEqual(easy(3.4));
   expect(correctedStage(easy(4), 'aliviar', 1.2, sample(0, 4, 0))).toEqual(easy(3));
   const light = easy(2.4);
   expect(correctedStage(light, 'aliviar', 1.2, sample(0, 2.4, 0))).toBe(light);
   // Sem velocidade e inclinação medidas, ou com a lona quase parada, não há conta a fazer.
-  const walk = stageAt(5.6, 2.5);
-  expect(correctedStage(walk, 'aliviar', 1, sample(0, 0.5, 2.5))).toBe(walk);
+  const walk = stageAt(5.2, 3);
+  expect(correctedStage(walk, 'aliviar', 1, sample(0, 0.5, 3))).toBe(walk);
   expect(correctedStage(walk, 'aliviar', 1, { ...sample(0), speedKmh: null })).toBe(walk);
   expect(correctedStage(walk, 'subir', 1, { ...sample(0), inclinationPercent: null })).toBe(walk);
-  expect(correctedStage(walk, 'aliviar', 0, sample(0, 5.6, 2.5))).toBe(walk);
-  expect(correctedStage(walk, 'subir', NaN, sample(0, 5.6, 2.5))).toBe(walk);
+  expect(correctedStage(walk, 'aliviar', 0, sample(0, 5.2, 3))).toBe(walk);
+  expect(correctedStage(walk, 'subir', NaN, sample(0, 5.2, 3))).toBe(walk);
 });
 
-it('aliviar uma corrida nunca deixa o alvo entre 5,6 e 7 km/h', () => {
+it('com rampa o ajuste fino é a velocidade, de 4,9 a 5,2 km/h: 0,1 km/h vale bem menos que meio ponto de rampa', () => {
   const at = (stage: Stage) => sample(0, stage.speed, stage.incline);
   const ease = (stage: Stage, mets: number) => correctedStage(stage, 'aliviar', mets, at(stage));
-  // Enquanto a corrida dá conta, só a velocidade desce, até 7 km/h.
-  expect(ease(stageAt(8, 1), 0.8)).toEqual(stageAt(7.1, 1));
-  expect(ease(stageAt(8, 1), 0.99)).toEqual(stageAt(7, 1));
-  // Passou disso, a carga desce para a linha de baixo da escada: 5,6 km/h com a rampa que couber.
-  expect(ease(stageAt(7, 1), 0.3)).toEqual(stageAt(5.6, 8));
-  expect(ease(stageAt(7, 1), 1)).toEqual(stageAt(5.6, 6.5));
-  expect(ease(stageAt(8, 1), 1.4)).toEqual(stageAt(5.6, 8));
-  expect(ease(stageAt(7, 1), 3)).toEqual(stageAt(5.6, 2.5));
+  const tune = (stage: Stage, mets: number) => correctedStage(stage, 'subir', mets, at(stage), true);
+  // Meio ponto de rampa a 5,2 km/h custa 0,22 MET; 0,1 km/h a 2,5%, 0,07.
+  expect(metabolicCost(5.2, 3) - metabolicCost(5.2, 2.5)).toBeCloseTo(0.223, 3);
+  expect(metabolicCost(5.2, 2.5) - metabolicCost(5.1, 2.5)).toBeCloseTo(0.069, 3);
+  // Aliviando, o corte é o que chega mais perto do pedido: a rampa quando ela basta, e a velocidade para o que falta.
+  expect(ease(stageAt(5.2, 2.5), 0.2)).toEqual(stageAt(5.2, 2));
+  expect(ease(stageAt(5.2, 2.5), 0.3)).toEqual(stageAt(5.1, 2));
+  expect(ease(stageAt(5.2, 2.5), 0.4)).toEqual(stageAt(5.2, 1.5));
+  // Meio ponto de rampa tira 0,22 MET: serve para um pedido de 0,25, sem mexer também na velocidade.
+  expect(ease(stageAt(5.2, 2.5), 0.25)).toEqual(stageAt(5.2, 2));
+  // Com rampa a velocidade não desce de 4,9 km/h: dali o corte é pela rampa. A 4,9 km/h meio
+  // ponto tira 0,21 MET, e um pedido de 0,23 não vira dois degraus.
+  expect(ease(stageAt(4.9, 2.5), 0.2)).toEqual(stageAt(4.9, 2));
+  expect(ease(stageAt(4.9, 4), 0.23)).toEqual(stageAt(4.9, 3.5));
+  // Sem rampa, só resta a velocidade.
+  expect(ease(stageAt(5.2, 0), 0.2)).toEqual(stageAt(4.8, 0));
+  // No ajuste fino a carga sobe o que cabe no pedido, e fica como está se nenhum degrau cabe.
+  const top = stageAt(5.2, 2.5);
+  expect(tune(top, 0.2)).toBe(top);
+  expect(tune(top, 0.25)).toEqual(stageAt(5.2, 3));
+  expect(tune(stageAt(5, 2.5), 0.05)).toEqual(stageAt(5, 2.5));
+  expect(tune(stageAt(5, 2.5), 0.1)).toEqual(stageAt(5.1, 2.5));
+  expect(tune(stageAt(5, 2.5), 0.15)).toEqual(stageAt(5.2, 2.5));
+  expect(tune(stageAt(5, 2.5), 0.3)).toEqual(stageAt(5.1, 3));
+  // Abaixo de 4,9 km/h a caminhada é plana: primeiro a velocidade, e a rampa só perto do teto.
+  expect(tune(stageAt(4.5, 0), 0.2)).toEqual(stageAt(4.9, 0));
+  expect(tune(stageAt(4.5, 0), 0.5)).toEqual(stageAt(5, 0.5));
+  // Correndo, 0,1 km/h vale 0,1 MET.
+  const run = stageAt(7, 1);
+  expect(tune(run, 0.05)).toBe(run);
+  expect(tune(run, 0.1)).toEqual(stageAt(7.1, 1));
+  // Um aumento nunca desce um alvo, e um alívio nunca sobe.
+  for (const speed of [4.5, 4.9, 5, 5.2])
+    for (const incline of [0, 1, 2.5, 7.5])
+      for (const mets of [0.05, 0.1, 0.2, 0.4, 0.8]) {
+        const from = stageAt(speed, incline);
+        const up = tune(from, mets);
+        expect(up.speed).toBeGreaterThanOrEqual(speed);
+        expect(up.incline).toBeGreaterThanOrEqual(incline);
+        expect(up.speed).toBeLessThanOrEqual(5.2);
+        expect(metabolicCost(up.speed, up.incline) - metabolicCost(speed, incline)).toBeLessThanOrEqual(mets + 1e-9);
+        const down = ease(from, mets);
+        expect(down.speed).toBeLessThanOrEqual(speed);
+        expect(down.incline).toBeLessThanOrEqual(incline);
+        expect(metabolicCost(speed, incline) - metabolicCost(down.speed, down.incline)).toBeGreaterThanOrEqual(mets - 0.03 - 1e-9);
+      }
+});
+
+it('aliviar uma corrida nunca deixa o alvo entre 5,2 e 6 km/h', () => {
+  const at = (stage: Stage) => sample(0, stage.speed, stage.incline);
+  const ease = (stage: Stage, mets: number) => correctedStage(stage, 'aliviar', mets, at(stage));
+  // Enquanto a corrida dá conta, só a velocidade desce, até 6 km/h.
+  expect(ease(stageAt(7, 1), 0.8)).toEqual(stageAt(6.1, 1));
+  expect(ease(stageAt(7, 1), 0.99)).toEqual(stageAt(6, 1));
+  // Passou disso, a carga desce para a linha de baixo da escada: 5,2 km/h com a rampa que couber.
+  expect(ease(stageAt(6, 1), 0.1)).toEqual(stageAt(5.2, 7.5));
+  expect(ease(stageAt(6, 1), 0.3)).toEqual(stageAt(5.2, 7));
+  expect(ease(stageAt(6, 1), 1)).toEqual(stageAt(5, 6));
+  expect(ease(stageAt(7, 1), 1.4)).toEqual(stageAt(5.2, 7));
+  expect(ease(stageAt(6, 1), 3)).toEqual(stageAt(4.9, 1.5));
   // Quem já baixou a esteira para andar num bloco de corrida está caminhando: a conta parte da
   // carga medida, e o alívio não pede mais velocidade nem mais rampa do que a esteira tem.
-  expect(correctedStage(stageAt(7, 1), 'aliviar', 0.3, sample(0, 6.5, 1))).toEqual(stageAt(5.6, 1));
+  expect(correctedStage(stageAt(6, 1), 'aliviar', 0.3, sample(0, 5.5, 1))).toEqual(stageAt(5, 1));
   expect(correctedStage(stageAt(10, 1), 'aliviar', 1, sample(0, 5, 1))).toEqual(stageAt(3.8, 0));
-  for (const speed of [7, 8, 10])
-    for (const walking of [1.5, 3, 4.5, 5, 5.5, 5.6, 6, 6.9])
+  for (const speed of [6, 8, 10])
+    for (const walking of [1.5, 3, 4.5, 5, 5.2, 5.5, 5.9])
       for (const mets of [0.1, 0.5, 1, 2]) {
         const eased = correctedStage(stageAt(speed, 1), 'aliviar', mets, sample(0, walking, 1));
-        expect(eased.speed).toBeLessThanOrEqual(Math.min(walking, 5.6));
+        expect(eased.speed).toBeLessThanOrEqual(Math.min(walking, 5.2));
         expect(eased.incline).toBeLessThanOrEqual(1);
       }
-  // Um alvo antigo de caminhada acima de 5,6 km/h volta ao teto ao ser aliviado.
-  expect(ease(stageAt(6, 2), 0.1)).toEqual(stageAt(5.6, 2));
-  expect(ease(stageAt(6, 2), 0.5)).toEqual(stageAt(5.6, 1));
-  for (const speed of [7, 7.2, 7.5, 8, 9, 10, 12])
+  // Um alvo antigo de caminhada acima de 5,2 km/h volta ao teto ao ser aliviado, e também ao subir.
+  expect(ease(stageAt(5.6, 2), 0.1)).toEqual(stageAt(5.2, 2));
+  expect(ease(stageAt(5.6, 2), 0.5)).toEqual(stageAt(5.2, 1.5));
+  expect(correctedStage(stageAt(5.6, 2), 'subir', 0.3, sample(0, 5.6, 2))).toEqual(stageAt(5.2, 3));
+  for (const speed of [6, 6.2, 6.5, 7, 8, 10, 12])
     for (const incline of [0, 1, 3])
       for (let mets = 0.1; mets < 8; mets += 0.1) {
         const eased = ease(stageAt(speed, incline), mets);
-        expect(eased.speed <= 5.6 || eased.speed >= 7).toBe(true);
+        expect(eased.speed <= 5.2 || eased.speed >= 6).toBe(true);
         expect(eased.speed).toBeLessThan(speed + 0.01);
       }
 });
 
-it('o registro do treino diz qual alvo a correção mudou', () => {
-  expect(changeLabel(stageAt(5, 1), stageAt(4.7, 0))).toBe('reduzir velocidade');
-  expect(changeLabel(stageAt(5.6, 2.5), stageAt(5.6, 0))).toBe('reduzir inclinação');
-  expect(changeLabel(stageAt(5, 0), stageAt(5.6, 0))).toBe('aumentar velocidade');
-  expect(changeLabel(stageAt(5.6, 2.5), stageAt(5.6, 5))).toBe('aumentar inclinação');
-  // Velocidade e rampa juntas: vale a rampa, o último degrau da escada.
-  expect(changeLabel(stageAt(5, 0), stageAt(5.6, 2))).toBe('aumentar inclinação');
+it('correndo, a rampa nunca passa de 2%', () => {
+  const at = (stage: Stage) => sample(0, stage.speed, stage.incline);
+  // A corrida só muda pela velocidade: a rampa fica onde está.
+  expect(correctedStage(stageAt(8, 2), 'subir', 0.5, at(stageAt(8, 2)))).toEqual(stageAt(8.4, 2));
+  expect(correctedStage(stageAt(8, 2), 'aliviar', 0.5, at(stageAt(8, 2)))).toEqual(stageAt(7.5, 2));
+  // Um alvo antigo de corrida com mais rampa volta a 2% no primeiro ajuste, e a velocidade faz a conta fechar.
+  const steep = stageAt(8, 3);
+  expect(correctedStage(steep, 'aliviar', 0.5, at(steep))).toEqual(stageAt(7.8, 2));
+  expect(correctedStage(steep, 'subir', 0.3, at(steep))).toEqual(stageAt(8.6, 2));
+  expect(metabolicCost(8.6, 2) - metabolicCost(8, 3)).toBeLessThanOrEqual(0.3);
+  for (const speed of [6, 7, 9, 12])
+    for (const incline of [0, 1, 2, 3, 6])
+      for (const mets of [0.1, 0.4, 1, 2])
+        for (const kind of ['aliviar', 'subir'] as const) {
+          const stage = stageAt(speed, incline);
+          const after = correctedStage(stage, kind, mets, at(stage));
+          if (after !== stage && after.speed >= 6) expect(after.incline).toBeLessThanOrEqual(2);
+        }
 });
 
-it('aplica o aumento da IA em passos pequenos, sem passar de 5,6 km/h numa caminhada', () => {
-  expect(revisedStage(work, 'manter')).toBe(work);
-  expect(revisedStage(work, 'aumentar velocidade')).toEqual({ ...work, speed: 5.2 });
-  expect(revisedStage(work, 'aumentar inclinação')).toEqual({ ...work, incline: 2 });
-  // Reduções não passam por aqui: quem alivia é a correção do app.
-  expect(revisedStage(work, 'reduzir velocidade')).toBe(work);
-  expect(revisedStage(work, 'reduzir inclinação')).toBe(work);
-  // A caminhada para no teto de 5,6 km/h.
-  expect(revisedStage(stageAt(5.3, 1), 'aumentar velocidade').speed).toBe(5.5);
-  expect(revisedStage(stageAt(5.5, 1), 'aumentar velocidade').speed).toBe(5.6);
-  const walkTop = stageAt(5.6, 1);
-  expect(revisedStage(walkTop, 'aumentar velocidade')).toBe(walkTop);
-  // Um alvo antigo acima do teto da caminhada não sobe mais pela velocidade.
-  const old = stageAt(6, 2);
-  expect(revisedStage(old, 'aumentar velocidade')).toBe(old);
-  // Correndo, os alvos vão até o que a esteira alcança, e param ali.
-  expect(revisedStage(stageAt(12, 14.5), 'aumentar velocidade').speed).toBe(12.2);
-  expect(revisedStage(stageAt(21.9, 1), 'aumentar velocidade').speed).toBe(22);
-  expect(revisedStage(stageAt(12, 14.5), 'aumentar inclinação').incline).toBe(15);
-  const top = stageAt(22, 15);
-  expect(revisedStage(top, 'aumentar velocidade')).toBe(top);
-  expect(revisedStage(top, 'aumentar inclinação')).toBe(top);
+it('o registro do treino diz qual alvo a correção mudou', () => {
+  expect(changeLabel(stageAt(5, 1), stageAt(4.8, 0))).toBe('reduzir velocidade');
+  expect(changeLabel(stageAt(5.2, 2.5), stageAt(5.2, 0))).toBe('reduzir inclinação');
+  expect(changeLabel(stageAt(5, 0), stageAt(5.2, 0))).toBe('aumentar velocidade');
+  expect(changeLabel(stageAt(5.2, 2.5), stageAt(5.2, 5))).toBe('aumentar inclinação');
+  // Velocidade e rampa juntas: vale a rampa, o último degrau da escada.
+  expect(changeLabel(stageAt(5, 0), stageAt(5.2, 2))).toBe('aumentar inclinação');
 });
