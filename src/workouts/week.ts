@@ -37,6 +37,12 @@ export const heartZones = [
   { id: 'Z5', name: 'Máximo (VO₂máx)', from: 90, feel: 'máximo', purpose: 'Tiros curtos, potência e velocidade' },
 ] as const;
 
+/** Quais das cinco zonas a faixa de um treino atravessa, de 0 (Z1) a 4 (Z5). */
+export function zoneIndexes(objective: Objective) {
+  const [low, high] = zones[objective];
+  return heartZones.flatMap((zone, index) => (zone.from < high && zone.from + 10 > low ? [index] : []));
+}
+
 /** As zonas que a faixa de um treino atravessa, como "Z2–Z3", e a sensação delas. */
 export function zoneSpan(objective: Objective) {
   const [low, high] = zones[objective];
