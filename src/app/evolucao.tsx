@@ -8,7 +8,15 @@ import { UiButton } from '@/components/ui-button';
 import { styles, WorkoutPage } from '@/components/workout-ui';
 import { ZoneMeter } from '@/components/zones/zone-meter';
 import { Colors, Metric, Neon, NumeralType, TitleType, ZoneColors, neonGlow, withAlpha } from '@/constants/theme';
-import { formatHours, levelStep, minuteColumns, recentActivity, zoneOf } from '@/workouts/briefing';
+import {
+  averageCadence,
+  formatHours,
+  levelStep,
+  minuteColumns,
+  recentActivity,
+  restLabel,
+  zoneOf,
+} from '@/workouts/briefing';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { evidence, levels, type Workout } from '@/workouts/model';
 import { energyKcal, heartProfile } from '@/workouts/physiology';
@@ -98,6 +106,10 @@ export default function Evolution() {
         const kcal = energyKcal(w);
         const when = new Date(w.started).toLocaleString('pt-BR');
         const evaluating = busy.includes(w.id);
+        // O repouso diz como foi medido: "repouso 62" parado, "1º minuto 86" andando.
+        const rest = restLabel(w);
+        const cadence = averageCadence(w);
+        const backfilled = w.strap?.backfilledSeconds ?? 0;
         return (
           <Card key={w.id} style={local.session}>
             <View style={local.between}>
@@ -128,9 +140,11 @@ export default function Evolution() {
             <Text style={local.caption}>
               {w.reason}
               {data.averageBpm ? ' · pico de ' + data.peakBpm + ' BPM' : ' · sem leitura de BPM'}
-              {w.restBpm ? ' · 1º minuto ' + w.restBpm : ''}
+              {rest ? ' · ' + rest : ''}
               {' · ' + formatDecimal(data.averageKmh, 1) + ' km/h e '}
               {formatDecimal(data.averageIncline, 1)}% em média
+              {cadence !== null ? ' · cadência de ' + cadence + ' passos/min' : ''}
+              {backfilled > 0 ? ' · ' + backfilled + ' s recuperados da cinta' : ''}
             </Text>
             {w.estimate ? (
               <View style={local.estimate}>

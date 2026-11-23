@@ -1,12 +1,13 @@
-import type { BackfillJob, StrapLink, StrapWishes } from '@/heart/strap-session';
+import type { BackfillJob, StrapBeatEvent, StrapLink, StrapWishes } from '@/heart/strap-session';
 import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { TreadmillSample, TreadmillSnapshot } from '@/treadmill/types';
 
 import { assess } from '../ai';
 import { makePlan, type Plan, type Profile, type Workout } from '../model';
 import { dailyTarget } from '../physiology';
+import { dayKey, type ReadinessRecord } from '../rest';
 import { WorkoutSession } from '../session';
-import { readProfile, readWorkouts, saveTrackChunk, saveWorkout } from '../storage';
+import { readProfile, readReadiness, readWorkouts, saveReadiness, saveTrackChunk, saveWorkout } from '../storage';
 import { decodeTrack, TRACK_FLAGS, type TrackChunk } from '../track';
 
 jest.mock('../ai', () => ({
@@ -26,6 +27,9 @@ jest.mock('../storage', () => ({
   readWorkouts: jest.fn(),
   saveWorkout: jest.fn(),
   saveProfile: jest.fn(),
+  // A prontidão do dia, medida parado.
+  readReadiness: jest.fn(() => []),
+  saveReadiness: jest.fn(),
   pruneTracks: jest.fn(),
   saveTrackChunk: jest.fn((workout: string, minute: number, chunk: unknown) =>
     mockTracks.set(`${workout}|${minute}`, JSON.stringify(chunk)),
@@ -44,7 +48,15 @@ class FakeStrap implements StrapLink {
   wishes: StrapWishes[] = [];
   private readonly backfill = new Set<(job: BackfillJob) => void>();
   private readonly recorded = new Set<(event: { workoutId: string; recordedAt: number }) => void>();
+  private readonly beats = new Set<(beat: StrapBeatEvent) => void>();
   want = (wishes: StrapWishes) => void this.wishes.push(wishes);
+  onBeat = (listener: (beat: StrapBeatEvent) => void) => {
+    this.beats.add(listener);
+    return () => void this.beats.delete(listener);
+  };
+  emitBeat(beat: StrapBeatEvent) {
+    this.beats.forEach((listener) => listener(beat));
+  }
   onBackfill = (listener: (job: BackfillJob) => void) => {
     this.backfill.add(listener);
     return () => void this.backfill.delete(listener);
@@ -57,7 +69,7 @@ class FakeStrap implements StrapLink {
     return this.wishes.at(-1)!;
   }
   get listening() {
-    return this.backfill.size + this.recorded.size;
+    return this.backfill.size + this.recorded.size + this.beats.size;
   }
   emitBackfill(job: BackfillJob) {
     this.backfill.forEach((listener) => listener(job));
@@ -67,13 +79,15 @@ class FakeStrap implements StrapLink {
   }
 }
 
-function setup(history: Workout[] = []) {
+function setup(history: Workout[] = [], readiness: ReadinessRecord[] = []) {
   jest.useFakeTimers({ now: T0 });
   mockTracks.clear();
   jest.mocked(readProfile).mockReturnValue(PROFILE);
   jest.mocked(readWorkouts).mockReturnValue(history);
+  jest.mocked(readReadiness).mockReturnValue(readiness);
   jest.mocked(saveWorkout).mockClear();
   jest.mocked(saveTrackChunk).mockClear();
+  jest.mocked(saveReadiness).mockClear();
   const snapshot = {
     phase: 'connected',
     mode: 'ble',
@@ -114,7 +128,18 @@ function setup(history: Workout[] = []) {
     notify();
     for (let i = 0; i < 10; i++) await Promise.resolve();
   }
-  return { session, strap, packet, dispose };
+  /**
+   * Segundos de cinta sem pacote da esteira: uma notificação por segundo, com o
+   * BPM dado e os RR de `rr` (por padrão, um RR por segundo a 60 bpm).
+   */
+  function beats(seconds: number, bpm: number | ((second: number) => number), rr: (second: number) => number[] = () => [1000]) {
+    for (let i = 0; i < seconds; i++) {
+      now += 1000;
+      jest.advanceTimersByTime(1000);
+      strap.emitBeat({ at: now, bpm: typeof bpm === 'number' ? bpm : bpm(i), rrMs: rr(i) });
+    }
+  }
+  return { session, strap, packet, beats, snapshot, notify: () => notify(), dispose };
 }
 
 afterEach(() => {
@@ -221,7 +246,8 @@ describe('avaliação no meio', () => {
 describe('descarte', () => {
   it('a função devolvida por connect solta os avisos da cinta', () => {
     const { strap, session, dispose } = setup();
-    expect(strap.listening).toBe(2);
+    // A gravação começada, o FIT baixado e os batimentos (o repouso parado).
+    expect(strap.listening).toBe(3);
     // O efeito do React desmontando (ou o StrictMode desfazendo para refazer).
     dispose();
     expect(strap.listening).toBe(0);
@@ -230,7 +256,7 @@ describe('descarte', () => {
     expect(session.snapshot().active!.strap).toBeUndefined();
     // Montando de novo, volta a ouvir.
     session.connect();
-    expect(strap.listening).toBe(2);
+    expect(strap.listening).toBe(3);
   });
 });
 
@@ -286,5 +312,204 @@ describe('preenchimento pelo FIT', () => {
     // Os agregados não mudam: o FIT não traz velocidade nem inclinação.
     expect(saved.totals).toEqual(interrupted.totals);
     expect(strap.last.backfill).toEqual([{ workoutId: 'w-ok', recordedAt: recordedAt - 86_400_000 }]);
+  });
+});
+
+describe('repouso e prontidão medidos parado, antes do treino', () => {
+  /** Um coração a 60 bpm com 40 ms de variação de um batimento para o outro: RMSSD de 40 ms. */
+  const alternating = (second: number) => [second % 2 ? 980 : 1020];
+
+  it('com 60 s de cinta parado, o repouso é a menor mediana de 30 s, sem desconto, e a prontidão é gravada uma vez', async () => {
+    const { session, packet, beats } = setup();
+    // A esteira conectada e ainda sem leitura de velocidade: a lona conta como parada.
+    beats(40, 72, alternating);
+    beats(40, 61, alternating);
+    expect(session.snapshot()).toMatchObject({ stillSeconds: 79, stillReady: true });
+
+    // A lona começa a andar e o treino livre nasce com o repouso medido parado.
+    await packet(4, 95);
+    const active = session.snapshot().active!;
+    expect(active).toMatchObject({ restBpm: 61, restSource: 'parado' });
+    expect(active.hr).toMatchObject({ rest: 61, restSource: 'parado' });
+    expect(session.snapshot().stillSeconds).toBeNull();
+    expect(saveReadiness).toHaveBeenCalledTimes(1);
+    expect(saveReadiness).toHaveBeenCalledWith({
+      day: dayKey(Date.now()),
+      at: Date.now(),
+      restBpm: 61,
+      rmssd: 40,
+      lnRmssd: 3.689,
+      beats: 80,
+      rejectedShare: 0,
+    });
+    expect(session.snapshot().readiness).toHaveLength(1);
+
+    // Andando, a cinta segue mandando batimentos: nada muda e nada é gravado de novo.
+    for (let s = 0; s < 100; s++) {
+      await packet(4, 95);
+      beats(0, 95);
+    }
+    beats(5, 95, alternating);
+    expect(session.snapshot().active).toMatchObject({ restBpm: 61, restSource: 'parado' });
+    expect(session.snapshot().stillSeconds).toBeNull();
+    expect(saveReadiness).toHaveBeenCalledTimes(1);
+  });
+
+  it('com menos de 60 s parado vale o caminho de sempre: o primeiro minuto andando, com desconto', async () => {
+    const { session, packet, beats } = setup();
+    beats(45, 62, alternating);
+    expect(session.snapshot()).toMatchObject({ stillSeconds: 44, stillReady: false });
+    for (let s = 0; s < 8; s++) await packet(4, 100);
+    const active = session.snapshot().active!;
+    expect(active).toMatchObject({ restBpm: 100, restSource: 'andando' });
+    expect(active.hr).toMatchObject({ rest: 85, restSource: 'andando' });
+    expect(saveReadiness).not.toHaveBeenCalled();
+  });
+
+  it('o treino guiado iniciado com a lona parada segue medindo até ela andar', async () => {
+    const { session, packet, beats } = setup();
+    // A esteira manda a lona parada.
+    await packet(0, null);
+    beats(30, 64, alternating);
+    session.start(plan());
+    beats(40, 64, alternating);
+    expect(session.snapshot().stillSeconds).toBe(69);
+    await packet(4, 90);
+    expect(session.snapshot().active).toMatchObject({ restBpm: 64, restSource: 'parado' });
+    expect(saveReadiness).toHaveBeenCalledTimes(1);
+  });
+
+  it('quem já vinha andando num registro livre continua com a medida daquele registro', async () => {
+    const { session, packet, beats } = setup();
+    beats(70, 60, alternating);
+    for (let s = 0; s < 5; s++) await packet(4, 95);
+    await packet(0, 95);
+    // Parado de novo, mas já tinha andado: a janela não volta a coletar.
+    beats(70, 58, alternating);
+    expect(session.snapshot().stillSeconds).toBeNull();
+    session.start(plan());
+    expect(session.snapshot().active).toMatchObject({ restBpm: 60, restSource: 'parado' });
+    await packet(4, 95);
+    expect(session.snapshot().active).toMatchObject({ restBpm: 60, restSource: 'parado' });
+    expect(saveReadiness).toHaveBeenCalledTimes(1);
+  });
+
+  it('a FC de repouso em uso compara cada medida pela origem: parado vale como está, andando e antigo perdem 15', async () => {
+    // Um registro antigo, sem origem: 80 no primeiro minuto andando vale 65.
+    const { session, packet, beats } = setup([ended({ restBpm: 80 })]);
+    expect(session.snapshot().profile).toEqual(PROFILE);
+    beats(70, 68, alternating);
+    await packet(4, 95);
+    // A medida parado de hoje (68) é mais alta que os 65 do registro antigo.
+    expect(session.snapshot().active!.hr).toMatchObject({ rest: 65, restSource: 'andando' });
+  });
+
+  it('artefatos acima de 10% dos RR não geram HRV, mas o repouso parado vale', async () => {
+    const { session, packet, beats } = setup();
+    // A cada 5 segundos, um batimento perdido (1500 ms): 14 de 70 RR descartados, 20%.
+    beats(70, 62, (i) => (i % 5 === 3 ? [1500] : alternating(i)));
+    await packet(4, 95);
+    expect(session.snapshot().active).toMatchObject({ restBpm: 62, restSource: 'parado' });
+    expect(saveReadiness).not.toHaveBeenCalled();
+  });
+
+  it('a lona andando zera a janela, e depois de um treino a medida espera 10 minutos', async () => {
+    const { session, packet, beats } = setup();
+    beats(20, 70);
+    expect(session.snapshot().stillSeconds).toBe(19);
+    // 3 minutos e pouco andando: um treino que conta como esforço.
+    for (let s = 0; s < 200; s++) await packet(4, 110);
+    beats(3, 110);
+    expect(session.snapshot().stillSeconds).toBeNull();
+    session.finish('Encerrado pelo painel');
+    await packet(0, 110);
+    // A FC ainda é a do esforço: nos 10 minutos seguintes a janela não coleta.
+    beats(598, 90);
+    expect(session.snapshot().stillSeconds).toBeNull();
+    beats(11, 66, alternating);
+    expect(session.snapshot().stillSeconds).toBe(10);
+    // Passados os 10 minutos, o repouso parado vale para o treino seguinte, mas a prontidão do
+    // dia não é trocada: depois de um treino no mesmo dia a HRV ainda está deprimida.
+    beats(60, 66, alternating);
+    await packet(4, 95);
+    expect(session.snapshot().active).toMatchObject({ restBpm: 66, restSource: 'parado' });
+    expect(saveReadiness).not.toHaveBeenCalled();
+  });
+
+  it('um aquecimento curto, de 1 minuto ou mais, também conta como esforço', async () => {
+    const { session, packet, beats } = setup();
+    for (let s = 0; s < 75; s++) await packet(4, 140);
+    session.finish('Encerrado pelo painel');
+    await packet(0, 140);
+    beats(70, 93, alternating);
+    expect(session.snapshot().stillSeconds).toBeNull();
+    await packet(4, 100);
+    expect(session.snapshot().active?.restSource).not.toBe('parado');
+    expect(saveReadiness).not.toHaveBeenCalled();
+  });
+
+  it('uma janela que parou de receber leituras não vale: a cinta sem contato ou desligada é de outro momento', async () => {
+    const { session, strap, packet, beats } = setup();
+    beats(70, 61, alternating);
+    expect(session.snapshot().stillReady).toBe(true);
+    // A cinta perde o contato com a pele, e a lona só anda 10 s depois.
+    for (let s = 0; s < 10; s++) {
+      await packet(0, null);
+      strap.emitBeat({ at: Date.now(), bpm: null, rrMs: [] });
+    }
+    for (let s = 0; s < 8; s++) await packet(4, 100);
+    expect(session.snapshot().active).toMatchObject({ restBpm: 100, restSource: 'andando' });
+    expect(saveReadiness).not.toHaveBeenCalled();
+  });
+
+  it('com a lona andando sem treino (o registro acabou e ela não parou), nada entra na janela', async () => {
+    const { session, packet, beats } = setup();
+    await packet(4, 95);
+    // Encerrado pelo painel com a lona ainda andando: um registro novo só começa depois de uma parada.
+    session.finish('Encerrado pelo painel');
+    await packet(4, 95);
+    expect(session.snapshot().active).toBeNull();
+    beats(20, 70);
+    expect(session.snapshot().stillSeconds).toBeNull();
+    await packet(0, 70);
+    beats(5, 70);
+    expect(session.snapshot().stillSeconds).toBe(4);
+  });
+
+  it('um segundo treino no mesmo dia troca a medida do dia; a esteira simulada não entra na base', async () => {
+    const yesterday: ReadinessRecord = {
+      day: dayKey(T0 - 86_400_000),
+      at: T0 - 86_400_000,
+      restBpm: 60,
+      rmssd: 45,
+      lnRmssd: 3.807,
+      beats: 70,
+      rejectedShare: 0,
+    };
+    const { session, packet, beats, snapshot } = setup([], [yesterday]);
+    expect(session.snapshot().readiness).toEqual([yesterday]);
+    beats(70, 61, alternating);
+    await packet(4, 95);
+    session.finish('Encerrado pelo painel');
+    await packet(0, null);
+    beats(70, 63, (i) => [i % 2 ? 970 : 1030]);
+    await packet(4, 95);
+    expect(saveReadiness).toHaveBeenCalledTimes(2);
+    const [today, before] = session.snapshot().readiness;
+    expect(today).toMatchObject({ day: dayKey(Date.now()), restBpm: 63, rmssd: 60 });
+    expect(before).toEqual(yesterday);
+    expect(session.snapshot().readiness).toHaveLength(2);
+
+    // Na demonstração o repouso parado vale para o treino, mas não vira medida de prontidão.
+    session.finish('Encerrado pelo painel');
+    snapshot.mode = 'demo';
+    await packet(0, null);
+    beats(70, 59, alternating);
+    await packet(4, 95);
+    expect(session.snapshot().active).toMatchObject({ source: 'demo', restBpm: 59, restSource: 'parado' });
+    expect(saveReadiness).toHaveBeenCalledTimes(2);
+
+    session.reset();
+    expect(session.snapshot()).toMatchObject({ readiness: [], stillSeconds: null });
   });
 });

@@ -134,11 +134,12 @@ export function maxFloor(sessions: Workout[]) {
 }
 
 /**
- * Leitura de repouso do dia. A esteira só lê batimentos com a lona andando,
- * então vale a leitura mais cedo possível: as primeiras do treino, sem as 2
- * iniciais de cada pegada (o sensor de mão ainda está estabilizando). Fica de
- * 10 a 20 bpm acima do repouso real; `heartProfile` desconta isso. `closed`
- * indica que a janela inicial acabou.
+ * Leitura de repouso do dia andando. A esteira só lê batimentos com a lona
+ * andando, então vale a leitura mais cedo possível: as primeiras do treino, sem
+ * as 2 iniciais de cada pegada (o sensor de mão ainda está estabilizando). Fica
+ * de 10 a 20 bpm acima do repouso real; `heartProfile` desconta isso. `closed`
+ * indica que a janela inicial acabou. Com a cinta e a lona parada antes do
+ * treino, o repouso sai de `stillRest` (`rest.ts`), sem desconto.
  */
 export function restingBpm(readings: Pulse[], closed: boolean): number | null {
   const kept: number[] = [];
@@ -160,23 +161,37 @@ export function restingBpm(readings: Pulse[], closed: boolean): number | null {
 export const WALKING_OFFSET_BPM = 15;
 
 /**
+ * A FC de repouso de um registro, pronta para a conta: a medida parado vale
+ * como está; a do primeiro minuto andando (e a dos registros sem origem, que
+ * são todas andando) perde os 15 bpm de quem já está em pé e andando. `null`
+ * sem medida.
+ */
+export function restOf(w: Pick<Workout, 'restBpm' | 'restSource'>): number | null {
+  if (!validBpm(w.restBpm)) return null;
+  return w.restSource === 'parado' ? w.restBpm : w.restBpm - WALKING_OFFSET_BPM;
+}
+
+/**
  * Repouso e máxima em uso, a partir do histórico da mesma origem (mais novo
- * primeiro). O repouso é a menor das 5 últimas leituras de início de treino,
- * menos o desconto de quem já está andando; serve de ponto de partida para a
- * relação entre carga e frequência cardíaca. A máxima é a mediana das 3 últimas
- * previsões da IA, para uma resposta ruim não deslocar a faixa sozinha.
+ * primeiro). O repouso é a menor das 5 últimas medidas de repouso, cada uma
+ * pela sua origem (`restOf`), e serve de ponto de partida para a relação entre
+ * carga e frequência cardíaca. A máxima é a mediana das 3 últimas previsões
+ * da IA, para uma resposta ruim não deslocar a faixa sozinha.
  */
 export function heartProfile(profile: Profile, history: Workout[]): HeartProfile {
-  const rests = history
-    .map((w) => w.restBpm)
-    .filter(validBpm)
-    .slice(0, 5);
+  const rests = history.filter((w) => validBpm(w.restBpm)).slice(0, 5);
+  // Num empate vale a mais nova.
+  const lowest = rests.reduce<Workout | null>(
+    (best, w) => (best === null || restOf(w)! < restOf(best)! ? w : best),
+    null,
+  );
   const predicted = history
     .map((w) => w.estimate?.maxBpm)
     .filter(validBpm)
     .slice(0, 3);
   return {
-    rest: rests.length ? Math.min(...rests) - WALKING_OFFSET_BPM : null,
+    rest: lowest ? restOf(lowest) : null,
+    ...(lowest && { restSource: lowest.restSource ?? 'andando' }),
     max: predicted.length ? median(predicted) : foxMax(profile.age),
     maxSource: predicted.length ? 'IA' : 'idade',
   };

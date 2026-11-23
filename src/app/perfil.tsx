@@ -55,7 +55,7 @@ export default function ProfileScreen() {
   function erase() {
     Alert.alert(
       'Apagar perfil e treinos?',
-      'Perfil, histórico de treinos, plano do dia e diário da IA serão apagados deste celular. A chave da DeepSeek continua salva.',
+      'Perfil, histórico de treinos, medidas de prontidão, plano do dia e diário da IA serão apagados deste celular. A chave da DeepSeek e a cinta pareada continuam salvas.',
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -118,7 +118,9 @@ export default function ProfileScreen() {
         <Text style={local.note}>
           Seu perfil fica neste celular. Ao usar a IA, a DeepSeek recebe sua idade e o resumo dos
           treinos, com as frequências de repouso e máxima estimadas. Durante o treino guiado, a IA
-          recebe BPM, velocidade e inclinação recentes para rever a carga.
+          recebe BPM, velocidade, inclinação e cadência recentes para rever a carga. Peso e altura
+          não vão para a IA. Com uma cinta XOSS X2 Pro, peso, altura, idade e FC máxima são
+          gravados na cinta. A prontidão do dia (HRV) fica só no celular.
         </Text>
       </Card>
       {hr && (
@@ -132,9 +134,11 @@ export default function ProfileScreen() {
               value={hr.rest ? String(hr.rest) : '—'}
               color={Colors.dark.text}
               note={
-                hr.rest
-                  ? 'A menor leitura do primeiro minuto dos últimos treinos, menos 15 de quem já está andando.'
-                  : 'Ainda não medida. O guia lê no primeiro minuto do próximo treino.'
+                !hr.rest
+                  ? 'Ainda não medida. Com a cinta, fique parado na esteira 1 minuto antes de ligar a lona; sem ela, o guia lê no primeiro minuto do treino.'
+                  : hr.restSource === 'parado'
+                    ? 'A menor das últimas medidas: esta foi feita parado, com a cinta, antes de a lona andar.'
+                    : 'A menor das últimas medidas: esta saiu do primeiro minuto andando, menos 15 de quem já está andando.'
               }
             />
             <View style={local.rule} />
@@ -218,7 +222,7 @@ export default function ProfileScreen() {
               icon="trash-2"
               color={Neon.red}
               title="Apagar perfil e treinos"
-              sub="Histórico, plano do dia e diário da IA. A chave continua salva."
+              sub="Histórico, prontidão, plano do dia e diário da IA. A chave continua salva."
               onPress={erase}
             />
           </>

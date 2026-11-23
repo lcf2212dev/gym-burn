@@ -312,8 +312,10 @@ it('lê a FC de repouso nas primeiras leituras do treino', async () => {
   expect(session.snapshot().active?.restBpm).toBeNull();
   await walk(1, 1, 90);
   const active = session.snapshot().active!;
-  expect(active.restBpm).toBe(90);
-  expect(active.hr).toEqual({ rest: 75, max: 184, maxSource: 'idade' });
+  // Sem cinta não há medida parado: vale o primeiro minuto andando, com os 15 bpm de desconto.
+  expect(active).toMatchObject({ restBpm: 90, restSource: 'andando' });
+  expect(active.hr).toEqual({ rest: 75, restSource: 'andando', max: 184, maxSource: 'idade' });
+  expect(session.snapshot().stillSeconds).toBeNull();
   // O repouso entra no perfil do dia, mas a faixa continua nos percentuais da FC máxima.
   expect(dailyTarget(active.plan, active.profile, active.hr)).toMatchObject({ low: 101, high: 120 });
   // O aviso de batimentos fecha depois das 6 leituras.

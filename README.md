@@ -41,6 +41,8 @@ mostrada é a da T600X real: o app lê o módulo BLE que ela expõe.
   segurança) em avisos legíveis;
 - **lê os batimentos de uma cinta no peito**, quando há uma pareada, com os intervalos entre
   batimentos (RR), e fica com o sensor de mão da esteira como reserva;
+- com a cinta, **mede o repouso e a prontidão do dia** (HRV) com a pessoa parada na esteira, antes
+  de ligar a lona;
 - na **XOSS X2 Pro**, lê também a cadência, grava o treino guiado na memória da cinta e acerta nela
   o alerta de FC e o perfil;
 - **guarda o treino segundo a segundo** (BPM, cadência, velocidade, inclinação e RR), numa tabela à
@@ -79,21 +81,34 @@ de 50% da FC máxima): a faixa do dia fica acesa, a mira dentro dela aparece num
 e uma seta do lado de fora aponta a última leitura, que vai no centro com o que ela diz do alvo. O
 gráfico por minuto tem uma coluna por minuto, na cor da zona, preenchida à medida que as leituras
 de BPM chegam, com a faixa do dia ao fundo e, no eixo, o que o guia fez com a carga. O painel
-ocupa a tela inteira, e só o gráfico por minuto estica para preenchê-la. Um toque longo no nome da esteira abre o cartão do equipamento e a lista dos campos que o
+ocupa a tela inteira, e só o gráfico por minuto estica para preenchê-la.
+
+Com a cadência da XOSS X2 Pro, o bloco de velocidade ganha um rodapé com a cadência e a passada
+(**168 passos/min · 0,94 m**); os dois blocos de carga apertam o respiro de cima e de baixo para a
+linha caber sem o painel crescer. No cartão da etapa, a linha de baixo troca o "A seguir" pelo que
+importa mais naquele momento, nesta ordem: **Fora da lona · a carga não sobe**, a dica **Cadência
+caindo: passos mais curtos e rápidos** (num lugar só dela, que o texto do guia, no eixo do gráfico,
+não sobrescreve), numa recuperação entre tiros a carga já decidida para o próximo (**Próximo tiro ·
+6,2 km/h e 1% · carga reduzida**, ou **mesma carga**) e, nos primeiros 30 segundos de um tiro, como o
+coração encerrou a recuperação antes dele (**Recuperação encerrada mais cedo, aos 2:15**). Numa
+recuperação entre tiros, o rótulo de cima diz o estado dela: **guiada pelo coração**, **alongada até
+4:10** ou **no tempo do plano**.
+
+Um toque longo no nome da esteira abre o cartão do equipamento e a lista dos campos que o
 modelo não envia. A referência completa dos campos e das escalas está em
 [docs/dados-da-esteira.md](docs/dados-da-esteira.md).
 
 ## Treinos guiados
 
-Na primeira abertura, informe idade, peso e altura em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho.
+Na primeira abertura, informe idade, peso e altura em **Meu perfil**. Para habilitar a IA, salve sua chave pessoal da DeepSeek nesse mesmo local. A chave fica no armazenamento seguro do sistema. O perfil e os registros de treino ficam no banco SQLite do aparelho. O texto de privacidade dessa tela diz o que sai do celular: para a IA, a idade e o resumo dos treinos e, durante o treino guiado, BPM, velocidade, inclinação e cadência recentes; para a cinta, quando ela é uma XOSS X2 Pro, peso, altura, idade e FC máxima. O cartão **Frequência cardíaca** diz se o repouso em uso foi medido parado ou andando.
 
-Toque em **Treino do dia** antes ou depois de conectar a esteira. A tela abre na sessão de hoje do plano semanal (veja abaixo) e deixa escolher a de outro dia. A IA define a velocidade e a inclinação de partida dos blocos de esforço a partir das sessões válidas recentes (3 minutos ou mais em movimento), e o plano gerado fica salvo no celular para aquele dia. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda 6 leituras novas de BPM, cerca de 10 segundos. Um toque fora do aviso o recolhe, e **Ver aviso**, no painel, o reabre.
+Toque em **Treino do dia** antes ou depois de conectar a esteira. A tela abre na sessão de hoje do plano semanal (veja abaixo) e deixa escolher a de outro dia. Logo abaixo do cartão principal fica o cartão **Repouso e prontidão**: o repouso de hoje e como foi medido (o medido parado, se houver; senão, o do 1º minuto andando), o estado da prontidão do dia (veja [Prontidão do dia](#prontidão-do-dia)) e, com a cinta lendo, a esteira conectada e a lona parada, o andamento da medida em curso (**Medindo parado · 34 de 60 s**). Com a bateria da cinta abaixo de 15%, a tela avisa no alto. A IA define a velocidade e a inclinação de partida dos blocos de esforço a partir das sessões válidas recentes (3 minutos ou mais em movimento), e o plano gerado fica salvo no celular para aquele dia. Revise as etapas e toque em **Iniciar treino guiado**. Os avisos de ajuste e medição abrem na parte inferior da tela e tocam três bipes. A esteira confirma os alvos pela telemetria. Para o sensor, o app aguarda 6 leituras novas de BPM, cerca de 10 segundos. Um toque fora do aviso o recolhe, e **Ver aviso**, no painel, o reabre.
 
 Ajuste a velocidade e a inclinação pelo painel. O tempo do guia acompanha o movimento medido da lona.
 
-O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Ao encerrar, o painel mostra as kcal estimadas da sessão (veja abaixo). Em **Evolução**, consulte as avaliações e as kcal por data, ou tente a avaliação de novo se a internet falhar. Cada registro pode ser apagado ali, em **Apagar registro**. As sessões da esteira simulada não ficam guardadas: o app as descarta quando é aberto de novo.
+O registro livre começa quando a lona anda. A conclusão do guia, uma parada informada pelo console ou a desconexão encerram a sessão. Ao encerrar, o painel mostra as kcal estimadas da sessão (veja abaixo). Em **Evolução**, consulte as avaliações e as kcal por data, ou tente a avaliação de novo se a internet falhar. Cada treino traz ali também como o repouso foi medido (**repouso 62** parado, **1º minuto 86** andando), a cadência média quando houve (sem os segundos fora da lona) e, se a trilha foi completada pelo FIT da cinta, quantos segundos vieram dele (**340 s recuperados da cinta**). Cada registro pode ser apagado ali, em **Apagar registro**. As sessões da esteira simulada não ficam guardadas: o app as descarta quando é aberto de novo.
 
-Para começar do zero, **Meu perfil → Apagar perfil e treinos** remove perfil, histórico, plano do dia e diário da IA. A chave da DeepSeek continua salva.
+Para começar do zero, **Meu perfil → Apagar perfil e treinos** remove perfil, histórico, medidas de prontidão, plano do dia e diário da IA. A chave da DeepSeek e a cinta pareada continuam salvas.
 
 ### Plano semanal
 
@@ -130,7 +145,21 @@ Qual é "a carga da última sessão" depende de como ela foi gravada. O app guar
 
 ### Frequência cardíaca
 
-Sem cinta no peito, os batimentos vêm do sensor de mão da esteira, que só lê com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando. O app usa a menor das 5 últimas e desconta 15 bpm.
+Sem cinta no peito, os batimentos vêm do sensor de mão da esteira, que só lê com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando, e por isso perde 15 bpm na conta. O repouso em uso é a menor das 5 últimas medidas, cada uma pela sua origem: as feitas parado (abaixo) valem como estão, e as lidas andando, inclusive as dos registros antigos, que não guardam a origem, perdem os 15 bpm.
+
+#### Repouso medido parado
+
+A cinta lê com a lona parada, e a esteira não. Com a cinta lendo, a esteira conectada e a lona parada (ou sem leitura de velocidade ainda), antes de um treino, o app junta os batimentos da cinta numa janela que vai até os últimos 5 minutos. Basta subir na esteira e ficar parado 1 minuto antes de ligar a lona; o cartão **Repouso e prontidão** do **Treino do dia** mostra o andamento. Quando a lona começa a andar (o treino começa), com 60 segundos ou mais de leitura na janela, o repouso do dia é a menor mediana de 30 segundos seguidos dela, sem desconto, e fica marcado como medido **parado**. Uma lacuna de mais de 5 segundos sem leitura (contato ou link) não conta como tempo medido, e uma janela que parou de receber leituras mais de 5 segundos antes de a lona andar (cinta sem contato ou desligada) não vale. Com menos de 60 segundos vale o caminho de sempre: o primeiro minuto e meio andando, marcado como **andando**. Quem já vinha andando num registro livre continua com a medida daquele registro.
+
+A janela recomeça sempre que a lona anda, e não coleta nos 10 minutos depois de um treino de 1 minuto ou mais em movimento (contados pelo histórico, então valem também com o app reaberto): a FC e a variabilidade ainda são as do esforço. O cartão só diz **Medida pronta** quando a janela já dá o repouso (60 segundos, com um trecho de 30 seguidos); com o minuto cheio de falhas da cinta, ele pede mais 30 segundos.
+
+#### Prontidão do dia
+
+Na mesma janela parado, com 60 segundos ou mais de leitura, o app calcula a variabilidade da frequência cardíaca (HRV) pelos intervalos entre batimentos (RR): o RMSSD dos RR que passam no filtro de artefatos (`src/heart/rr.ts`) e o ln dele. A medida só vale com no máximo 10% dos RR descartados pelo filtro e com os aceitos cobrindo o minuto (54 s ou mais). Ela fica na tabela `readiness`, uma linha por dia (a mais recente vale), com o ln(RMSSD), o RMSSD, o repouso, a quantidade de RR e a parcela descartada. As medidas da esteira simulada não entram, nem as feitas depois de um treino (1 minuto ou mais em movimento) no mesmo dia: a HRV ainda está deprimida por horas, e a medida trocaria a da manhã. Nesses casos o repouso parado continua valendo para o treino. A HRV sai da janela inteira (de 1 a 5 minutos parado); para comparar um dia com o outro, vale ficar parado sempre o mesmo tempo.
+
+Com 5 ou mais dias medidos nos últimos 28 (sem contar hoje), o ln(RMSSD) de hoje é comparado com a média e o desvio-padrão desses dias, com piso de 0,1 no desvio (cerca de 10% de RMSSD), para uma base muito regular não acusar qualquer oscilação: dentro de ±1 desvio é **No seu normal**, fora disso **Acima do seu normal** ou **Abaixo do seu normal**. Antes de ter a base, o cartão diz **Coletando (n de 5 dias)**; sem medida hoje, explica como medir. Abaixo do normal, ele sugere uma sessão leve.
+
+É só uma sugestão na tela: a prontidão não entra em nenhuma regra de carga, não bloqueia nada e não vai para a IA.
 
 Depois disso o guia pede os batimentos sempre a cada 3 minutos de lona andando, num relógio fixo (3:00, 6:00, 9:00…), com aviso sonoro. A troca de etapa não adia nem zera o pedido, e ele vale em qualquer velocidade, inclusive correndo: as faixas do plano dependem dessa leitura. Um pedido sem resposta fica aberto até o seguinte, que reabre o aviso e toca de novo. O pedido da FC de repouso só vale nos primeiros 90 segundos. Com um pedido de batimentos e um ajuste da esteira em aberto ao mesmo tempo, a tela mostra o mais recente.
 
@@ -141,7 +170,7 @@ Com uma cinta no peito pareada, os batimentos vêm dela, e não da esteira. Serv
 Daí em diante o app conecta sozinho na cinta sempre que procura ou usa uma esteira (inclusive a simulada), e reconecta se o link cair. Enquanto a esteira está conectando, a cinta espera a vez. Se ela não aparece, a busca vai ficando mais espaçada, de 10 segundos até 1 minuto entre uma tentativa e outra. A cinta manda uma leitura por segundo, com a lona parada ou andando, então:
 
 - o guia deixa de pedir as mãos no sensor: os pedidos de 3 em 3 minutos já nascem atendidos e o aviso não abre;
-- a FC de repouso do dia sai das primeiras leituras do treino, sem ninguém segurar nada;
+- parado na esteira, antes de ligar a lona, ela mede o repouso e a prontidão do dia (veja [Repouso medido parado](#repouso-medido-parado)); sem essa medida, o repouso sai das primeiras leituras do treino, sem ninguém segurar nada;
 - a carga é revista a cada 30 segundos, pela mediana do último minuto de leituras, e não a cada pedido de leitura;
 - nos blocos de esforço vale também a leitura do momento (os últimos 5 segundos), que aciona a trava contra o BPM acima do teto (veja [Ajuste da carga durante o treino](#ajuste-da-carga-durante-o-treino));
 - nos treinos de tiros, a carga do tiro seguinte é decidida na recuperação, e a duração da recuperação segue o coração (veja [Treinos de tiros](#treinos-de-tiros)).
@@ -150,7 +179,7 @@ A esteira continua como reserva. Vale a leitura dela sempre que a cinta não tem
 
 A cinta pareada fica guardada no celular e não é apagada por "Apagar perfil e treinos"; para trocar de cinta, use **Esquecer cinta**. Numa X2 Pro conectada, esquecer (ou parear outra) desfaz antes o que o app tiver ligado nela: gravação, alerta e passos.
 
-A bateria da cinta é lida ao conectar e acompanhada pelas notificações dela. Os intervalos entre batimentos (RR), que a cinta manda em todo pacote, entram crus nas amostras e na trilha por segundo do treino. Quem os usa passa antes pelo filtro de artefatos (`src/heart/rr.ts`): RR fora de 300 a 2000 ms, ou com salto de mais de 20% sobre a mediana recente, é descartado, e depois de 5 descartes seguidos o filtro recomeça a partir deles (a FC mudou de patamar). Hoje quem usa é a leitura do momento da trava.
+A bateria da cinta é lida ao conectar e acompanhada pelas notificações dela. Os intervalos entre batimentos (RR), que a cinta manda em todo pacote, entram crus nas amostras e na trilha por segundo do treino. Quem os usa passa antes pelo filtro de artefatos (`src/heart/rr.ts`): RR fora de 300 a 2000 ms, ou com salto de mais de 20% sobre a mediana recente, é descartado, e depois de 5 descartes seguidos o filtro recomeça a partir deles (a FC mudou de patamar). Hoje quem usa são a leitura do momento da trava e a prontidão do dia, medida parado. A tela **Treino do dia** avisa quando a bateria da cinta está abaixo de 15%.
 
 #### Cinta XOSS X2 Pro
 
@@ -187,11 +216,11 @@ As três chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com racioc�
 
 | Chamada | Quando | Esforço de raciocínio | O que a DeepSeek recebe |
 | --- | --- | --- | --- |
-| Plano do dia | toque em **Gerar treino com IA** | `high` | idade, FC de repouso e máxima, sessão do dia com a faixa de BPM, resumo e patamares das 6 sessões válidas mais recentes e a escada de cargas |
-| Revisão da carga | durante o treino guiado, a cada 30 segundos com a cinta (ou a cada pegada no sensor de mão), quando a mediana não está acima da faixa | `low` | faixa e alvo, FC máxima, etapa atual com os alvos e o tempo que falta, BPM do momento, subida em 30 s e projeção até o fim da etapa, os últimos 2 minutos de BPM e carga, os blocos de esforço já feitos, os ajustes de hoje, a cadência (só informativa) e o que a IA pode decidir |
-| Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, resumo da sessão por tipo de bloco (com a cadência média e a variação da passada), patamares, de onde vieram os batimentos, sessões anteriores e estimativas de FC máxima |
+| Plano do dia | toque em **Gerar treino com IA** | `high` | idade, FC de repouso em uso (já descontada, com a origem da medida) e máxima, sessão do dia com a faixa de BPM, resumo e patamares das 6 sessões válidas mais recentes (com o repouso de cada uma e a origem) e a escada de cargas |
+| Revisão da carga | durante o treino guiado, a cada 30 segundos com a cinta (ou a cada pegada no sensor de mão), quando a mediana não está acima da faixa | `low` | faixa e alvo, FC máxima, etapa atual com os alvos e o tempo que falta, BPM do momento, subida em 30 s e projeção até o fim da etapa, os últimos 2 minutos de BPM e carga, os blocos de esforço já feitos, os ajustes de hoje, a FC de repouso de hoje com a origem, a cadência (só informativa) e o que a IA pode decidir |
+| Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, resumo da sessão por tipo de bloco (com a cadência média e a variação da passada), patamares, de onde vieram os batimentos, a FC de repouso de hoje com a origem, sessões anteriores e estimativas de FC máxima |
 
-Peso e altura ficam só no aparelho: nenhuma chamada os envia. A revisão da carga não leva o perfil: só a FC de repouso do dia e a máxima em uso.
+Peso e altura ficam só no aparelho: nenhuma chamada os envia. A revisão da carga não leva o perfil: só a FC de repouso do dia e a máxima em uso. O repouso vai sempre com a origem (`restSource`: `parado` ou `andando`; os registros antigos, sem ela, vão como `andando`): os três prompts dizem que a medida parado fica perto do repouso real e que a lida andando fica de 10 a 20 bpm acima dele, e o repouso em uso do plano já vem com o desconto feito, para a IA não descontar duas vezes. A prontidão do dia (HRV) não vai para a IA. A versão dos prompts é a 10.
 
 O plano e a avaliação têm até 3 novas tentativas em falha de rede, erro do servidor ou resposta fora do formato. A revisão da carga tem 12 segundos e nenhuma nova tentativa: a seguinte já vem 30 segundos depois, com leituras novas. Sem chave da DeepSeek configurada, nada é enviado nem gravado no diário, e o treino segue com a conta do app.
 
@@ -402,8 +431,9 @@ falsa (`src/heart/xoss/__fakes__`) que responde aos quadros e manda e recebe arq
 pedaços de 20 bytes, com falhas injetadas (resposta que não vem, CRC ruim, bloco zero repetido, ACK
 perdido, queda no meio, fila presa); o decodificador FIT lê o arquivo real de 79 s baixado da cinta.
 
-Nos treinos guiados, a suíte cobre o plano, a sessão, as regras de carga, a frequência cardíaca e a
-montagem e validação dos prompts, sem chamar a DeepSeek. A qualidade das respostas da IA é medida à
+Nos treinos guiados, a suíte cobre o plano, a sessão, as regras de carga, a frequência cardíaca (com
+o repouso medido parado e a prontidão do dia, em `src/workouts/rest.ts`), os textos das telas que
+saem de `src/workouts/briefing.ts` e a montagem e validação dos prompts, sem chamar a DeepSeek. A qualidade das respostas da IA é medida à
 parte, no aparelho, pelos cenários de **Diagnóstico da IA**.
 
 ## Limitações conhecidas do firmware

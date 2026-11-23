@@ -54,7 +54,7 @@ import {
 } from './physiology';
 import { describe, sessionMinutes, zones, type Session } from './week';
 
-export const PROMPT_VERSION = '9';
+export const PROMPT_VERSION = '10';
 export type Prompt = { system: string; user: object };
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -293,8 +293,18 @@ export function summarize(w: Workout) {
     reductions: forcedReductions(w),
     increases: changes.filter((c) => c.decision.startsWith('aumentar')).length,
     restBpm: w.restBpm ?? null,
+    restSource: restSource(w),
     validatedPeakBpm: observedPeak([w]),
   };
+}
+
+/**
+ * De onde veio o repouso do registro, para a IA não descontar duas vezes:
+ * `parado` (cinta, lona parada, perto do repouso real) ou `andando` (primeiro
+ * minuto já andando, os registros sem origem inclusive). `null` sem medida.
+ */
+function restSource(w: Workout) {
+  return validBpm(w.restBpm) ? (w.restSource ?? 'andando') : null;
 }
 
 function stageList(w: Workout) {
@@ -342,6 +352,7 @@ export function historyItem(w: Workout, now: number) {
     reductions: s.reductions,
     increases: s.increases,
     restBpm: s.restBpm,
+    restSource: s.restSource,
     level: w.estimate?.level ?? null,
     endedBy: s.endedBy,
     ...(s.work ? {} : { approximate: true }),
@@ -358,9 +369,9 @@ const PLAN = `Você escolhe a carga (velocidade e inclinação) dos blocos de es
 ENTRADA (json)
 - today: data e hora locais.
 - profile: age (anos).
-- hr: restBpm (FC de repouso estimada: a menor leitura do primeiro minuto dos últimos treinos, menos 15 bpm porque a pessoa já está andando; null se nunca medida), maxBpm (FC máxima estimada) e maxSource ("idade" = 220 − idade; "IA" = previsão das avaliações anteriores).
+- hr: restBpm (FC de repouso em uso, já pronta para a conta: a menor das últimas medidas de repouso, em que uma medida feita parado, com a cinta, antes de ligar a lona, vale como está, e uma lida no primeiro minuto já andando entra com 15 bpm a menos; não desconte nada dela; null se nunca medida), restSource ("parado" ou "andando": de que tipo de medida restBpm saiu; null se nunca medida), maxBpm (FC máxima estimada) e maxSource ("idade" = 220 − idade; "IA" = previsão das avaliações anteriores).
 - session: a sessão de hoje. goal (nome), structure (aquecimento, blocos de esforço e trechos leves), minutes, zone (objective = nome da intensidade; low e high = faixa de BPM dos blocos de esforço) e aim (o alvo dentro da faixa: bpm = o BPM a buscar no fim dos blocos de esforço; low e high = o trecho da faixa em que a carga de uma sessão anterior já acertou o alvo).
-- recent: até 6 sessões válidas mais recentes, da mais nova para a mais antiga. Cada uma traz daysAgo (0 = menos de 24 h), goal, plannedMinutes, movingMinutes, completionPercent, work, plateaus, zone e position (work.bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions (reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa; os alívios menores, de rotina para quem treina junto do teto, não contam), increases (aumentos de carga durante a sessão), restBpm, level e endedBy. approximate = true marca registros antigos em que work traz médias da sessão inteira.
+- recent: até 6 sessões válidas mais recentes, da mais nova para a mais antiga. Cada uma traz daysAgo (0 = menos de 24 h), goal, plannedMinutes, movingMinutes, completionPercent, work, plateaus, zone e position (work.bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions (reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa; os alívios menores, de rotina para quem treina junto do teto, não contam), increases (aumentos de carga durante a sessão), restBpm e restSource (a medida de repouso daquela sessão, sem desconto: "parado" = com a lona parada, perto do repouso real; "andando" = lida no primeiro minuto já andando, de 10 a 20 bpm acima do repouso real; null sem medida; hr.restBpm já leva isso em conta), level e endedBy. approximate = true marca registros antigos em que work traz médias da sessão inteira.
 - work, em cada sessão de recent: a carga de referência dos blocos de esforço. kmh e inclinePercent realmente feitos, mets = custo metabólico dessa carga, targetKmh e targetInclinePercent = a carga a repetir, e bpmEnd = o BPM que essa carga deu (null = sem leitura). Quando work traz reference, a sessão foi contínua e gravada minuto a minuto, e o app já escolheu em plateaus o patamar de referência: o primeiro patamar longo (5 minutos ou mais; sem nenhum assim, 3) em que o BPM ficou no alvo daquela sessão ou, se nenhum ficou, o que chegou mais perto. reference.fromMinute é o minuto do bloco em que ele começou e reference.minutes, quanto durou. Sem reference, work é o conjunto dos blocos de esforço: carga média, alvos em que o último bloco terminou e BPM do fim dos blocos.
 - plateaus, em cada sessão de recent (só nas gravadas minuto a minuto): os trechos de 2 minutos ou mais na mesma carga dentro dos blocos de esforço, na ordem em que aconteceram. Cada um traz fromMinute (minuto do bloco em que começou), minutes, kmh, inclinePercent, mets e bpm (BPM típico do trecho). Mostram como a carga e o BPM andaram na sessão. A conta abaixo usa só work, que já resume esses trechos: não refaça a escolha do patamar.
 - loads: as cargas possíveis hoje, da mais leve à mais pesada, cada uma com pace (km/h), grade (%) e mets. mets é o custo metabólico (1 MET = repouso) pelas equações do ACSM: de caminhada abaixo de ${RUN_FROM_KMH} km/h e de corrida a partir de ${RUN_FROM_KMH} km/h. Nenhuma linha fica acima de ${br(WALK_TOP_KMH)} e abaixo de ${RUN_FROM_KMH} km/h, e as de corrida têm rampa de 1%.
@@ -393,7 +404,12 @@ function planData({ profile, session, history, now }: PlanInput) {
   return {
     today: localTime(now),
     profile: { age: profile.age },
-    hr: { restBpm: hr.rest, maxBpm: hr.max, maxSource: hr.maxSource },
+    hr: {
+      restBpm: hr.rest,
+      restSource: hr.rest === null ? null : (hr.restSource ?? 'andando'),
+      maxBpm: hr.max,
+      maxSource: hr.maxSource,
+    },
     session: {
       goal: session.goal,
       structure: describe(session),
@@ -520,7 +536,7 @@ ENTRADA (json)
 - series: os últimos 120 s em trechos de 10 s, do mais antigo ao mais novo, com secondsAgo (fim do trecho), bpm (mediana do trecho; null sem leitura), kmh e inclinePercent medidos. Um trecho sem amostra da esteira fica de fora.
 - gait: dois números informativos do passo da pessoa, medidos pela cinta; nenhuma regra abaixo depende deles. cadenceSpm = a cadência do momento, em passos por minuto (mediana dos últimos 10 s; null sem cadência medida). cadenceChangePercent = quanto a cadência média dos últimos 30 s mudou em relação à do primeiro minuto do bloco na mesma velocidade, em % (negativo = passos mais lentos); null fora de um bloco de esforço, sem cadência ou com a velocidade diferente da daquele minuto.
 - blocks: os blocos de esforço já feitos hoje, em ordem, com name, kmh e inclinePercent (a carga em que terminaram), endBpm (BPM do fim do bloco; null sem leitura), peakBpm (maior BPM sustentado no bloco; null sem leitura) e aboveReadings (leituras acima de zone.high). Mostram o acúmulo de um bloco para o outro: num treino de tiros o BPM costuma subir mais depressa a cada tiro, na mesma carga.
-- session: goal, plannedMinutes, elapsedSeconds, restBpm (FC do primeiro minuto de hoje; null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia", "app" ou "bloco"; "bloco" é a carga decidida numa recuperação, pelo fim do bloco anterior, para o bloco de esforço que vem depois dela: o ajuste vale para esse bloco, e bpm é o BPM do fim do anterior), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
+- session: goal, plannedMinutes, elapsedSeconds, restBpm e restSource (a FC de repouso de hoje, sem desconto: com restSource "parado" foi medida com a lona parada, antes do treino, e fica perto do repouso real; com "andando" foi lida no primeiro minuto já andando e fica de 10 a 20 bpm acima dele; os dois null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia", "app" ou "bloco"; "bloco" é a carga decidida numa recuperação, pelo fim do bloco anterior, para o bloco de esforço que vem depois dela: o ajuste vale para esse bloco, e bpm é o BPM do fim do anterior), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
 - allowed: as decisões que o app aceita agora.
 - limits: maxReduceBpm e maxRaiseBpm, os maiores ajustes que o app aplica, em bpm. maxRaiseBpm = 0 quando a carga não pode subir.
 
@@ -674,6 +690,7 @@ export function reviewPrompt(i: ReviewInput): Prompt {
         plannedMinutes: w.plan?.minutes ?? null,
         elapsedSeconds: elapsed,
         restBpm: w.restBpm ?? null,
+        restSource: restSource(w),
         changes: (w.changes ?? []).map((c) => ({
           secondsAgo: Math.max(0, elapsed - c.second),
           decision: c.decision,
@@ -721,8 +738,8 @@ ENTRADA (json)
   - plateaus (só nas sessões gravadas minuto a minuto): os trechos de 2 minutos ou mais na mesma carga dentro dos blocos de esforço, em ordem, com fromMinute (minuto do bloco em que começou), minutes, kmh, inclinePercent, mets e bpm (BPM típico do trecho). Num bloco longo é normal a carga subir no começo e descer mais adiante: a frequência cardíaca sobe aos poucos na mesma carga.
   - recoveryDrops: queda em bpm entre o fim de um bloco de esforço e cerca de 1 minuto de recuperação.
   - reductions: reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa. Os alívios menores, de rotina para quem treina junto do teto, não contam, nem a carga decidida numa recuperação para o bloco seguinte. increases: aumentos de carga durante a sessão, inclusive os decididos numa recuperação para o bloco seguinte.
-  - restBpm: FC lida no primeiro minuto de hoje. Fica de 10 a 20 bpm acima do repouso real.
-- recent: até 6 sessões válidas anteriores, da mais nova para a mais antiga, resumidas: daysAgo (em relação a esta sessão), goal, completionPercent, work (kmh, inclinePercent, mets, bpmEnd, com reference quando é o patamar de referência), plateaus, zone, position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions, increases, restBpm e level. approximate = true marca registros antigos em que work traz médias da sessão inteira.
+  - restBpm e restSource: a FC de repouso de hoje, sem desconto. Com restSource "parado" ela foi medida com a lona parada, antes do treino, e fica perto do repouso real; com "andando" foi lida no primeiro minuto já andando e fica de 10 a 20 bpm acima dele. null sem leitura.
+- recent: até 6 sessões válidas anteriores, da mais nova para a mais antiga, resumidas: daysAgo (em relação a esta sessão), goal, completionPercent, work (kmh, inclinePercent, mets, bpmEnd, com reference quando é o patamar de referência), plateaus, zone, position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions, increases, restBpm e restSource (como em session) e level. approximate = true marca registros antigos em que work traz médias da sessão inteira.
 - heart: os dois números que decidem a FC máxima, já calculados pelo app. ageEstimateBpm é a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade). floorBpm é o piso medido: o maior pico validado de todas as sessões, esta incluída, com 5 bpm a mais quando o pico é de um bloco de esforço e a pessoa seguiu depois dele: numa sessão concluída sem reductions, ou, mesmo com reductions, quando depois do pico ela concluiu outro bloco de esforço ou seguiu 4 minutos ou mais no mesmo bloco sem alívio de carga no minuto seguinte a ele (quem seguiu depois do pico não estava no máximo). Essa folga não passa da maior das duas fórmulas pela idade + 10; o pico em si vale mesmo acima disso. null se não há pico validado.
 
 NÍVEL (level)

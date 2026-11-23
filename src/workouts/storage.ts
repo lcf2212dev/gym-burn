@@ -1,6 +1,7 @@
 import { openDatabaseSync } from 'expo-sqlite';
 import type { SessionMode } from '@/treadmill/types';
 import type { Plan, Profile, Workout } from './model';
+import type { ReadinessRecord } from './rest';
 import type { TrackChunk } from './track';
 
 let database: ReturnType<typeof openDatabaseSync>;
@@ -129,6 +130,24 @@ export function readStrap(): SavedStrap | null {
 export function saveStrap(strap: SavedStrap | null) {
   if (strap) db().runSync("INSERT OR REPLACE INTO settings VALUES ('strap', ?)", JSON.stringify(strap));
   else db().runSync("DELETE FROM settings WHERE key = 'strap'");
+}
+
+/**
+ * Grava a medida de prontidão do dia (ln de RMSSD, RMSSD, repouso, RR
+ * recebidos e parcela descartada). Uma linha por dia: a mais recente vale.
+ */
+export function saveReadiness(record: ReadinessRecord) {
+  const { day, at, ...data } = record;
+  db().runSync('INSERT OR REPLACE INTO readiness VALUES (?, ?, ?)', day, at, JSON.stringify(data));
+}
+
+/** As medidas de prontidão dos 60 dias medidos mais recentes, do mais novo ao mais antigo. */
+export function readReadiness(): ReadinessRecord[] {
+  return db()
+    .getAllSync<{ day: string; at: number; data: string }>(
+      'SELECT day, at, data FROM readiness ORDER BY day DESC LIMIT 60',
+    )
+    .map((row) => ({ ...JSON.parse(row.data), day: row.day, at: row.at }));
 }
 
 export function readProfile(): Profile | null {

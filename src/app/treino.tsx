@@ -3,7 +3,8 @@ import { Redirect, useRouter } from 'expo-router';
 import { useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card, Kicker } from '@/components/card';
-import { StatusPill, type IconName } from '@/components/kit';
+import { IconKicker, StatusPill, type IconName } from '@/components/kit';
+import { NoticeBanner } from '@/components/notice-banner';
 import { UiButton } from '@/components/ui-button';
 import { styles, WorkoutPage } from '@/components/workout-ui';
 import { ZoneGauge } from '@/components/zones/zone-gauge';
@@ -19,18 +20,35 @@ import {
   withAlpha,
 } from '@/constants/theme';
 import { useStrap } from '@/heart/strap-context';
+import { useNow } from '@/hooks/use-now';
 import { useTreadmill } from '@/treadmill/treadmill-context';
 import { preparePlan, readPlan } from '@/workouts/storage';
 import { generatePlan } from '@/workouts/ai';
-import { groupStages, structureFacts } from '@/workouts/briefing';
+import {
+  groupStages,
+  readinessCopy,
+  stillProgress,
+  structureFacts,
+  type ReadinessTone,
+} from '@/workouts/briefing';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
-import { validLoad, type Plan } from '@/workouts/model';
+import { validLoad, type Plan, type Workout } from '@/workouts/model';
 import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
+import { readiness, restToday } from '@/workouts/rest';
 import { sessionMinutes, week, zoneIndexes, zones, zoneSpan } from '@/workouts/week';
 import { formatDecimal, formatDuration, formatTrimmed } from '@/utils/format';
 
 // A semana começa na segunda; o domingo, de descanso, fecha a lista.
 const DAYS = [1, 2, 3, 4, 5, 6, 0];
+/** Abaixo disto a tela avisa que a bateria da cinta está no fim. */
+const LOW_BATTERY_PERCENT = 15;
+/** A cor do estado da prontidão: verde no normal, ciano acima, âmbar abaixo. */
+const READINESS_COLORS: Record<ReadinessTone, string> = {
+  normal: Neon.mint,
+  up: Metric.incline,
+  down: Neon.amber,
+  pending: Colors.dark.text,
+};
 
 export default function Training() {
   const router = useRouter();
@@ -41,6 +59,9 @@ export default function Training() {
   const connected = useTreadmill((s) => s.phase === 'connected');
   // A leitura da cinta, quando ela está conectada: dá para conferir antes de subir na esteira.
   const strapBpm = useStrap((s) => (s.phase === 'connected' ? s.bpm : null));
+  const battery = useStrap((s) => (s.phase === 'connected' ? s.battery : null));
+  const [batteryDismissed, dismissBattery] = useState(false);
+  const active = useWorkout((s) => s.active);
   const [today] = useState(() => new Date().getDay());
   // O dia cujo treino será feito: começa em hoje, e a lista da semana deixa trocar.
   const [day, pick] = useState(today);
@@ -162,9 +183,26 @@ export default function Training() {
   const band = chosen && bandOf(chosen.objective);
   const span = chosen && zoneSpan(chosen.objective);
   const top = chosen ? ZoneColors[Math.max(...zoneIndexes(chosen.objective))] : Metric.heart;
+  // O repouso de hoje sai dos treinos desta origem, o em curso inclusive.
+  const rest = (
+    <RestCard workouts={active && active.source === source ? [active, ...recent] : recent} />
+  );
 
   return (
     <WorkoutPage title="Treino do dia" footer={footer} accessory={accessory}>
+      {battery !== null && battery < LOW_BATTERY_PERCENT && !batteryDismissed && (
+        <NoticeBanner
+          notice={{
+            id: 0,
+            kind: 'warning',
+            message:
+              'Bateria da cinta em ' +
+              battery +
+              '%. Carregue-a logo: sem bateria, os batimentos voltam ao sensor de mão da esteira.',
+          }}
+          onDismiss={() => dismissBattery(true)}
+        />
+      )}
       {plan && target ? (
         <>
           <Card hero accent={Metric.heart} style={local.hero}>
@@ -186,6 +224,7 @@ export default function Training() {
                 : 'Com a cinta no peito o guia acompanha os batimentos o tempo todo; sem ela, pede as mãos no sensor a cada 3 minutos. O app alivia a carga se eles passarem do teto.'}
             </Text>
           </Card>
+          {rest}
           {!connected && (
             <Text style={styles.body}>
               O plano de hoje está salvo neste celular. Abra-o no painel da esteira conectada para
@@ -291,6 +330,7 @@ export default function Training() {
               </Text>
             )}
           </Card>
+          {rest}
           <Card padded={false} style={local.week}>
             <View style={[local.between, local.weekHead]}>
               <Kicker>Plano semanal</Kicker>
@@ -332,6 +372,74 @@ export default function Training() {
         <UiButton variant="ghost" label="Abrir perfil" onPress={() => router.push('/perfil')} />
       )}
     </WorkoutPage>
+  );
+}
+
+/**
+ * O repouso de hoje (e como foi medido), a prontidão do dia pela HRV e, com a
+ * cinta lendo, a esteira conectada e a lona parada, o andamento da medida em
+ * curso. A prontidão é só uma sugestão: não muda a carga, não bloqueia nada e
+ * não vai para a IA.
+ */
+function RestCard({ workouts }: { workouts: Workout[] }) {
+  const records = useWorkout((s) => s.readiness);
+  const seconds = useWorkout((s) => s.stillSeconds);
+  const ready = useWorkout((s) => s.stillReady);
+  const strapReading = useStrap((s) => s.phase === 'connected' && s.bpm !== null);
+  const stopped = useTreadmill((s) => s.phase === 'connected' && !((s.samples.at(-1)?.speedKmh ?? 0) > 0));
+  // O "hoje" sai da hora de abertura da tela e acompanha o relógio, de minuto em minuto.
+  const [opened] = useState(() => Date.now());
+  const now = useNow(60_000) ?? opened;
+  const rest = restToday(workouts, now);
+  const copy = readinessCopy(readiness(records, now));
+  const color = READINESS_COLORS[copy.tone];
+  const progress = strapReading && stopped && seconds !== null ? stillProgress(seconds, ready) : null;
+  const origin = !rest
+    ? 'Ainda não medido hoje'
+    : rest.source === 'parado'
+      ? 'Medido parado, com a cinta, antes de a lona andar'
+      : 'Lido no 1º minuto já andando';
+  return (
+    <Card accent={Metric.heart} style={local.rest}>
+      <IconKicker icon="heart-pulse" color={Metric.heart}>
+        Repouso e prontidão
+      </IconKicker>
+      <View
+        style={local.restRow}
+        accessible
+        accessibilityLabel={'Repouso de hoje: ' + (rest ? rest.bpm + ' BPM. ' : '') + origin}>
+        <View style={local.tileValue}>
+          <Text style={[local.restNumber, !rest && local.muted]}>{rest ? rest.bpm : '—'}</Text>
+          <Text style={local.tileUnit}>BPM</Text>
+        </View>
+        <View style={local.grow}>
+          <Text style={[local.name, local.medium]}>Repouso de hoje</Text>
+          <Text style={local.side}>{origin}</Text>
+        </View>
+      </View>
+      <View
+        style={[local.readiness, local.divider]}
+        accessible
+        accessibilityLabel={'Prontidão do dia: ' + copy.title + '. ' + copy.detail}>
+        <Kicker>Prontidão pela variabilidade (HRV)</Kicker>
+        <Text style={[local.readinessTitle, { color }]}>{copy.title}</Text>
+        <Text style={local.note}>{copy.detail}</Text>
+      </View>
+      {progress && (
+        <View
+          style={local.readiness}
+          accessible
+          accessibilityRole="progressbar"
+          accessibilityLabel={progress.text}
+          accessibilityValue={{ min: 0, max: 60, now: Math.min(60, seconds ?? 0) }}>
+          <Text style={[local.side, local.strong]}>{progress.text}</Text>
+          <View style={local.bar}>
+            <View style={[local.barFill, { width: `${progress.share * 100}%` }]} />
+          </View>
+        </View>
+      )}
+      <Text style={local.side}>É só uma sugestão: não muda a carga do treino nem vai para a IA.</Text>
+    </Card>
   );
 }
 
@@ -487,4 +595,11 @@ const local = StyleSheet.create({
   strong: { color: Colors.dark.text },
   load: { ...NumeralType, fontSize: 16, color: Colors.dark.textSecondary },
   loadHard: { color: Neon.volt },
+  rest: { gap: 10 },
+  restRow: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  restNumber: { ...NumeralType, fontSize: 44, lineHeight: 46, color: Colors.dark.text },
+  readiness: { gap: 4, paddingTop: 10 },
+  readinessTitle: { ...TitleType, fontSize: 24, lineHeight: 28 },
+  bar: { height: 4, borderRadius: 2, backgroundColor: Colors.dark.border },
+  barFill: { height: 4, borderRadius: 2, backgroundColor: Metric.heart },
 });
