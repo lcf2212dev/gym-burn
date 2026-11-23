@@ -47,12 +47,17 @@ export const metabolicCost = (kmh: number, inclinePercent: number) =>
   acsm(kmh, inclinePercent, kmh >= RUN_FROM_KMH);
 
 /**
- * Custo metabólico para a conta de kcal. Entre 5,2 e 6 km/h a equação de
- * caminhada subestima o passo apertado, e a troca seca para a de corrida quase
- * dobraria o gasto de um décimo de km/h para o outro: nesse trecho o custo vai
- * de uma equação à outra em linha reta.
+ * Custo metabólico para a conta de kcal. `running` é o passo medido pela
+ * cadência da cinta (`stepGait`, em `gait.ts`): com ele vale a equação do que a
+ * pessoa está fazendo, em qualquer velocidade (quem corre a 5,5 km/h gasta como
+ * quem corre). Sem cadência vale a regra por velocidade, e entre 5,2 e 6 km/h,
+ * onde a equação de caminhada subestima o passo apertado e a troca seca para a
+ * de corrida quase dobraria o gasto de um décimo de km/h para o outro, o custo
+ * vai de uma equação à outra em linha reta. Só serve para as kcal: a conta que
+ * decide a carga é `metabolicCost`, sempre pela velocidade.
  */
-export function energyCost(kmh: number, inclinePercent: number) {
+export function energyCost(kmh: number, inclinePercent: number, running?: boolean | null) {
+  if (running != null) return acsm(kmh, inclinePercent, running);
   if (kmh <= WALK_TOP_KMH || kmh >= RUN_FROM_KMH) return metabolicCost(kmh, inclinePercent);
   const share = (kmh - WALK_TOP_KMH) / (RUN_FROM_KMH - WALK_TOP_KMH);
   return (
@@ -123,8 +128,19 @@ export type StageLog = {
   tail: number[];
   /** Leituras entre 45 e 90 s da etapa: medem a queda na recuperação. */
   early: number[];
-  /** Maior mediana de 3 leituras seguidas: um pico que não depende de uma leitura solta. */
+  /**
+   * Maior mediana de leituras seguidas: um pico que não depende de uma leitura
+   * solta. São 10 leituras com a cinta (3 s dela não seguram um surto de
+   * artefato) e 3 com o sensor de mão, que lê em pegadas curtas.
+   */
   top: number;
+  /**
+   * Quando o pico (`top`) aconteceu: os ms da etapa com a lona andando, no fim
+   * das leituras que o validaram. Não existe nos registros mais antigos.
+   */
+  topAtMs?: number;
+  /** Os ms em que a pessoa estava fora da lona (veja `gait.ts`); só aparece quando houve. */
+  offBeltMs?: number;
   // Os quatro abaixo só existem com a cadência da XOSS X2 Pro.
   /** Cadência somada no tempo, em passos/min × ms. */
   cadenceMs?: number;
@@ -144,7 +160,10 @@ export type MinuteLoad = [kmhMs: number, inclineMs: number, ms: number];
  * Ajuste de carga aplicado durante o treino. `from` e `to` são os alvos de
  * antes e de depois, como [km/h, %]; não existem nos registros mais antigos.
  * `by` diz quem decidiu: a trava do aparelho (BPM do momento acima do teto), a
- * IA ou a regra local do app. Também não existe nos registros mais antigos.
+ * IA, a regra local do app ou, com `'bloco'`, a decisão tomada na recuperação
+ * para o bloco seguinte (veja `intervals.ts`): aí `stage` é o bloco que ainda
+ * vai começar e `bpm`, o BPM do fim do bloco anterior. Também não existe nos
+ * registros mais antigos.
  */
 export type Change = {
   second: number;
@@ -153,7 +172,7 @@ export type Change = {
   bpm: number;
   from?: [number, number];
   to?: [number, number];
-  by?: 'trava' | 'ia' | 'app';
+  by?: 'trava' | 'ia' | 'app' | 'bloco';
 };
 export type Workout = {
   id: string;
@@ -345,21 +364,43 @@ function cadenceTotals(
   };
 }
 
-export function accumulate(t: Totals, sample: TreadmillSample, previous: TreadmillSample | null): Totals {
+/** O passo da pessoa numa amostra, medido pela cinta (veja `gait.ts`). */
+export type Footing = {
+  /** Correndo pela cadência; sem ela (`null` ou ausente), as kcal saem da velocidade. */
+  running?: boolean | null;
+  /** A pessoa está fora da lona, com ela andando. */
+  offBelt?: boolean;
+};
+
+/**
+ * Soma a amostra aos totais do treino. `running` é o passo medido pela
+ * cadência (veja `energyCost`); sem ele as kcal saem da velocidade. Fora da
+ * lona (`offBelt`) o tempo e a distância da lona entram, mas o BPM não (é o
+ * de quem está parado ao lado dela), e o gasto desses segundos é o de repouso,
+ * 1 MET, e não o da carga.
+ */
+export function accumulate(
+  t: Totals,
+  sample: TreadmillSample,
+  previous: TreadmillSample | null,
+  { running, offBelt = false }: Footing = {},
+): Totals {
   const s = step(sample, previous);
   if (!s) return t;
   const cadence = cadenceTotals(t, s.cadence, s.dt);
+  const bpm = offBelt ? null : s.bpm;
+  const cost = offBelt ? 1 : energyCost(s.speed, sample.inclinationPercent ?? 0, running);
   return {
     ...(cadence && { ...cadence, steps: (t.steps ?? 0) + ((s.cadence ?? 0) * s.dt) / 60000 }),
     movingMs: t.movingMs + s.dt,
     distanceM: t.distanceM + (s.speed * s.dt) / 3600,
     inclineMs: t.inclineMs + (sample.inclinationPercent ?? 0) * s.dt,
     inclineDurationMs: t.inclineDurationMs + (sample.inclinationPercent === null ? 0 : s.dt),
-    bpmCount: t.bpmCount + (s.bpm === null ? 0 : 1),
-    bpmSum: t.bpmSum + (s.bpm ?? 0),
-    peakBpm: Math.max(t.peakBpm, s.bpm ?? 0),
-    strapCount: (t.strapCount ?? 0) + (s.bpm !== null && s.strap ? 1 : 0),
-    metMs: (t.metMs ?? 0) + energyCost(s.speed, sample.inclinationPercent ?? 0) * s.dt,
+    bpmCount: t.bpmCount + (bpm === null ? 0 : 1),
+    bpmSum: t.bpmSum + (bpm ?? 0),
+    peakBpm: Math.max(t.peakBpm, bpm ?? 0),
+    strapCount: (t.strapCount ?? 0) + (bpm !== null && s.strap ? 1 : 0),
+    metMs: (t.metMs ?? 0) + cost * s.dt,
   };
 }
 
@@ -376,13 +417,23 @@ export const emptyLog = (): StageLog => ({
   top: 0,
 });
 
-/** Acumula a amostra na etapa em curso. `into` são os segundos já feitos na etapa. */
+/** Leituras seguidas de que sai o pico validado: com a cinta e com o sensor de mão. */
+const STRAP_PEAK_READINGS = 10;
+const GRIP_PEAK_READINGS = 3;
+
+/**
+ * Acumula a amostra na etapa em curso. `into` são os segundos já feitos na
+ * etapa. Com `offBelt` (a pessoa fora da lona, veja `gait.ts`) o tempo e a
+ * carga entram, mas o BPM não: parada ao lado da lona a FC cai, e esse BPM
+ * baixo puxaria para cima a carga do próximo plano.
+ */
 export function logStage(
   log: StageLog | undefined,
   sample: TreadmillSample,
   previous: TreadmillSample | null,
   zone: Zone,
   into: number,
+  offBelt = false,
 ): StageLog {
   const l = log ?? emptyLog();
   const s = step(sample, previous);
@@ -395,15 +446,18 @@ export function logStage(
       cadenceFirst: l.cadenceFirst ?? s.cadence ?? undefined,
       cadenceLast: s.cadence ?? l.cadenceLast,
     }),
+    ...(offBelt && { offBeltMs: (l.offBeltMs ?? 0) + s.dt }),
     ms: l.ms + s.dt,
     distanceM: l.distanceM + (s.speed * s.dt) / 3600,
     inclineMs: l.inclineMs + (sample.inclinationPercent ?? 0) * s.dt,
     inclineDurationMs: l.inclineDurationMs + (sample.inclinationPercent === null ? 0 : s.dt),
   };
-  if (s.bpm === null) return next;
+  if (s.bpm === null || offBelt) return next;
   const tail = [...l.tail, s.bpm].slice(-10);
   const zoneCounts: StageLog['zone'] = [...l.zone];
   zoneCounts[s.bpm < zone.low ? 0 : s.bpm > zone.high ? 2 : 1]++;
+  const run = s.strap ? STRAP_PEAK_READINGS : GRIP_PEAK_READINGS;
+  const peak = tail.length >= run ? median(tail.slice(-run)) : 0;
   return {
     ...next,
     bpmCount: l.bpmCount + 1,
@@ -411,21 +465,24 @@ export function logStage(
     zone: zoneCounts,
     tail,
     early: into >= 45 && into <= 90 && l.early.length < 10 ? [...l.early, s.bpm] : l.early,
-    top: tail.length >= 3 ? Math.max(l.top, median(tail.slice(-3))) : l.top,
+    top: Math.max(l.top, peak),
+    ...(peak > l.top && { topAtMs: next.ms }),
   };
 }
 
 /**
  * Soma a leitura de BPM desta amostra ao minuto em que o treino está.
- * `elapsed` são os segundos já feitos em movimento.
+ * `elapsed` são os segundos já feitos em movimento. Fora da lona (`offBelt`)
+ * a leitura não entra: é dos minutos que saem os patamares do próximo plano.
  */
 export function logBeats(
   beats: MinuteBeats[] | undefined,
   sample: TreadmillSample,
   previous: TreadmillSample | null,
   elapsed: number,
+  offBelt = false,
 ): MinuteBeats[] {
-  const bpm = step(sample, previous)?.bpm ?? null;
+  const bpm = offBelt ? null : (step(sample, previous)?.bpm ?? null);
   if (bpm === null) return beats ?? [];
   const minute = Math.floor(elapsed / 60);
   // Os minutos sem leitura ficam zerados: uma lista com buracos não sobrevive ao banco.

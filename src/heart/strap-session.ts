@@ -71,8 +71,12 @@ const BACKFILL_MATCH_MS = 5000;
 const RECORDING_GAP_MS = 2000;
 /** Espera antes de reler o perfil enviado, como `tools/xoss/perfil.py`: a cinta reescreve o arquivo. */
 const PROFILE_REREAD_MS = 1000;
-/** Uma reconciliação que falhou tenta de novo depois disto, enquanto a cinta segue anexada. */
-const RECONCILE_RETRY_MS = 10_000;
+/**
+ * Uma reconciliação com passo falho tenta de novo depois destas esperas, uma a
+ * uma, e depois a cada 60 s, enquanto a cinta segue anexada: uma cinta que
+ * recusa um comando não inunda o canal com ele.
+ */
+const RECONCILE_RETRY_MS = [10_000, 30_000, 60_000];
 /**
  * A marca da gravação vale sem limite enquanto o treino dono dela está ativo
  * no app (uma pausa longa não a vence). Sem ele (treino encerrado, app
@@ -396,6 +400,8 @@ export class HeartStrapSession implements StrapStore, StrapLink {
   private reconciling = false;
   private dirty = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Voltas seguidas com passo falho: escolhem a espera da próxima. */
+  private retries = 0;
   /** Cancela a transferência ociosa em curso (FIT ou perfil) quando um treino começa. */
   private idleAbort: AbortController | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -408,6 +414,12 @@ export class HeartStrapSession implements StrapStore, StrapLink {
   /** Ninguém precisa da cinta, mas uma tarefa ociosa está em curso: o descanso espera ela. */
   private restPending = false;
   private restDeadline: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * O `release` de uma conexão que está sendo solta: uma conexão nova à mesma
+   * cinta espera ele acabar (antes, pegaria a mesma ligação, que o fim do
+   * `release` derrubaria).
+   */
+  private releasing: Promise<void> | null = null;
   private readonly backfillListeners = new Set<(job: BackfillJob) => void>();
   private readonly recordedListeners = new Set<
     (event: { workoutId: string; recordedAt: number }) => void
@@ -535,6 +547,8 @@ export class HeartStrapSession implements StrapStore, StrapLink {
     }
     this.wishes = wishes;
     this.wishesKey = key;
+    // Pedido novo, situação nova: a espera crescente das falhas antigas não vale para ele.
+    this.retries = 0;
     if (wishes.workout) {
       this.idleAbort?.abort();
     }
@@ -751,6 +765,11 @@ export class HeartStrapSession implements StrapStore, StrapLink {
     const epoch = ++this.epoch;
     this.closeSearch();
     this.update({ phase: 'connecting' });
+    const releasing = this.releasing;
+    if (releasing) {
+      await releasing;
+      if (epoch !== this.epoch) return;
+    }
 
     let connection: BleConnection | null = null;
     try {
@@ -871,6 +890,7 @@ export class HeartStrapSession implements StrapStore, StrapLink {
     this.xoss = xoss;
     this.known = freshKnown();
     this.pollMisses = 0;
+    this.retries = 0;
     xoss.onDead(() => this.handleXossDead(xoss));
     const saved = this.snapshot.saved;
     if (saved && !saved.xoss) {
@@ -989,9 +1009,10 @@ export class HeartStrapSession implements StrapStore, StrapLink {
 
   /**
    * Leva a cinta ao estado pedido. Roda uma de cada vez; um pedido novo no meio
-   * faz outra volta no fim. Uma falha (prazo, link) espera a próxima mudança,
-   * uma nova volta em 10 s ou a próxima conexão: os batimentos não dependem
-   * disto.
+   * faz outra volta no fim. Cada passo vai por conta própria; se algum falhou
+   * (prazo, leitura de volta que não bate), uma nova volta vem com espera
+   * crescente (10 s, 30 s, 60 s e depois a cada 60 s), e nela só o que falhou
+   * refaz alguma coisa. Os batimentos não dependem disto.
    */
   private async reconcile(): Promise<void> {
     if (this.reconciling) {
@@ -1008,20 +1029,23 @@ export class HeartStrapSession implements StrapStore, StrapLink {
         this.dirty = false;
         const xoss = this.xoss;
         if (!xoss || xoss.closed) break;
+        let ok = false;
         try {
-          if (this.wishes.workout) {
-            await this.applyWorkout(xoss, this.wishes.workout);
-          } else {
-            await this.applySteps(xoss);
-            await this.applyIdle(xoss);
-          }
+          ok = this.wishes.workout
+            ? await this.applyWorkout(xoss, this.wishes.workout)
+            : await this.applyIdle(xoss);
         } catch {
-          if (this.xoss === xoss && !xoss.closed && !this.dirty) {
-            this.retryTimer = setTimeout(() => {
-              this.retryTimer = null;
-              void this.reconcile();
-            }, RECONCILE_RETRY_MS);
-          }
+          // Os passos já se protegem um a um; isto só garante que nada escape da volta.
+        }
+        if (ok) {
+          this.retries = 0;
+        } else if (this.xoss === xoss && !xoss.closed && !this.dirty) {
+          const wait = RECONCILE_RETRY_MS[Math.min(this.retries, RECONCILE_RETRY_MS.length - 1)];
+          this.retries += 1;
+          this.retryTimer = setTimeout(() => {
+            this.retryTimer = null;
+            void this.reconcile();
+          }, wait);
         }
       } while (this.dirty && this.xoss);
     } finally {
@@ -1043,6 +1067,12 @@ export class HeartStrapSession implements StrapStore, StrapLink {
    * sem ele, por 24 h a partir do início. Vencida, é descartada sem encerrar
    * nada, e o treino dono é avisado do horário antes, para o FIT ainda poder
    * casar.
+   *
+   * Risco que sobra, conhecido: se alguém encerrar a gravação do app e outro
+   * app começar uma nova dentro dessas 24 h, o app encerra a do outro. A lista
+   * de arquivos não serve para separar os dois casos: não se mediu se a cinta
+   * lista a gravação em curso, e se listar, conferir por ela deixaria a
+   * gravação do próprio app rodando sem dono em todo fim de treino.
    */
   private recordingMark(): NonNullable<SavedStrap['recording']> | null {
     const mark = this.snapshot.saved?.recording ?? null;
@@ -1056,25 +1086,6 @@ export class HeartStrapSession implements StrapStore, StrapLink {
   /** O treino dono da marca está em curso no app. */
   private ownerActive(mark: NonNullable<SavedStrap['recording']>): boolean {
     return this.wishes.workout?.id === mark.workoutId;
-  }
-
-  /**
-   * Antes de encerrar uma gravação por uma marca sem o treino dono ativo: se a
-   * lista da cinta já tem um arquivo encerrado começado no horário da marca
-   * (±5 s), a gravação do app já foi encerrada por alguém, e a em curso é de
-   * outro. A marca some sem `75 02`, e o treino dono é avisado do horário,
-   * para o FIT ser pedido. Lista vazia ou ilegível não prova nada (a da cinta
-   * às vezes vem vazia): aí a gravação é encerrada.
-   */
-  private async endedElsewhere(xoss: XossClient, mark: NonNullable<SavedStrap['recording']>): Promise<boolean> {
-    const listing = await this.download(xoss, 'filelist.txt', new AbortController().signal);
-    const files = listing ? parseFileList(listing) : [];
-    if (!files.some((file) => Math.abs(file.at - mark.startedAt) <= BACKFILL_MATCH_MS)) {
-      return false;
-    }
-    this.notifyRecorded(mark);
-    this.setMarks({ recording: null });
-    return true;
   }
 
   private notifyRecorded(mark: NonNullable<SavedStrap['recording']>): void {
@@ -1118,17 +1129,29 @@ export class HeartStrapSession implements StrapStore, StrapLink {
     }
   }
 
-  private async applyWorkout(xoss: XossClient, workout: NonNullable<StrapWishes['workout']>) {
-    if (this.known.clockFor !== workout.id) {
-      // O FIT sai com o relógio da cinta: acertado, o arquivo casa com o treino pelo nome.
-      await xoss.setClock(Math.floor(this.now() / 1000));
-      this.known.clockFor = workout.id;
+  /**
+   * Com treino: relógio, passos, gravação (no guiado) e alerta, nesta ordem e
+   * cada um por conta própria: o alerta que a cinta recusa, por exemplo, não
+   * impede os passos nem a gravação. A única dependência é a da gravação no
+   * relógio: o FIT sai com o nome no relógio da cinta, e com ele mais de 5 s
+   * errado o arquivo nunca casaria com o treino. Sem o relógio acertado nesta
+   * conexão, a gravação espera a nova tentativa dele. Devolve `false` se algum
+   * passo falhou (ou ficou esperando).
+   */
+  private async applyWorkout(xoss: XossClient, workout: NonNullable<StrapWishes['workout']>): Promise<boolean> {
+    const clock = await this.attempt(async () => {
+      if (this.known.clockFor !== workout.id) {
+        await xoss.setClock(Math.floor(this.now() / 1000));
+        this.known.clockFor = workout.id;
+      }
+    });
+    let ok = clock;
+    ok = (await this.attempt(() => this.applySteps(xoss))) && ok;
+    if (workout.guided && clock) {
+      ok = (await this.attempt(() => this.ensureRecording(xoss, workout))) && ok;
     }
-    await this.applySteps(xoss);
-    if (workout.guided) {
-      await this.ensureRecording(xoss, workout);
-    }
-    await this.applyAlert(xoss, workout);
+    ok = (await this.attempt(() => this.applyAlert(xoss, workout))) && ok;
+    return ok;
   }
 
   /** A marca do alerta, aceitando o formato antigo (`bpm` no lugar de `owned`). */
@@ -1241,12 +1264,7 @@ export class HeartStrapSession implements StrapStore, StrapLink {
       return;
     }
     if (recording && own) {
-      // A gravação órfã de um treino anterior do app. Se ela já virou arquivo,
-      // a em curso é de outro: não é tocada, e o app não grava por cima.
-      if (await this.endedElsewhere(xoss, own)) {
-        this.patchXoss({ recording: true, ownRecording: false });
-        return;
-      }
+      // A gravação órfã de um treino anterior do app: vira o arquivo daquele treino.
       await xoss.stopRecording();
       this.notifyRecorded(own);
       this.setMarks({ recording: null });
@@ -1276,43 +1294,66 @@ export class HeartStrapSession implements StrapStore, StrapLink {
   }
 
   /**
-   * Sem treino (os passos do app já foram desligados): o alerta volta ao que
-   * era, a gravação do app é encerrada (só ela, e só com a marca válida) e,
-   * depois, as tarefas ociosas nesta ordem: baixar os FIT pendentes e só então
-   * acertar o perfil. A ordem importa: depois de gravar um perfil novo a cinta
-   * já devolveu a lista de treinos vazia por algumas conexões.
+   * Sem treino: desfaz o que o app ligou, nesta ordem e cada passo por conta
+   * própria (a gravação do app é encerrada, o alerta volta ao que era, os
+   * passos que ele ligou são desligados); depois as tarefas ociosas, também
+   * nesta ordem: baixar os FIT pendentes e só então acertar o perfil (depois de
+   * gravar um perfil novo a cinta já devolveu a lista de treinos vazia por
+   * algumas conexões). A falha de um passo não impede os outros nem as tarefas
+   * ociosas; devolve `false` se algum falhou, e só ele refaz algo na volta
+   * seguinte (os outros já estão no estado pedido).
    */
-  private async applyIdle(xoss: XossClient): Promise<void> {
-    await this.restoreAlert(xoss);
-    let own = this.recordingMark();
-    if (own || !this.known.recordingChecked) {
-      let recording = await xoss.recording();
-      // Sem treino ativo, o dono da marca não está em curso: confere a lista antes de encerrar.
-      if (recording && own && !this.ownerActive(own) && (await this.endedElsewhere(xoss, own))) {
-        own = null;
-      }
-      if (recording && own) {
-        await xoss.stopRecording();
-        // A cinta grava o arquivo: a lista de treinos lida logo em seguida ainda pode não tê-lo.
-        await sleep(RECORDING_GAP_MS);
-        recording = await xoss.recording();
-      }
-      if (own && recording === false) {
-        // O treino dono fica sabendo do horário antes de a marca sumir: se o aviso
-        // do começo se perdeu (o treino acabou antes, o app morreu), é aqui.
-        this.notifyRecorded(own);
-        this.setMarks({ recording: null });
-      }
-      this.known.recordingChecked = true;
-      // Uma gravação que segue em curso aqui não é do app (a dele foi encerrada acima).
-      this.patchXoss({ recording, ownRecording: false });
-    }
+  private async applyIdle(xoss: XossClient): Promise<boolean> {
+    let ok = await this.attempt(() => this.endRecording(xoss));
+    ok = (await this.attempt(() => this.restoreAlert(xoss))) && ok;
+    ok = (await this.attempt(() => this.applySteps(xoss))) && ok;
     if (!this.known.spaceRead) {
-      const space = await xoss.space();
-      this.known.spaceRead = true;
-      this.patchXoss({ space });
+      ok =
+        (await this.attempt(async () => {
+          const space = await xoss.space();
+          this.known.spaceRead = true;
+          this.patchXoss({ space });
+        })) && ok;
     }
-    await this.idleTasks(xoss);
+    ok = (await this.attempt(() => this.idleTasks(xoss))) && ok;
+    return ok;
+  }
+
+  /**
+   * Encerra a gravação do app, se ela está em curso e a marca vale (sem treino
+   * ativo, por 24 h a partir do início). O treino dono é avisado do horário
+   * antes de a marca sumir: se o aviso do começo se perdeu (o treino acabou
+   * antes, o app morreu), é aqui que ele fica sabendo.
+   */
+  private async endRecording(xoss: XossClient): Promise<void> {
+    const own = this.recordingMark();
+    if (!own && this.known.recordingChecked) {
+      return;
+    }
+    let recording = await xoss.recording();
+    if (recording && own) {
+      await xoss.stopRecording();
+      // A cinta grava o arquivo: a lista de treinos lida logo em seguida ainda pode não tê-lo.
+      await sleep(RECORDING_GAP_MS);
+      recording = await xoss.recording();
+    }
+    if (own && recording === false) {
+      this.notifyRecorded(own);
+      this.setMarks({ recording: null });
+    }
+    this.known.recordingChecked = true;
+    // Uma gravação que segue em curso aqui não é do app (a dele foi encerrada acima).
+    this.patchXoss({ recording, ownRecording: false });
+  }
+
+  /** Um passo da reconciliação: `false` se falhou (a falha não passa para os outros passos). */
+  private async attempt(step: () => Promise<void>): Promise<boolean> {
+    try {
+      await step();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async idleTasks(xoss: XossClient): Promise<void> {
@@ -1625,26 +1666,22 @@ export class HeartStrapSession implements StrapStore, StrapLink {
     const previous = this.snapshot.saved;
     // A mesma cinta pareada de novo: as marcas ficam até o `release` confirmar cada passo.
     const same = !!previous && sameId(previous.id, candidate.id);
-    const released = this.releaseOwned(same);
+    this.releaseOwned(same);
     this.drop();
     const saved: SavedStrap = same
       ? { ...previous, id: candidate.id, name: candidate.name ?? previous.name }
       : { id: candidate.id, name: candidate.name };
     this.persist(saved);
     this.update({ saved, bpm: null, bpmAt: null, battery: null, error: null });
-    if (!same) {
-      // Acabou de ser vista na busca: conecta direto, sem outra janela.
-      void this.connectTo(saved.id);
+    if (this.quiet) {
+      // A esteira está conectando e tem a vez: a cinta espera, como na busca,
+      // e `setQuiet(false)` retoma a busca por ela.
+      this.update({ phase: 'searching' });
       return;
     }
-    // A mesma cinta: conectar antes de a conexão velha cair seria pegar a mesma
-    // ligação, que o fim do `release` derrubaria. Conecta depois.
-    this.update({ phase: 'connecting' });
-    void released.then(() => {
-      if (this.snapshot.saved && sameId(this.snapshot.saved.id, saved.id) && !this.connection) {
-        void this.connectTo(saved.id);
-      }
-    });
+    // Acabou de ser vista na busca: conecta direto, sem outra janela. Com a mesma
+    // cinta, `connectTo` espera antes a conexão velha cair (`releasing`).
+    void this.connectTo(saved.id);
   }
 
   private forget(): void {
@@ -1658,9 +1695,7 @@ export class HeartStrapSession implements StrapStore, StrapLink {
    * Antes de soltar a cinta (esquecer, trocar ou parear de novo), desfaz tudo o
    * que o app ligou nela: encerra a gravação dele, devolve o alerta ao que era
    * e desliga os passos que ele ligou. Sem isso ficariam ligados para sempre, e
-   * ninguém mais os desligaria (sem a marca, "não são do app"). A gravação de
-   * uma marca sem o treino dono ativo só é encerrada se a lista da cinta não
-   * mostra que ela já acabou. Em segundo plano: o canal e a conexão saem da
+   * ninguém mais os desligaria (sem a marca, "não são do app"). Em segundo plano: o canal e a conexão saem da
    * sessão antes do `drop`, que os fecharia na hora; o `release` recusa o que
    * a reconciliação ainda tinha na fila, e a conexão só cai no fim. Com
    * `keepMarks` (a mesma cinta pareada de novo), as marcas só somem quando o
@@ -1683,15 +1718,9 @@ export class HeartStrapSession implements StrapStore, StrapLink {
     this.xoss = null;
     this.connection = null;
     const strapId = saved.id;
-    return xoss
+    const releasing = xoss
       .release({
-        recording: recording
-          ? {
-              unlessFileNear: this.ownerActive(recording)
-                ? undefined
-                : { at: recording.startedAt, toleranceMs: BACKFILL_MATCH_MS },
-            }
-          : null,
+        recording: !!recording,
         alert: alert ? { owned: alert.owned, restore: alert.previous } : null,
         stepsOff: !!steps,
       })
@@ -1706,7 +1735,12 @@ export class HeartStrapSession implements StrapStore, StrapLink {
         }
         return connection.disconnect();
       })
-      .catch(noop);
+      .catch(noop)
+      .finally(() => {
+        if (this.releasing === releasing) this.releasing = null;
+      });
+    this.releasing = releasing;
+    return releasing;
   }
 
   private persist(strap: SavedStrap | null): void {

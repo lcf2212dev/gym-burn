@@ -8,7 +8,9 @@ import {
   RUN_FROM_KMH,
   validBpm,
   WALK_TOP_KMH,
+  type Change,
   type HeartProfile,
+  type StageLog,
   type Plan,
   type Profile,
   type Workout,
@@ -36,7 +38,7 @@ export function maxBounds(age: number, floor: number | null) {
   return { low, high: Math.max(Math.max(...estimates) + 10, low) };
 }
 
-/** Maior pico validado (mediana de 3 leituras seguidas) entre as sessões. */
+/** Maior pico validado (mediana de 10 leituras seguidas da cinta, ou de 3 do sensor de mão) entre as sessões. */
 export function observedPeak(history: Workout[]) {
   const top = Math.max(0, ...history.flatMap((w) => (w.log ?? []).map((l) => l?.top ?? 0)));
   return top || null;
@@ -49,12 +51,13 @@ export const FORCED_REDUCTION_BPM = 5;
  * Reduções de carga que pesam na avaliação da sessão: as feitas com o BPM 5 ou
  * mais acima do teto da faixa. O app alivia a carga já com 1 bpm de excesso, e
  * para quem treina junto do teto esse alívio pequeno é rotina, não sinal de
- * carga errada.
+ * carga errada. A decisão tomada na recuperação para o bloco seguinte (`by:
+ * 'bloco'`) também não conta: ela não alivia ninguém no meio do esforço.
  */
 export function forcedReductions(w: Workout) {
   const { high } = dailyTarget(w.plan, w.profile, w.hr);
   return (w.changes ?? []).filter(
-    (c) => c.decision.startsWith('reduzir') && c.bpm >= high + FORCED_REDUCTION_BPM,
+    (c) => c.by !== 'bloco' && c.decision.startsWith('reduzir') && c.bpm >= high + FORCED_REDUCTION_BPM,
   ).length;
 }
 
@@ -66,15 +69,67 @@ function sustained(w: Workout) {
 
 /** Quanto a FC máxima fica, no mínimo, acima do pico de uma sessão sustentada. */
 const SUSTAINED_MARGIN_BPM = 5;
+/** Um bloco de esforço com tanto da duração feita conta como concluído. */
+const BLOCK_DONE_SHARE = 0.9;
+/** Quanto tempo a pessoa tem de seguir no mesmo bloco depois do pico para ele contar como sustentado. */
+const HELD_AFTER_PEAK_MS = 240_000;
+/** Um alívio até tanto depois do pico diz que ele pesou: aí seguir no bloco não conta. */
+const PEAK_RELIEF_SECONDS = 60;
+
+/** O ajuste baixou a carga. O nome não basta: o aumento de uma corrida com rampa antiga baixa a rampa. */
+function eased(c: Change) {
+  if (c.from && c.to) return metabolicCost(...c.to) < metabolicCost(...c.from);
+  return c.decision.startsWith('reduzir');
+}
 
 /**
- * Piso medido da FC máxima: o maior pico validado entre as sessões. Quando o
- * pico é de uma sessão sustentada, a pessoa seguiu andando depois dele, então
- * não estava no máximo: o piso fica 5 bpm acima.
+ * Os picos validados de uma sessão em que a pessoa seguiu depois deles, só dos
+ * blocos de esforço (no treino livre, o registro único): o pico do
+ * aquecimento, de uma recuperação ou da volta à calma nunca leva folga. São
+ * todos, se a sessão foi levada até o fim sem redução forçada; senão, os de
+ * cada bloco depois do qual a pessoa concluiu outro bloco de esforço (90% da
+ * duração ou mais, sem contar o tempo fora da lona), ou em que ela seguiu 4
+ * min ou mais no mesmo bloco, na lona, sem alívio no minuto seguinte ao pico.
+ * Esses valem mesmo com redução forçada na sessão: quem fez mais um tiro
+ * depois de chegar a 179 não estava no máximo. O primeiro critério só precisa
+ * da ordem das etapas (o pico é o da etapa em que aconteceu), e vale também
+ * nos registros mais antigos; o segundo precisa de quando foi o pico.
+ */
+function heldPeaks(w: Workout): number[] {
+  const logs = w.log ?? [];
+  const stages = w.plan?.stages ?? [];
+  const effort = (i: number) => (w.plan ? !!stages[i] && !stages[i].measure : i === 0);
+  if (sustained(w)) return logs.flatMap((l, i) => (l?.top && effort(i) ? [l.top] : []));
+  const starts = stages.map((_, i) => stages.slice(0, i).reduce((n, s) => n + s.seconds, 0));
+  const onBelt = (l: StageLog | undefined) => (l?.ms ?? 0) - (l?.offBeltMs ?? 0);
+  const done = (i: number) =>
+    effort(i) && !!stages[i] && onBelt(logs[i]) >= stages[i].seconds * 1000 * BLOCK_DONE_SHARE;
+  return logs.flatMap((l, i) => {
+    if (!l?.top || !effort(i)) return [];
+    if (stages.some((_, j) => j > i && done(j))) return [l.top];
+    if (l.topAtMs === undefined) return [];
+    // Não se sabe se o tempo fora da lona foi antes ou depois do pico: ele sai todo.
+    if (onBelt(l) - l.topAtMs < HELD_AFTER_PEAK_MS) return [];
+    const peak = (starts[i] ?? 0) + l.topAtMs / 1000;
+    const relief = (w.changes ?? []).some(
+      (c) => c.stage === i && c.by !== 'bloco' && eased(c) && c.second >= peak && c.second <= peak + PEAK_RELIEF_SECONDS,
+    );
+    return relief ? [] : [l.top];
+  });
+}
+
+/**
+ * Piso medido da FC máxima: o maior pico validado entre as sessões. Quando a
+ * pessoa seguiu depois do pico (veja `heldPeaks`), ela não estava no máximo: o
+ * piso fica 5 bpm acima dele, sem passar do limite alto das estimativas pela
+ * idade (`maxBounds`, a maior delas + 10). A folga é uma suposição; o pico
+ * observado em si é medida, e vale como piso mesmo acima desse limite.
  */
 export function maxFloor(sessions: Workout[]) {
-  const held = observedPeak(sessions.filter(sustained));
-  const floor = Math.max(observedPeak(sessions) ?? 0, held === null ? 0 : held + SUSTAINED_MARGIN_BPM);
+  const held = sessions.flatMap((w) =>
+    heldPeaks(w).map((top) => Math.min(top + SUSTAINED_MARGIN_BPM, maxBounds(w.profile.age, null).high)),
+  );
+  const floor = Math.max(observedPeak(sessions) ?? 0, ...held);
   return floor || null;
 }
 
@@ -238,6 +293,14 @@ export function energyKcal(w: Workout) {
  * corrida a 1%, de 6 km/h em diante. É o caminho que não pede corrida de quem
  * ainda chega à faixa andando: nenhuma linha fica entre o teto da caminhada e
  * o começo da corrida.
+ *
+ * Limitação conhecida: essa ordem (rampa até 7,5%, depois corrida) vem das
+ * equações do ACSM, e a de corrida superestima a corrida lenta. Para quem
+ * corre devagar, correr a 6 km/h custa menos do que a escada supõe: nos dados
+ * desta pessoa, 5,6 km/h com 3,6% andando e 6 km/h com 1% correndo terminam no
+ * mesmo BPM, e 5,2 km/h com 7,5% pesa mais. Por isso um alívio nunca troca a
+ * corrida pela rampa (`correctedStage`). Calibrar a troca entre caminhada e
+ * corrida pelos dados da pessoa (agora há cadência) fica para depois.
  */
 export function loadLadder() {
   const rows: { pace: number; grade: number; mets: number }[] = [];

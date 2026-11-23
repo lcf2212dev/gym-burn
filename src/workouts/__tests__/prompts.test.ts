@@ -31,6 +31,7 @@ import {
   reviewDecisions,
   reviewPrompt,
   summarize,
+  type ReviewDecision,
 } from '../prompts';
 import { sessionPlan, week, zones, type Session } from '../week';
 
@@ -186,7 +187,7 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   );
   // O prompt já não fala em leitura só de 3 em 3 minutos: com a cinta ela é contínua.
   expect(system).toContain('o tempo todo com a cinta no peito');
-  expect(PROMPT_VERSION).toBe('8');
+  expect(PROMPT_VERSION).toBe('9');
   // Vão até 6 sessões válidas, e não mais 5.
   const seven = [1, 2, 3, 4, 5, 6, 7].map((days) => done(days));
   expect(data(base, seven).recent.map((r) => r.daysAgo)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -408,8 +409,14 @@ it('a avaliação recebe só os dois números que decidem a FC máxima e prende 
   const hard = { workout: done(0, 178), history };
   expect(assessPrompt(hard).user).toMatchObject({ heart: { ageEstimateBpm: 180, floorBpm: 183 } });
   expect(assessBounds(hard)).toEqual({ low: 183, high: 190 });
-  const reduced = { ...hard.workout, changes: [{ second: 900, stage: 1, decision: 'reduzir velocidade', bpm: 178 }] };
-  expect(assessBounds({ workout: reduced, history })).toEqual({ low: 178, high: 190 });
+  // Com uma redução forçada, o 178 do 1º bloco ainda leva a folga: depois dele a pessoa fez o 2º inteiro.
+  const forced = [{ second: 900, stage: 1, decision: 'reduzir velocidade', bpm: 178 }];
+  const reduced = { ...hard.workout, changes: forced };
+  expect(assessBounds({ workout: reduced, history })).toEqual({ low: 183, high: 190 });
+  // O 178 só no último bloco, sem outro depois dele: com a redução forçada, vale sem folga.
+  const last = simulate(plan, (stage, index, into) => grip(index === 3 ? 178 : 126, 110)(stage, index, into), 2000);
+  expect(assessBounds({ workout: { ...last, changes: forced }, history })).toEqual({ low: 178, high: 190 });
+  expect(assessBounds({ workout: last, history })).toEqual({ low: 183, high: 190 });
   // Do perfil só vai a idade.
   expect(JSON.stringify(user)).not.toMatch(/weightKg|activity/);
   for (const level of levels.slice(1)) expect(system).toContain('"' + level + '"');
@@ -555,11 +562,53 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
   for (const decision of reviewDecisions) expect(system).toContain('- "' + decision + '"');
   expect(system).toContain('{"reason": "<motivo>", "decision": "<decisão>", "bpm": <inteiro>}');
   expect(system).toContain('superestima');
+  // O BPM do momento pode vir dos batimentos (RR): o texto diz como, e que vale o maior.
+  expect(system).toContain('o maior entre ela e a mediana dos batimentos');
+  expect(system).not.toContain('now: o BPM do momento: a mediana dos últimos 5 s da cinta.');
   // Logo depois de um alívio a IA só reduz com o corte anterior já no painel e a reta acima do teto.
   expect(system).toContain(
     'Se session.reliefSettling é true, o último alívio ainda está fazendo efeito: reduza só se stage.targetsReached é true (o corte anterior já está no painel) e endsAboveTop é true; senão, mantenha.',
   );
   expect(system).toContain('json');
+});
+
+it('com a cadência da cinta, a avaliação recebe a cadência média e a variação da passada, e a revisão dois números informativos', () => {
+  const plan = sessionPlan(vo2, 6.6, 1);
+  const w = simulate(plan, (stage) => (!stage || stage.measure ? 120 : 165), 2700);
+  // Tiros a 6,6 km/h (110 m por minuto): 165 passos/min no 1º, 160 no 2º e no 3º e 150 no 4º. No 3º a
+  // pessoa ficou 10 s fora da lona, com a cadência em zero.
+  const steps: Record<number, number> = { 1: 165, 3: 160, 5: 160, 7: 150 };
+  const log = w.log!.map((l, i) => {
+    if (!steps[i]) return l;
+    const off = i === 5 ? 10000 : 0;
+    return { ...l, cadenceMs: steps[i] * (l.ms - off), cadenceDurationMs: l.ms, ...(off && { offBeltMs: off }) };
+  });
+  const s = summarize({ ...w, log });
+  // A média não conta os segundos fora da lona; a passada do 4º tiro é 10% mais longa que a do 1º.
+  expect(s.work).toMatchObject({ cadenceSpm: 159, strideChangePercent: 10 });
+  expect(s.easy).toMatchObject({ cadenceSpm: null, strideChangePercent: null });
+  // Sem a cadência (outra cinta, ou sem cinta), os dois ficam em branco, e a carga segue a mesma.
+  expect(summarize(w).work).toMatchObject({ cadenceSpm: null, strideChangePercent: null, mets: s.work!.mets });
+  const { system } = assessPrompt({ workout: { ...w, log }, history: [] });
+  expect(system).toContain('strideChangePercent');
+  expect(system).toContain('maior mediana de 10 leituras seguidas da cinta, ou de 3 do sensor de mão');
+  expect(system).toContain('concluiu outro bloco de esforço ou seguiu 4 minutos ou mais no mesmo bloco');
+  expect(system).toContain('quando o pico é de um bloco de esforço');
+  expect(system).toContain('não passa da maior das duas fórmulas pela idade + 10');
+  expect(system).toContain('nem a carga decidida numa recuperação para o bloco seguinte');
+  // Na revisão: a cadência do momento e a variação em %, e o aviso de que o fim de uma recuperação pode mudar.
+  const zone = dailyTarget(plan, profile, w.hr);
+  const features = pulseFeatures([{ bpm: 165, at: 0, kmh: 6.6, incline: 1 }], zone)!;
+  const load = { stage: plan.stages[3], easy: false, reached: true, secondsAtLoad: 100, closing: false, short: true };
+  const input = { workout: w, index: 3, left: 140, load, features, live: null, samples: [], now: 0, allowed: ['manter', 'reduzir'] as ReviewDecision[], maxRaiseBpm: 0, sinceRelief: null };
+  expect(reviewPrompt({ ...input, gait: { cadenceSpm: 162, cadenceChange: -0.0912 } }).user).toMatchObject({
+    gait: { cadenceSpm: 162, cadenceChangePercent: -9.1 },
+  });
+  const review = reviewPrompt(input);
+  expect(review.user).toMatchObject({ gait: { cadenceSpm: null, cadenceChangePercent: null } });
+  expect(review.system).toContain('nenhuma regra abaixo depende deles');
+  expect(review.system).toContain('secondsRemaining pode mudar de uma revisão para outra');
+  expect(review.system).toContain('"trava", "ia", "app" ou "bloco"');
 });
 
 it('a resposta da revisão só vale com uma decisão aceita e bpm em número', () => {

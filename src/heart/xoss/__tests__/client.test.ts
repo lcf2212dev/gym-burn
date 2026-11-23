@@ -1,6 +1,6 @@
 import { normalizeUuid } from '@/ftms';
 
-import { encodeFit, FakeXossStrap, FACTORY_PROFILE, fitName } from '../__fakes__/fake-xoss-strap';
+import { encodeFit, FakeXossStrap, FACTORY_PROFILE } from '../__fakes__/fake-xoss-strap';
 import { LATE_REPLY_WINDOW_MS, XossBusyError, XossClient, XossTimeoutError, WRITE_STALL_MS } from '../client';
 import { decodeFit } from '../fit';
 import { XOSS } from '../frames';
@@ -335,7 +335,7 @@ describe('soltar a cinta', () => {
     expect(strap.commands.at(-1)).toBe('09 00');
     // Na fila (ainda não saiu), como um passo da reconciliação que viria depois.
     const queued = client.setSteps(true).catch((error: unknown) => error);
-    const released = client.release({ recording: {}, alert: { owned: [130, 140], restore: 120 }, stepsOff: true });
+    const released = client.release({ recording: true, alert: { owned: [130, 140], restore: 120 }, stepsOff: true });
     const late = client.recording().catch((error: unknown) => error);
     expect(await settled(released)).toEqual({ recording: true, alert: true, steps: true });
     expect(strap).toMatchObject({ recording: false, alert: 120, stepsOn: false });
@@ -350,7 +350,7 @@ describe('soltar a cinta', () => {
   it('não encerra a gravação que já parou nem troca um alerta que a pessoa mudou', async () => {
     const { strap, client } = await attach();
     strap.alert = 160;
-    const done = await settled(client.release({ recording: {}, alert: { owned: [140], restore: null } }));
+    const done = await settled(client.release({ recording: true, alert: { owned: [140], restore: null } }));
     // Os dois passos ficaram resolvidos: conferidos, não era preciso fazer nada.
     expect(done).toEqual({ recording: true, alert: true, steps: true });
     expect(strap.commands).not.toContain('75 02');
@@ -358,22 +358,11 @@ describe('soltar a cinta', () => {
     expect(strap.commands.some((c) => c.startsWith('72'))).toBe(false);
   });
 
-  it('com a lista mostrando que a gravação marcada já acabou, não encerra a que está em curso', async () => {
-    const { strap, client } = await attach();
-    const startedAt = Date.UTC(2026, 10, 22, 18, 0, 0);
-    strap.files.set(fitName(startedAt + 3000), encodeFit(startedAt, [{ bpm: 100, cadence: 100 }]));
-    strap.recording = true;
-    const done = await settled(client.release({ recording: { unlessFileNear: { at: startedAt, toleranceMs: 5000 } } }));
-    expect(done.recording).toBe(true);
-    expect(strap.recording).toBe(true);
-    expect(strap.commands).not.toContain('75 02');
-  });
-
-  it('passo sem resposta volta como não resolvido', async () => {
+  it('um passo sem resposta não impede os outros e volta como não resolvido', async () => {
     const { strap, client } = await attach();
     strap.recording = true;
     strap.faults.silent.add(0x75);
-    const done = await settled(client.release({ recording: {}, stepsOff: true }));
+    const done = await settled(client.release({ recording: true, stepsOff: true }));
     expect(done).toEqual({ recording: false, alert: true, steps: true });
     expect(strap.stepsOn).toBe(false);
   });

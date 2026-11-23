@@ -97,6 +97,8 @@ export interface XossFaults {
   dropChunkOfBlock: number | null;
   /** A cinta responde aos `71 01 <bpm>`, mas não troca o alerta. */
   frozenAlert: boolean;
+  /** `filelist.txt` lista também a gravação em curso (não medido na cinta; é o caso que quebraria uma conferência pela lista). */
+  listsCurrentRecording: boolean;
   /** No download, o bloco de dados deste número vai uma vez com CRC ruim. */
   badCrcBlock: number | null;
   /** No download, o bloco zero vai duas vezes (o ACK ou o `C` "se perdeu"). */
@@ -149,6 +151,7 @@ export class FakeXossStrap implements BleConnection {
     silentFetch: new Set(),
     dropChunkOfBlock: null,
     frozenAlert: false,
+    listsCurrentRecording: false,
     badCrcBlock: null,
     repeatHeader: false,
     repeatBlock: null,
@@ -308,6 +311,9 @@ export class FakeXossStrap implements BleConnection {
     const lines = [...this.files.entries()]
       .filter(([name]) => name.endsWith('.fit'))
       .map(([name, data]) => `${name} ${data.length}\n`);
+    if (this.faults.listsCurrentRecording && this.recording && this.recordingStartedAt !== null) {
+      lines.push(`${fitName(this.recordingStartedAt)} 0\n`);
+    }
     return ascii(lines.join(''));
   }
 

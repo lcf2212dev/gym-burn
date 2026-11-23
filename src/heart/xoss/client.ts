@@ -513,18 +513,16 @@ export class XossClient {
    * A última conversa antes de soltar a cinta: desfaz o que o app ligou, com o
    * canal na mão do começo ao fim, e fecha o cliente. Os comandos que estavam
    * na fila, ou que chegarem depois, são recusados: nada religa o que foi
-   * desligado aqui. Cada passo confere antes:
-   * - a gravação só é encerrada se está em curso e, com `unlessFileNear`, se a
-   *   lista da cinta não tem um arquivo começado perto daquele horário (aí a
-   *   gravação do app já foi encerrada por alguém, e a em curso é de outro);
-   *   lista vazia ou ilegível não prova nada, e a gravação é encerrada;
+   * desligado aqui. Cada passo confere antes e vai por conta própria (a falha
+   * de um não impede os outros), na ordem gravação, alerta, passos:
+   * - a gravação só é encerrada se está em curso;
    * - o alerta só volta ao valor anterior se a cinta mostra um dos valores que
    *   o app programou.
    * Devolve, para cada passo, se ele ficou resolvido (feito, ou conferido que não
    * era preciso); `false` é passo sem resposta.
    */
   release(plan: {
-    recording?: { unlessFileNear?: { at: number; toleranceMs: number } } | null;
+    recording?: boolean;
     alert?: { owned: number[]; restore: number | null } | null;
     stepsOff?: boolean;
   }): Promise<{ recording: boolean; alert: boolean; steps: boolean }> {
@@ -542,16 +540,9 @@ export class XossClient {
     };
     return this.run(
       async () => {
-        const recording = plan.recording;
-        if (recording) {
+        if (plan.recording) {
           done.recording = await attempt(async () => {
             if (decodeRecording(await this.exchange(recordingQueryFrame(), OP.recording)) !== true) return;
-            const near = recording.unlessFileNear;
-            if (near) {
-              const listing = await this.fetchNow('filelist.txt');
-              const files = listing ? parseFileList(listing) : [];
-              if (files.some((file) => Math.abs(file.at - near.at) <= near.toleranceMs)) return;
-            }
             await this.exchange(recordingStopFrame(), OP.recording);
           });
         }

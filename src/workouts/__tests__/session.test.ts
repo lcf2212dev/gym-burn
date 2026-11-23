@@ -2,8 +2,10 @@ import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { TreadmillSample, TreadmillSnapshot } from '@/treadmill/types';
 import { WorkoutSession } from '../session';
 import { cueKey, pendingAction } from '../guidance';
-import { makePlan, metabolicCost, type Plan, type Profile } from '../model';
+import { FATIGUE_TIP } from '../gait';
+import { acsm, currentCue, makePlan, metabolicCost, type Plan, type Profile, type Stage } from '../model';
 import { dailyTarget } from '../physiology';
+import { plateaus } from '../prompts';
 import { assess, reviewLoad } from '../ai';
 import {
   clearData,
@@ -11,8 +13,10 @@ import {
   deleteWorkout,
   readProfile,
   readWorkouts,
+  saveTrackChunk,
   saveWorkout,
 } from '../storage';
+import { TRACK_FLAGS, type TrackChunk } from '../track';
 
 jest.mock('../ai', () => ({ assess: jest.fn(), reviewLoad: jest.fn() }));
 jest.mock('../storage', () => ({
@@ -62,9 +66,16 @@ function setup(profile: Profile = { age: 36, weightKg: 75, heightCm: 175 }) {
   /**
    * Um segundo de esteira: avança o relógio, entrega uma amostra e deixa correr
    * o que ela disparou, como a resposta da IA. No aparelho cada notificação
-   * chega numa tarefa própria.
+   * chega numa tarefa própria. `extra` leva o que a cinta manda além do BPM:
+   * os RR daquele segundo e a cadência da X2 Pro.
    */
-  async function packet(speedKmh: number, bpm: number | null = null, incline = 0, strap = false) {
+  async function packet(
+    speedKmh: number,
+    bpm: number | null = null,
+    incline = 0,
+    strap = false,
+    extra: Extra = {},
+  ) {
     now += 1000;
     jest.advanceTimersByTime(1000);
     snapshot.samples = [
@@ -77,6 +88,7 @@ function setup(profile: Profile = { age: 36, weightKg: 75, heightCm: 175 }) {
         inclinationPercent: incline,
         heartRateBpm: bpm,
         ...(strap ? { heartRateSource: 'strap' as const } : {}),
+        ...extra,
         energyKcal: null,
         distanceM: null,
       },
@@ -89,7 +101,8 @@ function setup(profile: Profile = { age: 36, weightKg: 75, heightCm: 175 }) {
   };
   /**
    * Segundos de esteira com a leitura contínua da cinta em cada amostra. `bpm`
-   * pode variar com o segundo (a partir de 0). `each` roda depois de cada um.
+   * pode variar com o segundo (a partir de 0). `each` roda depois de cada um;
+   * `extra`, se houver, dá os RR e a cadência de cada segundo.
    */
   const strap = async (
     seconds: number,
@@ -97,9 +110,10 @@ function setup(profile: Profile = { age: 36, weightKg: 75, heightCm: 175 }) {
     bpm: number | ((second: number) => number),
     incline = 0,
     each = () => {},
+    extra?: (second: number) => Extra,
   ) => {
     for (let i = 0; i < seconds; i++) {
-      await packet(speedKmh, typeof bpm === 'number' ? bpm : bpm(i), incline, true);
+      await packet(speedKmh, typeof bpm === 'number' ? bpm : bpm(i), incline, true, extra?.(i));
       each();
     }
   };
@@ -111,7 +125,53 @@ function setup(profile: Profile = { age: 36, weightKg: 75, heightCm: 175 }) {
   const freezeIncline = () => {
     inclineAt = now;
   };
-  return { session, snapshot, notify: () => notify(), walk, hold, strap, freezeIncline };
+  return { session, snapshot, notify: () => notify(), walk, hold, strap, packet, freezeIncline };
+}
+
+/** O que a cinta manda numa amostra além do BPM. */
+type Extra = Pick<TreadmillSample, 'rrMs' | 'cadenceSpm'>;
+
+/**
+ * Segundos de treino em que a pessoa segue o guia: a esteira nos alvos da etapa
+ * em que a amostra vai cair, com a cinta (ou, com `strap` falso, o sensor de mão
+ * lendo a cada segundo). `bpm` recebe a etapa, os segundos já feitos nela e o
+ * índice dela.
+ */
+async function follow(
+  t: ReturnType<typeof setup>,
+  seconds: number,
+  bpm: (stage: Stage, into: number, index: number) => number,
+  each = () => {},
+  strap = true,
+) {
+  for (let i = 0; i < seconds; i++) {
+    const active = t.session.snapshot().active;
+    if (!active?.plan) return;
+    // A primeira amostra do treino não soma tempo: a seguinte cai no segundo de agora mais um.
+    const elapsed = t.snapshot.samples.length ? Math.floor(active.totals.movingMs / 1000) + 1 : 0;
+    const last = active.plan.stages.length - 1;
+    const cue = currentCue(active.plan, elapsed) ?? { stage: active.plan.stages[last], into: 0, index: last };
+    await t.packet(cue.stage.speed, bpm(cue.stage, cue.into, cue.index), cue.stage.incline, strap);
+    each();
+  }
+}
+
+/**
+ * Os RR de um coração na FC dada, segundo a segundo: cada chamada devolve os
+ * batimentos que caem naquele segundo, como a cinta os manda.
+ */
+function heart() {
+  let phase = 0;
+  return (bpm: number) => {
+    const rr = Math.round(60000 / bpm);
+    const out: number[] = [];
+    phase += 1000;
+    while (phase >= rr) {
+      out.push(rr);
+      phase -= rr;
+    }
+    return out;
+  };
 }
 
 const flush = async () => {
@@ -668,10 +728,25 @@ it('o tiro de 22/11: a trava alivia nos primeiros segundos acima do teto, uma ve
   at.slice(1).forEach((t, i) => expect(t - at[i]).toBeGreaterThanOrEqual(30_000));
   expect(alerts.seen.every((a) => a.reopened && a.stage === 1)).toBe(true);
   expect(new Set(alerts.seen.map((a) => a.key)).size).toBe(alerts.seen.length);
-  expect(alerts.seen[0].coach).toMatch(/^Acima do teto · \d+ BPM · reduza para 5,2 km\/h$/);
-  // O plano termina com um corte só.
-  expect(cut.to).toEqual([5.2, 7.5]);
-  expect(loads(session.snapshot().active?.plan)).toEqual([[4, 0], [5.2, 7.5], [4, 0], [4, 0]]);
+  expect(alerts.seen[0].coach).toMatch(/^Acima do teto · \d+ BPM · reduza para 6,0 km\/h$/);
+  // O plano termina com um corte só, ainda correndo: a 6 km/h o corte fica dentro da folga de 0,03 MET,
+  // e a rampa não sobe (antes o alvo virava 5,2 km/h com 7,5%, mais pesado que a corrida lenta).
+  expect(cut.to).toEqual([6, 1]);
+  expect(loads(session.snapshot().active?.plan)).toEqual([[4, 0], [6, 1], [4, 0], [4, 0]]);
+});
+
+it('quando a esteira difere do alvo na velocidade e na rampa, o aviso reaberto diz as duas', async () => {
+  const { session, strap } = setup(vo2Profile);
+  session.start(vo2(1));
+  await strap(120, 4, 100);
+  const alerts = realerts(session);
+  // Até o corte, a 6,6 km/h e 1%; depois a pessoa tira a rampa e segue a 6,6 km/h, acima do alvo de 6 km/h.
+  await strap(firstOver + 3, 6.6, shot, 1, alerts.each);
+  expect(changes(session)).toEqual([expect.objectContaining({ by: 'trava', to: [6, 1] })]);
+  await strap(240 - firstOver - 3, 6.6, (t) => shot(t + firstOver + 3), 0, alerts.each);
+  // O alvo pede 6 km/h e 1%, e a esteira está a 6,6 km/h e 0%: o painel não esconde a rampa.
+  expect(alerts.seen.length).toBeGreaterThan(0);
+  expect(alerts.seen.at(-1)!.coach).toMatch(/· reduza para 6,0 km\/h e 1%$/);
 });
 
 it('o tiro de 22/11 a 6,5 km/h num alvo de 6,6: abaixo do alvo a trava também age, a partir da carga medida', async () => {
@@ -685,6 +760,129 @@ it('o tiro de 22/11 a 6,5 km/h num alvo de 6,6: abaixo do alvo a trava também a
   expect(cut.to![0]).toBeLessThanOrEqual(6.5);
 });
 
+it('com os RR da cinta a trava age antes do BPM suavizado, e um RR em cada dois sendo artefato não a dispara', async () => {
+  // A cinta manda o BPM suavizado, 6 s atrás da FC; os RR são os batimentos de cada segundo.
+  const lag = 6;
+  const cutAt = async (withRr: boolean) => {
+    const { session, strap } = setup(vo2Profile);
+    session.start(vo2(1));
+    await strap(120, 4, 100);
+    const beat = heart();
+    const rr = withRr ? (t: number) => ({ rrMs: beat(shot(t)) }) : undefined;
+    await strap(240, 6.6, (t) => shot(Math.max(0, t - lag)), 1, () => {}, rr);
+    const [cut] = changes(session)!;
+    expect(cut).toMatchObject({ stage: 1, from: [6.6, 1], by: 'trava' });
+    return cut.second - 120;
+  };
+  const smooth = await cutAt(false);
+  const beats = await cutAt(true);
+  // Só com a cinta, a trava espera o atraso dela; com os RR, age até 3 s depois da FC passar de 170.
+  expect(smooth).toBeGreaterThan(firstOver + lag);
+  expect(beats).toBeLessThanOrEqual(firstOver + 3);
+  // A FC parada em 166, 4 abaixo do teto, com um artefato (280 ms, 214 bpm) depois de cada RR bom.
+  const { session, strap } = setup(vo2Profile);
+  session.start(vo2(1));
+  await strap(120, 4, 100);
+  const beat = heart();
+  await strap(240, 6.6, 166, 1, () => {}, () => ({ rrMs: beat(166).flatMap((rr) => [rr, 280]) }));
+  expect(changes(session)).toEqual([]);
+});
+
+it('as kcal seguem o passo que a cadência mede, na mesma velocidade; sem cadência, a regra por velocidade', async () => {
+  const perMs = async (cadenceSpm?: number) => {
+    const { session, strap } = setup();
+    // Treino livre a 6,5 km/h e 1%: começa sozinho com a lona andando.
+    await strap(121, 6.5, 120, 1, () => {}, cadenceSpm === undefined ? undefined : () => ({ cadenceSpm }));
+    const { totals } = session.snapshot().active!;
+    return totals.metMs! / totals.movingMs;
+  };
+  expect(await perMs(160)).toBeCloseTo(acsm(6.5, 1, true), 6);
+  // A mesma lona, andando: a equação de caminhada, bem abaixo.
+  expect(await perMs(125)).toBeCloseTo(acsm(6.5, 1, false), 6);
+  expect(await perMs()).toBeCloseTo(metabolicCost(6.5, 1), 6);
+});
+
+it('fora da lona: liga com 10 s de cadência em zero, segura só os aumentos e tira o BPM das contas', async () => {
+  const { session, strap } = setup();
+  session.start(continuous());
+  const steps = (cadenceSpm: number | null) => () => ({ cadenceSpm });
+  await strap(120, 4, 80, 0, () => {}, steps(120));
+  await strap(70, 5, 110, 1, () => {}, steps(130));
+  // A pessoa sai para o lado com a lona a 5 km/h: a cadência zera e a FC cai.
+  await strap(9, 5, 100, 1, () => {}, steps(0));
+  expect(session.snapshot().gait).toMatchObject({ cadenceSpm: 0, offBelt: false });
+  await strap(21, 5, 100, 1, () => {}, steps(0));
+  expect(session.snapshot().gait).toMatchObject({ offBelt: true, cadenceSpm: 0, strideM: null });
+  // Volta à lona. Num bloco longo a carga já subiria aqui (veja o teste da cinta), mas o minuto de
+  // leituras ainda tem o BPM de quem estava parado: nem a regra local nem a IA podem subir.
+  await strap(60, 5, 110, 1, () => {}, steps(130));
+  expect(session.snapshot().gait).toMatchObject({ offBelt: false, cadenceSpm: 130, strideM: 0.64 });
+  expect(changes(session)).toEqual([]);
+  expect(coach(session)).toMatch(/· fora da lona: a carga não sobe$/);
+  // As revisões com 90 s ou mais na carga, em que o aumento já seria possível, saíram todas sem ele.
+  const calls = jest.mocked(reviewLoad).mock.calls.filter(([input]) => input.index === 1 && input.load.secondsAtLoad >= 90);
+  expect(calls.length).toBeGreaterThanOrEqual(2);
+  expect(calls.every(([input]) => input.load.offBelt && input.maxRaiseBpm === 0 && !input.allowed.includes('aumentar'))).toBe(true);
+  // Um minuto depois de voltar, a carga sobe como sempre.
+  for (let i = 0; i < 60 && !changes(session)!.length; i++) await strap(1, 5, 110, 1, () => {}, steps(130));
+  expect(changes(session)).toEqual([expect.objectContaining({ decision: 'aumentar inclinação', by: 'app' })]);
+  // As 20 leituras fora da lona não entram na etapa nem nos minutos; o tempo entra, marcado na trilha.
+  const active = session.snapshot().active!;
+  const block = active.log![1];
+  expect(block.offBeltMs).toBe(20000);
+  expect(block.bpmCount).toBe(block.ms / 1000 - 20);
+  // Nem nos totais do treino: as leituras que sobram são as das etapas, e as dos minutos.
+  const minutes = active.beats!.reduce((n, [, count]) => n + count, 0);
+  const stages = active.log!.reduce((n, l) => n + l.bpmCount, 0);
+  expect([minutes, active.totals.bpmCount, active.totals.strapCount]).toEqual([stages, stages, stages]);
+  expect(active.totals.bpmSum).toBe(active.log!.reduce((n, l) => n + l.bpmSum, 0));
+  const chunks = new Map<number, TrackChunk>();
+  for (const [, minute, chunk] of jest.mocked(saveTrackChunk).mock.calls) chunks.set(minute, chunk as TrackChunk);
+  const marked = [...chunks.values()].flatMap((c) => c.f).filter((f) => f & TRACK_FLAGS.offBelt);
+  expect(marked).toHaveLength(20);
+});
+
+it('fora da lona a trava segue valendo, e a cadência sem valor nunca conta como zero', async () => {
+  const { session, strap } = setup();
+  session.start(continuous());
+  const steps = (cadenceSpm: number | null) => () => ({ cadenceSpm });
+  await strap(120, 4, 80, 0, () => {}, steps(120));
+  await strap(60, 5, 118, 1, () => {}, steps(130));
+  // Consulta de passos atrasada por 30 s: a cadência fica sem valor, e a pessoa segue na lona.
+  // Sem cadência nos últimos 10 s o painel não tem passo a mostrar.
+  await strap(30, 5, 118, 1, () => {}, steps(null));
+  expect(session.snapshot().gait).toBeNull();
+  expect(session.snapshot().active!.log![1].offBeltMs).toBeUndefined();
+  // Fora da lona com o BPM acima do teto: a trava corta como sempre.
+  await strap(12, 5, 118, 1, () => {}, steps(0));
+  expect(session.snapshot().gait?.offBelt).toBe(true);
+  await strap(3, 5, 124, 1, () => {}, steps(0));
+  expect(changes(session)).toEqual([expect.objectContaining({ bpm: 124, by: 'trava' })]);
+});
+
+it('a cadência caindo na mesma velocidade dá um aviso por bloco, à parte do painel da carga', async () => {
+  const { session, strap } = setup(vo2Profile);
+  session.start(vo2(2));
+  await strap(120, 4, 100, 0, () => {}, () => ({ cadenceSpm: 120 }));
+  const tips: { stage: number; tip: string }[] = [];
+  const watch = () => {
+    const { tip, guidance } = session.snapshot();
+    if (tip !== (tips.at(-1)?.tip ?? '')) tips.push({ stage: guidance!.index, tip });
+  };
+  // Cada tiro: 1 min a 165 passos/min e depois 150, 9% a menos, na mesma velocidade.
+  const cadence = (t: number) => ({ cadenceSpm: t < 60 ? 165 : 150 });
+  await strap(240, 6.6, 160, 1, watch, cadence);
+  await strap(180, 4, 130, 0, watch, () => ({ cadenceSpm: 120 }));
+  await strap(240, 6.6, 160, 1, watch, cadence);
+  expect(tips).toEqual([
+    { stage: 1, tip: FATIGUE_TIP },
+    { stage: 2, tip: '' },
+    { stage: 3, tip: FATIGUE_TIP },
+  ]);
+  // O aviso não ocupa o lugar do que a revisão diz da carga.
+  expect(coach(session)).not.toBe(FATIGUE_TIP);
+});
+
 it('quem ignora o corte recebe o aviso de novo em cada tiro, e os tiros seguintes ficam com um corte só', async () => {
   const { session, strap } = setup(vo2Profile);
   session.start(vo2(4));
@@ -696,16 +894,204 @@ it('quem ignora o corte recebe o aviso de novo em cada tiro, e os tiros seguinte
     await strap(180, 4, 140, 0, alerts.each);
   }
   const all = changes(session)!;
-  expect(all).toEqual([expect.objectContaining({ stage: 1, by: 'trava' })]);
+  // Nenhum corte por cima do que não chegou ao painel: a trava corta uma vez, no 1º tiro.
+  expect(all.filter((c) => c.by !== 'bloco')).toEqual([expect.objectContaining({ stage: 1, by: 'trava' })]);
   const target = all[0].to!;
+  // Na 1ª recuperação o fim do tiro ainda responde ao corte, e a decisão do próximo bloco, que parte
+  // da carga feita (6,6 km/h) e tira só até meio MET, não fica abaixo da que ele já herdou. Na 2ª, com
+  // dois tiros a 6,6 km/h terminando em 179, a previsão é 179: o corte de 0,8 MET não cabe na corrida,
+  // e os dois tiros que faltam passam a andar a 5,2 km/h com a mesma rampa.
+  const blocks = all.filter((c) => c.by === 'bloco');
+  expect(blocks).toEqual([expect.objectContaining({ stage: 5, bpm: 179, from: target, decision: 'reduzir velocidade' })]);
+  const eased = blocks[0].to!;
+  expect(eased).toEqual([5.2, 1]);
   expect(loads(session.snapshot().active?.plan)).toEqual([
-    [4, 0], target, [4, 0], target, [4, 0], target, [4, 0], target, [4, 0], [4, 0],
+    [4, 0], target, [4, 0], target, [4, 0], eased, [4, 0], eased, [4, 0], [4, 0],
   ]);
   expect([...new Set(alerts.seen.map((a) => a.stage))]).toEqual([1, 3, 5, 7]);
   // A espera pelo alívio do 1º tiro não vale para os outros, nem na revisão pela IA.
   const later = jest.mocked(reviewLoad).mock.calls.filter(([input]) => input.index > 2);
   expect(later.length).toBeGreaterThan(0);
   expect(later.every(([input]) => input.sinceRelief === null)).toBe(true);
+});
+
+it('o tiro que termina 2 acima do teto depois de um corte da trava reduz o seguinte, sem somar de novo a herança', async () => {
+  const t = setup(vo2Profile);
+  t.session.start(vo2(3));
+  // O BPM sobe até 172 e fica nele até o fim do tiro, mesmo com o corte, que a pessoa segue no painel.
+  const bpm = (stage: Stage, into: number) =>
+    stage.name === 'Aquecimento' ? 100 : stage.measure ? 130 : Math.min(172, 140 + Math.floor(into / 4));
+  await follow(t, 120 + 240 + 15, bpm);
+  const [cut] = changes(t.session)!;
+  expect(changes(t.session)).toEqual([expect.objectContaining({ stage: 1, by: 'trava' })]);
+  // A trava não corta de novo com 2 bpm de excesso: o primeiro corte ainda faz efeito.
+  expect(loads(t.session.snapshot().active?.plan)![3]).toEqual(cut.to);
+  // Aos 15 s da recuperação, o fim de 172 ainda responde ao corte feito a 2 min do fim do tiro: sai só o
+  // excesso, a partir da carga feita (a do corte, que os tiros seguintes já herdaram).
+  await follow(t, 1, bpm);
+  const [, ahead] = changes(t.session)!;
+  expect(ahead).toMatchObject({ stage: 3, bpm: 172, by: 'bloco', from: cut.to, decision: expect.stringMatching(/^reduzir/) });
+  const eased = metabolicCost(...cut.to!) - metabolicCost(...ahead.to!);
+  expect(eased).toBeGreaterThan(0);
+  expect(eased).toBeLessThanOrEqual(0.5);
+  expect(loads(t.session.snapshot().active?.plan)).toEqual([
+    [4, 0], cut.to, [4, 0], ahead.to, [4, 0], ahead.to, [4, 0], [4, 0],
+  ]);
+  expect(t.session.snapshot().nextBlock).toEqual({
+    index: 3,
+    speed: ahead.to![0],
+    incline: ahead.to![1],
+    predictedBpm: 174,
+    verdict: 'reduzir',
+    changed: true,
+  });
+  expect(coach(t.session)).toBe('Próximo tiro: ' + String(ahead.to![0]).replace('.', ',') + (ahead.to![0] % 1 ? '' : ',0') + ' km/h');
+  // O registro da decisão não conta como redução forçada nem reabre o aviso da recuperação.
+  expect(pendingAction(t.session.snapshot().guidance)).not.toBe('adjust');
+  // No tiro seguinte a decisão some do painel.
+  await follow(t, 170, bpm);
+  expect(t.session.snapshot().guidance?.index).toBe(3);
+  expect(t.session.snapshot().nextBlock).toBeNull();
+});
+
+it('a decisão do próximo tiro sobe a carga só dele quando o anterior termina bem abaixo, e nunca depois de um corte da trava', async () => {
+  const below = setup(vo2Profile);
+  below.session.start(vo2(3));
+  const steady = (work: number) => (stage: Stage) => (stage.name === 'Aquecimento' ? 100 : stage.measure ? 130 : work);
+  await follow(below, 120 + 240 + 16, steady(158));
+  // 158 no fim, previsão de 160: cabem 8 bpm, a 11 bpm por MET (repouso de 85): 0,72 MET, 7,3 km/h.
+  expect(changes(below.session)).toEqual([
+    expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6.6, 1], to: [7.3, 1], bpm: 158 }),
+  ]);
+  // Como todo aumento, vale só para o próximo tiro.
+  expect(loads(below.session.snapshot().active?.plan)).toEqual([
+    [4, 0], [6.6, 1], [4, 0], [7.3, 1], [4, 0], [6.6, 1], [4, 0], [4, 0],
+  ]);
+  expect(coach(below.session)).toBe('Próximo tiro: 7,3 km/h');
+  // Um corte da trava no começo do 1º tiro: com o fim bem abaixo, a carga não sobe em nenhuma recuperação.
+  const cut = setup(vo2Profile);
+  cut.session.start(vo2(3));
+  const after = (stage: Stage, into: number) =>
+    stage.name === 'Aquecimento' ? 100 : stage.measure ? 130 : stage.name.endsWith('1/3') && into < 8 ? 175 : 150;
+  await follow(cut, 120 + 240 + 180 + 240 + 20, after);
+  const all = changes(cut.session)!;
+  expect(all).toEqual([expect.objectContaining({ stage: 1, by: 'trava' })]);
+  expect(loads(cut.session.snapshot().active?.plan)![5]).toEqual(all[0].to);
+  expect(cut.session.snapshot().nextBlock).toMatchObject({ index: 5, verdict: 'manter', changed: false });
+});
+
+it('um aumento que deu certo segue nos tiros seguintes: sobe, mantém, mantém, sem voltar à carga do plano', async () => {
+  const t = setup(vo2Profile);
+  // Quatro tiros planejados a 6,0 km/h; o 1º termina em 161 e os outros, na carga nova, em 167, no alvo.
+  const plan = vo2(4);
+  plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 6 }));
+  t.session.start(plan);
+  const bpm = (stage: Stage, _: number, index: number) =>
+    stage.name === 'Aquecimento' ? 100 : stage.measure ? 125 : index === 1 ? 161 : 167;
+  const seen: string[] = [];
+  const verdicts: string[] = [];
+  const each = () => {
+    const text = coach(t.session);
+    if (text.startsWith('Próximo') && seen.at(-1) !== text) seen.push(text);
+    const next = t.session.snapshot().nextBlock;
+    if (next && verdicts.length < (next.index - 1) / 2) verdicts.push(next.verdict + (next.changed ? ' ' + next.speed : ''));
+  };
+  await follow(t, 120 + 4 * 240 + 3 * 180 + 20, bpm, each);
+  const ahead = changes(t.session)!;
+  expect(ahead).toEqual([
+    expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 161 }),
+    expect.objectContaining({ stage: 5, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 167 }),
+    expect.objectContaining({ stage: 7, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 167 }),
+  ]);
+  expect(loads(t.session.snapshot().active?.plan)).toEqual([
+    [4, 0], [6, 1], [4, 0], [6.4, 1], [4, 0], [6.4, 1], [4, 0], [6.4, 1], [4, 0], [4, 0],
+  ]);
+  expect(seen).toEqual(['Próximo tiro: 6,4 km/h']);
+  // As duas últimas decisões são "manter": a carga é a do fim do tiro anterior, que terminou no alvo.
+  expect(verdicts).toEqual(['aumentar 6.4', 'manter 6.4', 'manter 6.4']);
+});
+
+it('sem a cinta a carga do próximo tiro não é decidida na recuperação', async () => {
+  const t = setup(vo2Profile);
+  t.session.start(vo2(2));
+  // O sensor de mão lendo a cada segundo, 12 bpm abaixo do teto no fim do tiro.
+  await follow(t, 120 + 240 + 30, (stage) => (stage.measure ? 120 : 158), () => {}, false);
+  expect(changes(t.session)).toEqual([]);
+  expect(t.session.snapshot().nextBlock).toBeNull();
+  expect(loads(t.session.snapshot().active?.plan)![3]).toEqual([6.6, 1]);
+});
+
+it('a recuperação entre tiros segue o coração e a volta à calma paga a diferença, sem mexer no relógio do treino', async () => {
+  // 41 anos e máxima de 179: a recuperação termina com o BPM do momento em 116. Três tiros de 4 min,
+  // recuperações de 3 min e 7 min de volta à calma, que pode emprestar até 4 min.
+  const plan: Plan = {
+    ...makePlan('VO₂máx', { warmup: 2, reps: 3, work: 4, recovery: 3, cooldown: 7 }, 6.6, 1),
+    objective: 'VO₂máx',
+    zone: [90, 95],
+  };
+  // A 1ª recuperação cai a 110 com 1 min; a 2ª fica em 130 o tempo todo.
+  const bpm = (stage: Stage, into: number, index: number) =>
+    index === 0 ? 100 : !stage.measure ? 167 : index === 2 ? (into < 60 ? 140 : 110) : 130;
+  const run = async (strap: boolean) => {
+    const t = setup(vo2Profile);
+    t.session.start(plan);
+    const seen: string[] = [];
+    const clock: number[] = [];
+    const each = () => {
+      const { coach: text, guidance, active } = t.session.snapshot();
+      if (text.startsWith('Recuperação') && seen.at(-1) !== text) seen.push(text);
+      // O pedido de batimentos segue o relógio do treino, com a etapa encurtada ou alongada.
+      if (active && guidance && guidance.bpmSlot !== Math.floor(Math.floor(active.totals.movingMs / 1000) / 180))
+        clock.push(active.totals.movingMs);
+    };
+    await follow(t, 1900, bpm, each, strap);
+    return { done: t.session.snapshot().history[0], seen, clock };
+  };
+  const { done, seen, clock } = await run(true);
+  expect(done.reason).toBe('Duração concluída');
+  expect(seen).toEqual(['Recuperação encerrada aos 2:00 · 110 BPM', 'Recuperação alongada até 5:00 · 130 BPM']);
+  // A 1ª termina nos 2 min mínimos e a 2ª vai aos 5 min; a volta à calma fica com 6 min, e o total não muda.
+  expect(done.plan!.stages.map((s) => s.seconds)).toEqual([120, 240, 120, 240, 300, 240, 180, 360]);
+  expect(done.plan!.stages.reduce((n, s) => n + s.seconds, 0)).toBe(plan.minutes * 60);
+  expect(done.totals.movingMs).toBe(plan.minutes * 60000);
+  expect(clock).toEqual([]);
+  // O registro por etapa e os patamares acompanham as etapas como elas foram feitas.
+  expect(done.log!.slice(1, 6).map((l) => l.ms)).toEqual([240000, 120000, 240000, 300000, 240000]);
+  expect(plateaus(done)).toEqual([
+    expect.objectContaining({ kmh: 6.6, minutes: 4, bpm: 167 }),
+    expect.objectContaining({ kmh: 6.6, minutes: 4, bpm: 167 }),
+    expect.objectContaining({ kmh: 6.6, minutes: 4, bpm: 167 }),
+  ]);
+  // Sem a cinta não há leitura do momento: vale o tempo do plano.
+  const grip = await run(false);
+  expect(grip.seen).toEqual([]);
+  expect(grip.done.plan!.stages.map((s) => s.seconds)).toEqual(plan.stages.map((s) => s.seconds));
+});
+
+it('na recuperação alongada, uma lacuna curta da cinta não a encerra; sem leitura por mais tempo, ela volta ao tempo do plano', async () => {
+  const plan: Plan = {
+    ...makePlan('VO₂máx', { warmup: 2, reps: 3, work: 4, recovery: 3, cooldown: 7 }, 6.6, 1),
+    objective: 'VO₂máx',
+    zone: [90, 95],
+  };
+  const t = setup(vo2Profile);
+  t.session.start(plan);
+  const bpm = (stage: Stage, _: number, index: number) => (index === 0 ? 100 : stage.measure ? 140 : 167);
+  const seconds = () => t.session.snapshot().active!.plan!.stages[2].seconds;
+  // Com 140 aos 3 min, a 1ª recuperação vai a 5 min (2 recuperações dividem os 4 min da volta à calma).
+  await follow(t, 120 + 240 + 190, bpm);
+  expect(seconds()).toBe(300);
+  expect(t.session.snapshot().recovery).toEqual({ index: 2, planned: 180, seconds: 300, reason: 'alongada' });
+  // 4 s com a cinta sem mandar BPM: a leitura do momento some, mas a recuperação segue alongada.
+  for (let i = 0; i < 4; i++) await t.packet(4, null, 0, true);
+  expect([t.session.snapshot().guidance?.index, seconds()]).toEqual([2, 300]);
+  await follow(t, 5, bpm);
+  // Sem leitura por mais tempo, vale o tempo do plano: já passou dos 3 min, e ela termina. A leitura do
+  // momento some 3 s depois da última (aos 3:21), e a última ainda vale por 5 amostras: termina aos 3:26.
+  for (let i = 0; i < 7; i++) await t.packet(4, null, 0, true);
+  expect(seconds()).toBe(206);
+  expect(coach(t.session)).toBe('Sem leitura · recuperação no tempo do plano');
+  expect(t.session.snapshot().active!.plan!.stages.reduce((n, s) => n + s.seconds, 0)).toBe(plan.minutes * 60);
 });
 
 it('sem resposta da IA, a regra do app não sobe a carga com o BPM do momento acima do teto', async () => {
