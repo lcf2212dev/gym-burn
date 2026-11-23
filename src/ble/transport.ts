@@ -5,12 +5,22 @@ import type { FtmsAdvertisement } from '@/ftms';
  * a real (`ble-manager-transport.ts`) e a esteira simulada do modo
  * demonstração e dos testes (`src/simulator`).
  *
- * O contrato é só de leitura: o app não manda comando para a esteira, então
- * não existe escrita de característica (nem GATT write, nem Control Point).
+ * A leitura é o contrato de todos. A escrita é uma capacidade à parte
+ * (`BleConnection.writer`) e só existe para a cinta: o canal proprietário da
+ * XOSS X2 Pro (passos, gravação, alerta, arquivos) é conversado por escrita.
+ * A esteira continua 100% só leitura: a sessão dela nunca usa o `writer`, e a
+ * esteira simulada nem o implementa.
  *
  * UUIDs entram e saem em qualquer formato aceito por `normalizeUuid`; quem
  * compara é responsável por normalizar.
  */
+
+/**
+ * Maior escrita aceita numa chamada. A cinta só aceita uma conexão por vez e o
+ * app não pede MTU maior: 20 bytes é o que cabe num pacote com o MTU padrão.
+ * Quem precisa mandar mais fatia antes (o cliente XOSS).
+ */
+export const MAX_WRITE_BYTES = 20;
 
 export type BleUnavailableReason =
   | 'unsupported' // o aparelho não tem Bluetooth LE
@@ -50,6 +60,31 @@ export interface CharacteristicInfo {
   canRead: boolean;
   canNotify: boolean;
   canIndicate: boolean;
+  /** Aceita escrita com resposta (GATT Write Request). */
+  canWrite?: boolean;
+  /** Aceita escrita sem resposta (GATT Write Command). */
+  canWriteWithoutResponse?: boolean;
+}
+
+/** `response`: o equipamento confirma a escrita. `noResponse`: vai sem confirmação. */
+export type WriteMode = 'response' | 'noResponse';
+
+/**
+ * A capacidade de escrever numa característica. Só a cinta usa.
+ *
+ * A promise não prova que os bytes chegaram: sem resposta ela resolve assim
+ * que a escrita entra na fila do Android, e com a fila nativa presa ela nunca
+ * resolve. Quem conversa por escrita confirma pela notificação do aparelho,
+ * com prazo próprio, e escreve uma coisa por vez (ver `ble-manager-transport.ts`).
+ */
+export interface BleWriter {
+  /** Lança se `data` tiver mais de `MAX_WRITE_BYTES`. */
+  write(
+    serviceUuid: string,
+    characteristicUuid: string,
+    data: Uint8Array,
+    mode: WriteMode,
+  ): Promise<void>;
 }
 
 export interface ServiceInfo {
@@ -86,6 +121,12 @@ export interface BleConnection {
 
   /** Chamado uma vez quando o link cai, por qualquer motivo que não seja `disconnect()`. */
   onDisconnect(listener: () => void): BleSubscription;
+
+  /**
+   * Escrita em característica. Existe no rádio de verdade e nos falsos da
+   * cinta; a esteira simulada não tem. A sessão da esteira não usa.
+   */
+  readonly writer?: BleWriter;
 
   disconnect(): Promise<void>;
 }

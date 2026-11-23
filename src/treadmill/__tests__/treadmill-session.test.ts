@@ -677,6 +677,73 @@ describe('métricas', () => {
       expect(session.getSnapshot().samples).toHaveLength(1);
       expect(session.getSnapshot().samples[0].heartRateBpm).toBe(142);
     });
+
+    it('os RR não se perdem nem se repetem com dois batimentos entre pacotes da esteira', async () => {
+      const beats: { seq: number; rrMs: number }[] = [{ seq: 1, rrMs: 900 }];
+      let at = 1000;
+      const { transport, session } = makeSession({ heartRate: () => ({ bpm: 66, at, beats: [...beats] }) });
+      const connection = await connectFake(transport, session);
+      const speedOnly = new ByteWriter().u16(0).u16(500).finish();
+
+      // A primeira amostra só marca onde o anel está: os RR de antes da conexão não caem nela.
+      connection.emit(FTMS.service, FTMS.treadmillData, speedOnly);
+      expect(session.getSnapshot().samples.at(-1)!.rrMs).toEqual([]);
+
+      // Duas notificações da cinta (três RR) antes do próximo pacote da esteira.
+      beats.push({ seq: 2, rrMs: 910 }, { seq: 3, rrMs: 905 }, { seq: 4, rrMs: 915 });
+      at = 3000;
+      connection.emit(FTMS.service, FTMS.treadmillData, speedOnly);
+      expect(session.getSnapshot().samples.at(-1)!.rrMs).toEqual([910, 905, 915]);
+
+      // O registro da esteira dividido: o segundo pacote do mesmo segundo não repete nada.
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect(session.getSnapshot().samples.at(-1)!.rrMs).toEqual([]);
+
+      // O anel girou (os antigos saíram): só os novos entram.
+      beats.splice(0, 3);
+      beats.push({ seq: 5, rrMs: 920 });
+      at = 4000;
+      connection.emit(FTMS.service, FTMS.treadmillData, speedOnly);
+      expect(session.getSnapshot().samples.at(-1)!.rrMs).toEqual([920]);
+      const all = session.getSnapshot().samples.flatMap((sample) => sample.rrMs ?? []);
+      expect(all).toEqual([910, 905, 915, 920]);
+    });
+
+    it('a cadência é nível: vai em toda amostra enquanto recente; sem fonte, não existe', async () => {
+      let cadence: { spm: number; steps: number; at: number } | null | undefined = {
+        spm: 112,
+        steps: 40,
+        at: 1000,
+      };
+      const { transport, session } = makeSession({
+        heartRate: (now) => ({ bpm: 120, at: now, ...(cadence !== undefined && { cadence }) }),
+      });
+      const connection = await connectFake(transport, session);
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect(session.getSnapshot().samples.map((sample) => sample.cadenceSpm)).toEqual([112, 112]);
+
+      cadence = { spm: 0, steps: 40, at: 2000 };
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect(session.getSnapshot().samples.at(-1)!.cadenceSpm).toBe(0);
+
+      cadence = null;
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect(session.getSnapshot().samples.at(-1)!.cadenceSpm).toBeNull();
+
+      cadence = undefined;
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket());
+      expect('cadenceSpm' in session.getSnapshot().samples.at(-1)!).toBe(false);
+    });
+
+    it('sem a cinta, a amostra não tem RR nem cadência', async () => {
+      const { transport, session } = makeSession();
+      const connection = await connectFake(transport, session);
+      connection.emit(FTMS.service, FTMS.treadmillData, treadmillPacket({ heartRateBpm: 128 }));
+      const sample = session.getSnapshot().samples.at(-1)!;
+      expect('rrMs' in sample).toBe(false);
+      expect('cadenceSpm' in sample).toBe(false);
+    });
   });
 
   it('guarda no máximo 300 amostras, uma por notificação', async () => {

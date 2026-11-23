@@ -8,6 +8,10 @@ O app não liga, não para e não ajusta a lona. Ele encontra a esteira sozinho,
 o perfil FTMS (Fitness Machine Service, `0x1826`) e transforma as notificações do equipamento num
 painel de treino. Quem controla a esteira continua sendo o painel dela.
 
+A única escrita do app em Bluetooth é na cinta de batimentos XOSS X2 Pro, pelo canal proprietário
+dela (passos, gravação do treino na memória da cinta, alerta de FC e perfil; veja
+[Cinta XOSS X2 Pro](#cinta-xoss-x2-pro)). A esteira continua 100% só leitura.
+
 ## Telas
 
 <p align="center">
@@ -35,8 +39,12 @@ mostrada é a da T600X real: o app lê o módulo BLE que ela expõe.
   5 minutos), de onde saem o ajuste da carga e o cartão da zona de batimentos;
 - **traduz os eventos do console** (início, parada, pausa, mudança de alvo feita no painel, chave de
   segurança) em avisos legíveis;
-- **lê os batimentos de uma cinta no peito**, quando há uma pareada, e fica com o sensor de mão da
-  esteira como reserva;
+- **lê os batimentos de uma cinta no peito**, quando há uma pareada, com os intervalos entre
+  batimentos (RR), e fica com o sensor de mão da esteira como reserva;
+- na **XOSS X2 Pro**, lê também a cadência, grava o treino guiado na memória da cinta e acerta nela
+  o alerta de FC e o perfil;
+- **guarda o treino segundo a segundo** (BPM, cadência, velocidade, inclinação e RR), numa tabela à
+  parte do registro do treino;
 - **mostra com honestidade o que a esteira não manda**, marcando `—` nos campos que o firmware
   declara mas nunca envia;
 - tem um **modo demonstração** escondido para experimentar o app sem esteira por perto.
@@ -139,7 +147,26 @@ Daí em diante o app conecta sozinho na cinta sempre que procura ou usa uma este
 
 A esteira continua como reserva. Vale a leitura dela sempre que a cinta não tem uma leitura dos últimos 5 segundos: cinta fora do alcance, sem bateria, sem contato com a pele ou ainda conectando. Nesse caso o pedido seguinte volta a pedir as mãos no sensor, e fecha sozinho se a cinta voltar. No painel, o rótulo do número diz de onde ele vem: **Cinta** ou **Batimentos** (sensor da esteira).
 
-A cinta pareada fica guardada no celular e não é apagada por "Apagar perfil e treinos"; para trocar de cinta, use **Esquecer cinta**.
+A cinta pareada fica guardada no celular e não é apagada por "Apagar perfil e treinos"; para trocar de cinta, use **Esquecer cinta**. Numa X2 Pro conectada, esquecer (ou parear outra) desfaz antes o que o app tiver ligado nela: gravação, alerta e passos.
+
+A bateria da cinta é lida ao conectar e acompanhada pelas notificações dela. Os intervalos entre batimentos (RR), que a cinta manda em todo pacote, entram nas amostras e na trilha por segundo do treino, sem filtro: o filtro de artefatos (`src/heart/rr.ts`) fica para quem os analisa.
+
+#### Cinta XOSS X2 Pro
+
+A X2 Pro (serviço `6e400001-…` e modelo "X2PRO" no Device Information) tem um canal proprietário, decifrado em 22/11/2026 na cinta do usuário (o cliente de referência em Python está em `tools/xoss/`). Depois que os batimentos já estão chegando, o app anexa esse canal em segundo plano. É a única escrita do app em Bluetooth. Os batimentos nunca dependem dele: qualquer falha (comando sem resposta, link que cai, fila do Bluetooth presa) só desliga o canal naquela conexão, sem erro na tela. Outras cintas, ou uma X2 Pro sem o canal, seguem só com o perfil padrão.
+
+O treino declara o que quer da cinta, e a sessão da cinta acerta o estado dela sempre que o canal anexa (também depois de uma queda do link ou de o app ter sido morto):
+
+- **com treino**: o relógio da cinta é acertado, a contagem de passos é ligada e consultada uma vez por segundo (com três consultas seguidas sem resposta, a cada 5 segundos, e a cadência fica sem valor); no treino guiado o app inicia a gravação na memória da cinta (com 60 kB ou mais livres e a cinta no modo de gravação manual) e programa o alerta de FC da cinta no teto da faixa do dia + 5 bpm, conferindo por leitura;
+- **sem treino**: o app desfaz só o que ele mesmo ligou. Cada coisa ligada pelo app ganha uma marca de dono guardada no celular (sobrevive ao app morto): os passos só são desligados se estavam desligados quando o app os ligou; o alerta volta ao valor que a cinta tinha antes (desligado ou o que a pessoa configurou) se ela mostra qualquer um dos valores que o app programou, e fica como está se a pessoa o mudou no meio; a gravação só é encerrada se é a do app. A marca da gravação vale sem limite enquanto o treino dono está ativo no app (uma pausa longa não a vence) e, sem ele, por 24 h a partir do início; antes de encerrar uma gravação por uma marca sem o treino ativo, o app confere a lista da cinta, e se já existe um arquivo começado naquele horário a gravação do app já acabou e a em curso é de outro, que não é tocada (lista vazia não prova nada, e a gravação é encerrada). Sem marca, o app não toca em nada. O treino livre não mexe no alerta. Depois, nesta ordem, o app baixa o FIT dos treinos com lacunas na trilha e só então acerta o perfil da cinta (peso, altura, idade e FC máxima em uso; gênero, LTHR e fuso ficam como estão). Um treino que começa cancela o download em curso, mas não um envio de perfil já aceito pela cinta: esse vai até o fim (são 2 ou 3 blocos), porque um perfil cortado no meio poderia não ter mais conserto. Com a lona andando, o perfil não começa a sincronizar. Um arquivo que falha duas vezes sai da fila naquela conexão, e uma tarefa em curso segura a conexão (até 120 s) quando a esteira solta a cinta.
+
+O FIT da cinta preenche só a trilha por segundo do treino (BPM e cadência, marcados como vindos dele); os totais do treino não mudam, porque o FIT não traz velocidade nem inclinação. Nenhum arquivo é apagado da cinta. A cadência é em passos por minuto: foi o que a cinta mostrou na medição, embora a unidade oficial do FIT seja "ciclos por minuto".
+
+Fatos da cinta que o app tolera: depois de gravar um perfil novo, a lista de treinos pode vir vazia por algumas conexões com o arquivo ainda na memória (lista vazia é "nada por ora", e a próxima conexão tenta de novo); gravações muito curtas (20 segundos) não geram arquivo; a cinta aceita uma conexão por vez, então com o Gym Burn conectado ela não aparece para outro aparelho.
+
+A tela **Cinta** mostra, com a X2 Pro conectada, um bloco de diagnóstico: modelo, cadência ao vivo (a contagem de passos fica ligada enquanto a tela está aberta), memória livre, gravação em curso, alerta programado, bateria e o tempo e o tamanho do último download (para medir no aparelho).
+
+**Limitação:** os temporizadores do JavaScript param com o app em segundo plano ou a tela bloqueada, e o app não tem serviço em primeiro plano para o Bluetooth. A consulta de passos só corre com o app na frente (o painel mantém a tela acesa durante o treino); ao voltar, ela retoma sozinha, e a cadência com mais de 3 segundos não vale. Os batimentos e a gravação na cinta não dependem disso.
 
 A FC máxima começa em 220 − idade. Depois de cada sessão avaliada, a IA devolve uma previsão, e o app passa a usar a mediana das 3 últimas. A previsão é o maior de dois números que o app calcula: a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade) e o piso medido, que é o maior pico já observado, com 5 bpm a mais quando o pico veio de uma sessão levada até o fim sem redução forçada de carga. Redução forçada é a feita com o BPM 5 ou mais acima do teto da faixa: o alívio menor é rotina de quem treina junto do teto e não pesa aqui nem no nível da avaliação. Ela fica presa a 10 bpm das estimativas pela idade e nunca abaixo desse piso. Treino submáximo não mede a FC máxima, então o erro típico continua na casa de ±10 bpm.
 
@@ -235,9 +262,10 @@ Bluetooth de verdade é ligado para procurá-la.
 - **Segurança.** Um app que só lê não tem como ligar a lona, mudar a velocidade ou disparar um
   comando por engano; se a conexão cair, a esteira continua exatamente como estava. O app também não
   substitui nenhuma proteção do painel.
-- Por isso o app **não escreve** em características de controle: ele apenas habilita notificações
-  das características de dados. O que a tela mostra a respeito de eventos do console é o que o
-  painel fez, não o que o app mandou.
+- Por isso o app **não escreve** na esteira: ele apenas habilita notificações das características
+  de dados. O que a tela mostra a respeito de eventos do console é o que o painel fez, não o que o
+  app mandou. A escrita que existe é só para a cinta XOSS X2 Pro, e um teste falha se algo em
+  `src/treadmill` passar a usá-la.
 
 ## Instalação e uso
 
@@ -286,9 +314,18 @@ sem Bluetooth.
 A cinta de batimentos tem a sua própria sessão (`src/heart/strap-session.ts`), no mesmo contrato
 `BleTransport` e no mesmo rádio: as duas buscas dividem uma única busca nativa. A sessão da esteira
 pergunta à da cinta, a cada pacote, se há leitura recente; se há, é ela que entra nas métricas e
-nas amostras, marcada com a origem. O resto do app (guia, ajuste da carga, registro do treino) lê
-os batimentos das amostras; só o ajuste da carga olha a origem, para saber quantas leituras valem e
-se há leitura do momento para a trava.
+nas amostras, marcada com a origem, com os RR que chegaram desde a amostra anterior e a cadência da
+X2 Pro. O resto do app (guia, ajuste da carga, registro do treino) lê os batimentos das amostras;
+só o ajuste da carga olha a origem, para saber quantas leituras valem e se há leitura do momento
+para a trava.
+
+O contrato é de leitura; a escrita é uma capacidade à parte (`BleConnection.writer`), que só o
+cliente da XOSS (`src/heart/xoss/client.ts`) usa. As escritas vão uma por vez e com até 20 bytes, e
+nenhuma etapa confia na promise da escrita: o que confirma é a resposta da cinta, com prazo próprio.
+A sessão de treino declara à da cinta o que quer (`StrapWishes`: o treino em curso, o perfil e os
+FIT a baixar), e a da cinta reconcilia. A trilha por segundo do treino (`src/workouts/track.ts`)
+fica na tabela `tracks`, um pedaço por minuto de relógio, gravada no checkpoint de 10 segundos e
+lida só sob demanda.
 
 ```
 telas e componentes (src/screens, src/components)
@@ -309,7 +346,8 @@ esteira Matrix T600X  ── codec FTMS puro em src/ftms
 | `src/screens` | tela de conexão e tela do cockpit |
 | `src/components` | primitivas visuais e blocos do cockpit (cartões, métricas, zona de batimentos, avisos) |
 | `src/treadmill` | sessão (estado, busca, conexão, leitura), contrato de tipos, contexto React e constantes da T600X |
-| `src/heart` | cinta de batimentos: codec do Heart Rate Measurement, sessão (pareamento, busca, conexão, leitura) e contexto React |
+| `src/heart` | cinta de batimentos: codec do Heart Rate Measurement com RR, filtro e contas dos RR, sessão (pareamento, busca, conexão, leitura, reconciliação com a X2 Pro) e contexto React |
+| `src/heart/xoss` | canal proprietário da XOSS X2 Pro: quadros, YMODEM, FIT, perfil e o cliente |
 | `src/ftms` | codec puro do FTMS: bytes, Treadmill Data, Machine Status, Training Status, Device Information, Feature e faixas |
 | `src/ble` | contrato `BleTransport`, implementação com `react-native-ble-manager` e permissões do Android |
 | `src/simulator` | esteira simulada que fala FTMS em bytes; usada no modo demonstração e nos testes |
@@ -333,7 +371,10 @@ permissões de Bluetooth do Android, a esteira simulada e a sessão de ponta a p
 falso. Nenhum teste toca o rádio de verdade: a esteira simulada fala os mesmos bytes do FTMS, e o
 modo demonstração exercita exatamente o mesmo caminho da esteira real. A cinta de batimentos é
 coberta do mesmo jeito: o codec, a sessão com um transporte falso (pareamento, queda do link, nova
-busca) e a troca entre a leitura da cinta e a da esteira.
+busca) e a troca entre a leitura da cinta e a da esteira. O canal da X2 Pro é coberto por uma cinta
+falsa (`src/heart/xoss/__fakes__`) que responde aos quadros e manda e recebe arquivos por YMODEM em
+pedaços de 20 bytes, com falhas injetadas (resposta que não vem, CRC ruim, bloco zero repetido, ACK
+perdido, queda no meio, fila presa); o decodificador FIT lê o arquivo real de 79 s baixado da cinta.
 
 Nos treinos guiados, a suíte cobre o plano, a sessão, as regras de carga, a frequência cardíaca e a
 montagem e validação dos prompts, sem chamar a DeepSeek. A qualidade das respostas da IA é medida à

@@ -40,6 +40,7 @@ import type {
   TreadmillActions,
   TreadmillCapabilities,
   TreadmillMetrics,
+  TreadmillSample,
   TreadmillSnapshot,
   TreadmillStatus,
 } from './types';
@@ -111,9 +112,16 @@ export interface TreadmillSessionOptions {
   /**
    * A leitura de uma cinta no peito que vale neste instante, com a hora em que
    * chegou, ou `null` se ela não tem leitura recente. Quando há leitura, é ela
-   * que vale; o sensor de mão da esteira fica como reserva.
+   * que vale; o sensor de mão da esteira fica como reserva. `beats` são os
+   * últimos RR, numerados, e `cadence` a cadência da X2 Pro (`null` sem valor
+   * recente; ausente sem fonte): os dois só passam para as amostras.
    */
-  heartRate?: (now: number) => { bpm: number; at: number } | null;
+  heartRate?: (now: number) => {
+    bpm: number;
+    at: number;
+    beats?: { seq: number; rrMs: number }[];
+    cadence?: { spm: number; steps: number; at: number } | null;
+  } | null;
   /** A busca para sozinha depois deste tempo (para não gastar bateria). */
   scanTimeoutMs?: number;
   now?: () => number;
@@ -208,6 +216,12 @@ export class TreadmillSession implements TreadmillStore {
   private gripBpm: number | null = null;
   /** Hora da última leitura da cinta que já entrou numa amostra. */
   private strapSampledAt: number | null = null;
+  /**
+   * Número do último RR da cinta que já entrou numa amostra. `null` logo
+   * depois de conectar: a primeira amostra só marca onde está, para os RR de
+   * antes da conexão não caírem todos nela.
+   */
+  private lastBeatSeq: number | null = null;
 
   constructor(options: TreadmillSessionOptions) {
     this.options = {
@@ -456,6 +470,7 @@ export class TreadmillSession implements TreadmillStore {
     this.dataErrorNotified = false;
     this.gripBpm = null;
     this.strapSampledAt = null;
+    this.lastBeatSeq = null;
     this.update({
       equipment: null,
       capabilities: null,
@@ -757,25 +772,44 @@ export class TreadmillSession implements TreadmillStore {
     const sampleSource: HeartRateSource | null =
       strap !== null ? 'strap' : data.heartRateBpm ? 'treadmill' : null;
     const sampleBpm = strap !== null ? (strapIsNew ? strap.bpm : null) : data.heartRateBpm || null;
-    const samples = [
-      ...this.snapshot.samples,
-      {
-        at: now,
-        speedAt: data.instantaneousSpeedKmh !== undefined ? now : lastSample?.speedAt ?? null,
-        inclineAt: data.inclinationPercent !== undefined ? now : lastSample?.inclineAt ?? null,
-        speedKmh: metrics.speedKmh,
-        inclinationPercent: metrics.inclinationPercent,
-        heartRateBpm: sampleBpm,
-        heartRateSource: sampleSource,
-        energyKcal: metrics.totalEnergyKcal,
-        distanceM: metrics.distanceM,
-      },
-    ];
+    const sample: TreadmillSample = {
+      at: now,
+      speedAt: data.instantaneousSpeedKmh !== undefined ? now : lastSample?.speedAt ?? null,
+      inclineAt: data.inclinationPercent !== undefined ? now : lastSample?.inclineAt ?? null,
+      speedKmh: metrics.speedKmh,
+      inclinationPercent: metrics.inclinationPercent,
+      heartRateBpm: sampleBpm,
+      heartRateSource: sampleSource,
+      energyKcal: metrics.totalEnergyKcal,
+      distanceM: metrics.distanceM,
+    };
+    if (strap !== null) {
+      sample.rrMs = this.takeBeats(strap.beats ?? []);
+      if (strap.cadence !== undefined) {
+        sample.cadenceSpm = strap.cadence?.spm ?? null;
+      }
+    }
+    const samples = [...this.snapshot.samples, sample];
     if (samples.length > MAX_SAMPLES) {
       samples.splice(0, samples.length - MAX_SAMPLES);
     }
 
     this.update({ metrics, samples, link: this.recordPacket(now) });
+  }
+
+  /** Os RR que chegaram depois do último já amostrado, e marca até onde foi. */
+  private takeBeats(beats: { seq: number; rrMs: number }[]): number[] {
+    const last = this.lastBeatSeq;
+    const top = beats.at(-1)?.seq;
+    if (last === null) {
+      // Com o anel vazio não há RR de antes: daqui em diante todos contam.
+      this.lastBeatSeq = top ?? 0;
+      return [];
+    }
+    if (top !== undefined && top > last) {
+      this.lastBeatSeq = top;
+    }
+    return beats.filter((beat) => beat.seq > last).map((beat) => beat.rrMs);
   }
 
   private handleMachineStatus(bytes: Uint8Array, epoch: number): void {

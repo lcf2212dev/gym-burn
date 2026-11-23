@@ -6,18 +6,22 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from 'react';
+import type { StrapLink } from '@/heart/strap-session';
 import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import { WorkoutSession } from './session';
 
 const Context = createContext<WorkoutSession | null>(null);
 export function WorkoutProvider({
   store,
+  strap,
   children,
 }: {
   store: TreadmillStore;
+  /** A cinta de batimentos, a quem o treino declara o que quer dela. */
+  strap?: StrapLink;
   children: ReactNode;
 }) {
-  const [session] = useState(() => new WorkoutSession(store));
+  const [session] = useState(() => new WorkoutSession(store, strap));
   useEffect(() => session.connect(), [session]);
   return <Context.Provider value={session}>{children}</Context.Provider>;
 }

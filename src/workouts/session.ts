@@ -1,3 +1,4 @@
+import type { BackfillJob, StrapLink, StrapWishes } from '@/heart/strap-session';
 import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { ConsoleEvent, TreadmillSample } from '@/treadmill/types';
 import { formatDecimal } from '@/utils/format';
@@ -56,11 +57,13 @@ import {
   clearData,
   clearSource,
   deleteWorkout,
+  pruneTracks,
   readProfile,
   readWorkouts,
   saveProfile,
   saveWorkout,
 } from './storage';
+import { fillTrackFromFit, readTrack, TrackRecorder, trackGaps } from './track';
 
 /** Intervalo mínimo entre revisões quando a pessoa volta a segurar o sensor. */
 const CONTACT_REVIEW_GAP = 20_000;
@@ -99,6 +102,14 @@ const GUARD_RISE_CAP_BPM = 10;
 /** O começo do texto do painel quando a IA não respondeu e o app seguiu com a própria conta. */
 const OFFLINE = 'Sem IA · ';
 const SAVE_ERROR = 'Falha ao gravar o treino no aparelho. Confira o espaço disponível.';
+/** O alerta de FC da cinta, no treino guiado: tantos bpm acima do teto da faixa do dia. */
+const STRAP_ALERT_ABOVE_BPM = 5;
+/** Um treino só é preenchido pelo FIT da cinta até tantos dias depois. */
+const BACKFILL_DAYS = 7;
+/** Quantos treinos a cinta procura no FIT de uma vez. */
+const BACKFILL_MAX = 5;
+/** Os encerramentos que deixam a trilha incompleta, com a cinta ainda gravando. */
+const BROKEN_ENDINGS = ['App interrompido', 'Esteira desconectada'];
 
 export class WorkoutSession {
   private listeners = new Set<() => void>();
@@ -134,6 +145,10 @@ export class WorkoutSession {
   private restDone = false;
   private checkpoint = 0;
   private waitForStop = false;
+  /** A trilha por segundo do treino em curso, fora do estado React. */
+  private track: TrackRecorder | null = null;
+  /** Se a trilha de um treino encerrado tem lacunas, lida uma vez só. */
+  private readonly gaps = new Map<string, boolean>();
   private state = {
     profile: readProfile(),
     coach: '',
@@ -145,7 +160,15 @@ export class WorkoutSession {
     error: '',
   };
 
-  constructor(private treadmill: TreadmillStore) {
+  /**
+   * `strap` é a cinta de batimentos: a sessão declara a ela o que quer (passos,
+   * gravação, alerta, perfil, FIT a baixar) e recebe a gravação começada e o
+   * FIT baixado. Sem ela (testes, prévia) o treino funciona igual.
+   */
+  constructor(
+    private treadmill: TreadmillStore,
+    private strap?: StrapLink,
+  ) {
     // As sessões da esteira simulada valem só enquanto o app está aberto: não
     // aparecem em tela nenhuma, então não há por que guardá-las.
     clearSource('demo');
@@ -155,6 +178,123 @@ export class WorkoutSession {
       saveWorkout(recovered);
       return recovered;
     });
+    try {
+      pruneTracks();
+    } catch {
+      // Trilhas antigas a mais não atrapalham: a limpeza fica para a próxima abertura.
+    }
+    this.wish();
+  }
+
+  /**
+   * O que o treino quer da cinta. No treino guiado: gravação na memória dela e
+   * alerta de FC no teto da faixa do dia + 5 bpm. Num treino livre (ou na
+   * esteira simulada) só os passos. Sem treino: o perfil acertado e o FIT dos
+   * treinos com lacunas baixado.
+   */
+  private wish() {
+    if (!this.strap) return;
+    const { active, profile } = this.state;
+    const guided = !!active?.plan && active.source === 'ble';
+    const workout: StrapWishes['workout'] = active
+      ? {
+          id: active.id,
+          startedAt: active.started,
+          guided,
+          alertBpm: guided
+            ? dailyTarget(active.plan, active.profile, active.hr).high + STRAP_ALERT_ABOVE_BPM
+            : null,
+        }
+      : null;
+    const strapProfile: StrapWishes['profile'] = profile
+      ? {
+          weightG: Math.round(profile.weightKg * 1000),
+          heightMm: Math.round(profile.heightCm * 10),
+          age: profile.age,
+          // A FC máxima em uso, a mesma que monta a faixa do próximo treino.
+          maxHr: heartProfile(profile, this.sameSource('ble')).max,
+        }
+      : null;
+    this.strap.want({ workout, profile: strapProfile, backfill: this.backfillJobs() });
+  }
+
+  /**
+   * Os treinos que o FIT da cinta pode completar: com gravação começada pelo
+   * app, ainda sem arquivo, dos últimos 7 dias, e com lacunas na trilha (ou
+   * encerrados com o app morto ou a esteira caída).
+   */
+  private backfillJobs() {
+    const since = Date.now() - BACKFILL_DAYS * 86_400_000;
+    const jobs: { workoutId: string; recordedAt: number }[] = [];
+    for (const w of this.state.history) {
+      const recordedAt = w.strap?.recordedAt;
+      if (jobs.length >= BACKFILL_MAX) break;
+      if (w.source !== 'ble' || !recordedAt || w.strap?.file || !w.ended || w.started < since) continue;
+      if (BROKEN_ENDINGS.includes(w.reason) || this.hasGaps(w)) jobs.push({ workoutId: w.id, recordedAt });
+    }
+    return jobs;
+  }
+
+  private hasGaps(w: Workout) {
+    let gaps = this.gaps.get(w.id);
+    if (gaps === undefined) {
+      try {
+        const track = readTrack(w.id);
+        gaps = trackGaps(track, trackSpan(w, track.at(-1)?.second ?? -1)) > 0;
+      } catch {
+        gaps = false;
+      }
+      this.gaps.set(w.id, gaps);
+    }
+    return gaps;
+  }
+
+  /**
+   * A cinta começou a gravar este treino: o horário fica no registro, para
+   * casar o FIT depois. O primeiro horário vale: se a gravação recomeçar (a
+   * cinta pode encerrá-la sozinha numa queda do link, o que não foi medido), o
+   * primeiro arquivo é o que tem a maior parte do treino.
+   */
+  private recorded(workoutId: string, recordedAt: number) {
+    try {
+      const active = this.state.active;
+      if (active?.id === workoutId) {
+        if (active.strap?.recordedAt) return;
+        const next = { ...active, strap: { ...active.strap, recordedAt } };
+        saveWorkout(next);
+        this.update({ active: next });
+        return;
+      }
+      const done = this.state.history.find((w) => w.id === workoutId);
+      if (!done || done.strap?.recordedAt) return;
+      const next = { ...done, strap: { ...done.strap, recordedAt } };
+      saveWorkout(next);
+      this.update({ history: this.state.history.map((w) => (w.id === workoutId ? next : w)) });
+    } catch {
+      this.update({ error: SAVE_ERROR });
+    }
+  }
+
+  /**
+   * Chegou o FIT de um treino encerrado: só a trilha é preenchida (BPM e
+   * cadência, marcados como vindos do FIT). Os agregados do treino não mudam:
+   * o FIT não traz velocidade nem inclinação.
+   */
+  private backfilled(job: BackfillJob) {
+    const w = this.state.history.find((h) => h.id === job.workoutId);
+    if (!w || !w.ended) return;
+    try {
+      const last = readTrack(w.id).at(-1)?.second ?? -1;
+      const filled = fillTrackFromFit(w.id, w.started, trackSpan(w, last), job.records);
+      const next = { ...w, strap: { ...w.strap, file: job.file, backfilledSeconds: filled } };
+      saveWorkout(next);
+      this.gaps.delete(w.id);
+      this.update({ history: this.state.history.map((h) => (h.id === w.id ? next : h)) });
+    } catch {
+      this.update({ error: SAVE_ERROR });
+      return;
+    }
+    this.wish();
   }
 
   subscribe = (fn: () => void) => {
@@ -169,14 +309,28 @@ export class WorkoutSession {
     this.listeners.forEach((fn) => fn());
   }
 
-  connect = () =>
-    this.treadmill.subscribe(() => {
+  /**
+   * Passa a ouvir a esteira e a cinta (a gravação começada e o FIT baixado).
+   * Devolve a função que solta tudo, chamada quando a sessão é descartada.
+   */
+  connect = () => {
+    const offTreadmill = this.treadmill.subscribe(() => {
       try {
         this.receive();
       } catch {
         this.update({ error: SAVE_ERROR });
       }
     });
+    const offRecorded = this.strap?.onRecorded(({ workoutId, recordedAt }) =>
+      this.recorded(workoutId, recordedAt),
+    );
+    const offBackfill = this.strap?.onBackfill((job) => this.backfilled(job));
+    return () => {
+      offTreadmill();
+      offRecorded?.();
+      offBackfill?.();
+    };
+  };
 
   minimizeCue(key: string | null) {
     this.update({ minimizedCue: key });
@@ -185,6 +339,7 @@ export class WorkoutSession {
   setProfile(profile: Profile) {
     saveProfile(profile);
     this.update({ profile });
+    this.wish();
   }
 
   /**
@@ -194,6 +349,8 @@ export class WorkoutSession {
   reset() {
     this.resetReview();
     clearData();
+    this.track = null;
+    this.gaps.clear();
     this.previous = null;
     // Com a lona andando, um registro novo só começa depois de uma parada.
     this.waitForStop = true;
@@ -207,12 +364,15 @@ export class WorkoutSession {
       assessing: [],
       error: '',
     });
+    this.wish();
   }
 
   /** Apaga um registro encerrado do histórico. O treino em curso não está nele. */
   remove(id: string) {
     deleteWorkout(id);
+    this.gaps.delete(id);
     this.update({ history: this.state.history.filter((w) => w.id !== id) });
+    this.wish();
   }
 
   private sameSource(source: Workout['source']) {
@@ -228,12 +388,14 @@ export class WorkoutSession {
     // Quem já vinha andando num registro livre não está mais em repouso: vale
     // a leitura que aquele registro fez, se fez.
     const walking = !!active && active.totals.movingMs > 0;
-    if (active) this.finish('Início do treino guiado');
+    // Sem declarar "sem treino" à cinta no meio: o pedido do treino novo vem logo abaixo.
+    if (active) this.finish('Início do treino guiado', false);
     const workout = {
       ...newWorkout(profile, machine.mode, plan, heartProfile(profile, this.sameSource(machine.mode))),
       restBpm: walking ? (active.restBpm ?? null) : null,
     };
     saveWorkout(workout);
+    this.track = new TrackRecorder(workout.id, workout.started);
     this.resetReview();
     this.restDone = walking;
     this.stageSince = workout.started;
@@ -247,6 +409,7 @@ export class WorkoutSession {
       workout.started,
     );
     this.update({ active: workout, guidance, minimizedCue: null, coach: '', error: '' });
+    this.wish();
   }
 
   private receive() {
@@ -283,6 +446,9 @@ export class WorkoutSession {
     if (!this.state.active && moving && !this.waitForStop && this.state.profile) this.start(null);
     const w = this.state.active;
     if (w) {
+      // A trilha anda no relógio, com a lona parada ou andando.
+      if (this.track?.workoutId !== w.id) this.track = new TrackRecorder(w.id, w.started);
+      this.track.add(sample);
       const totals = accumulate(w.totals, sample, this.previous);
       const elapsed = Math.floor(totals.movingMs / 1000);
       const cue = w.plan && currentCue(w.plan, elapsed);
@@ -307,6 +473,13 @@ export class WorkoutSession {
       if (sample.at - this.checkpoint >= 10000) {
         saveWorkout(next);
         this.checkpoint = sample.at;
+        try {
+          this.track.flush();
+        } catch {
+          // A trilha é à parte: uma falha nela não pode parar o treino. Os
+          // minutos não gravados ficam na memória para o próximo checkpoint.
+          this.update({ error: SAVE_ERROR });
+        }
       }
       const previous = this.state.guidance;
       let coach = this.state.coach;
@@ -808,10 +981,17 @@ export class WorkoutSession {
     return true;
   }
 
-  finish(reason: string) {
+  /** Encerra o treino em curso. `wish` falso só quando outro começa em seguida. */
+  finish(reason: string, wish = true) {
     if (!this.state.active) return;
     const done = { ...this.state.active, ended: Date.now(), reason };
     saveWorkout(done);
+    try {
+      this.track?.flush();
+    } catch {
+      // O registro já está salvo; a trilha perde só os últimos segundos.
+    }
+    this.track = null;
     this.resetReview();
     this.waitForStop = true;
     const kcal = energyKcal(done);
@@ -823,6 +1003,7 @@ export class WorkoutSession {
       coach: kcal ? 'Treino encerrado · cerca de ' + kcal + ' kcal' : '',
       history: [done, ...this.state.history],
     });
+    if (wish) this.wish();
     void this.evaluate(done);
   }
 
@@ -845,17 +1026,34 @@ export class WorkoutSession {
               ' leituras de BPM. A avaliação precisa de pelo menos 3 minutos e 10 leituras.',
           }
         : await assess(w, history);
-      // Os dados podem ter sido apagados enquanto a IA respondia.
-      if (!this.state.history.some((h) => h.id === w.id)) return;
-      const done = { ...w, estimate };
+      // Os dados podem ter sido apagados enquanto a IA respondia. E o registro
+      // pode ter mudado nesse meio-tempo (o horário da gravação na cinta, o FIT
+      // baixado): a avaliação entra no que está no histórico agora.
+      const current = this.state.history.find((h) => h.id === w.id);
+      if (!current) return;
+      const done = { ...current, estimate };
       saveWorkout(done);
       this.update({ history: this.state.history.map((h) => (h.id === done.id ? done : h)) });
+      // A previsão nova pode mudar a FC máxima em uso, que vai para a cinta.
+      this.wish();
     } catch (e) {
       this.update({ error: e instanceof Error ? e.message : 'Avaliação pendente.' });
     } finally {
       this.update({ assessing: this.state.assessing.filter((id) => id !== w.id) });
     }
   }
+}
+
+/**
+ * Até onde vai a trilha de um treino encerrado, em segundos de relógio desde o
+ * início. Com o app morto, o fim guardado é o início mais o tempo em
+ * movimento (não se sabe a hora real), então vale o maior entre ele, o último
+ * segundo gravado e a duração do plano com 15 min de folga para as pausas.
+ */
+function trackSpan(w: Workout, lastSecond: number) {
+  const wall = ((w.ended ?? w.started) - w.started) / 1000;
+  if (w.reason !== 'App interrompido') return Math.max(wall, lastSecond + 1);
+  return Math.max(wall, lastSecond + 1, w.plan ? w.plan.minutes * 60 + 900 : 0);
 }
 
 /** O que o painel mostra quando a revisão não muda a carga. */
