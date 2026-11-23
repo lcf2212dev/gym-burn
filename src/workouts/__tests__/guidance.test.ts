@@ -1,9 +1,10 @@
-import { advanceGuidance, pendingAction, PULSE_READINGS, type Guidance } from '../guidance';
+import { advanceGuidance, cueKey, pendingAction, PULSE_READINGS, type Guidance } from '../guidance';
 import {
   changeLabel,
   correctedStage,
   correction,
   correctionBpm,
+  livePulse,
   MAX_RAISE_METS,
   pulseFeatures,
   pulseWindow,
@@ -238,6 +239,35 @@ it('com batimentos e ajuste em aberto, o aviso é o do pedido mais recente', () 
   expect(pendingAction({ ...open, bpmReceived: true, adjusted: true })).toBeNull();
 });
 
+it('a chave do aviso muda a cada pedido de batimentos e a cada vez que os alvos passam a valer', () => {
+  const g: Guidance = {
+    index: 1,
+    speedReached: false,
+    inclineReached: false,
+    adjusted: false,
+    targetsSince: 300000,
+    bpmSlot: 1,
+    bpmRequestedAt: 240000,
+    bpmCount: 0,
+    bpmAt: null,
+    bpmReceived: true,
+  };
+  const stage = work;
+  const key = cueKey('w', g, stage);
+  expect(key).toBe('w/1/adjust@300000/' + stage.speed + '/' + stage.incline);
+  // O mesmo aviso, na amostra seguinte, tem a mesma chave: minimizado, fica minimizado.
+  expect(cueKey('w', { ...g, speedReached: true }, stage)).toBe(key);
+  // O app pede de novo a redução que não chegou ao painel: os alvos valem de agora, e a chave é outra.
+  expect(cueKey('w', { ...g, targetsSince: 330000 }, stage)).not.toBe(key);
+  // O pedido de batimentos usa o horário dele.
+  expect(cueKey('w', { ...g, bpmReceived: false, bpmRequestedAt: 360000 }, stage)).toBe(
+    'w/1/bpm@360000/' + stage.speed + '/' + stage.incline,
+  );
+  // Sem aviso em aberto, não há chave.
+  expect(cueKey('w', { ...g, adjusted: true }, stage)).toBeNull();
+  expect(cueKey('w', null, stage)).toBeNull();
+});
+
 it('o pedido da FC de repouso caduca quando a janela fecha sem leitura', () => {
   const asked = advanceGuidance(null, { ...cue, measure: true }, sample(100, 1, 0), 100);
   expect(pendingAction(asked)).toBe('bpm');
@@ -303,6 +333,31 @@ it('com a cinta a janela é o último minuto inteiro, e um pico de segundos não
   // A cinta caiu e a pessoa segurou o sensor: valem as regras do sensor de mão.
   const mixed = [...strap(0, flat(60, 110)), ...pulses(66000, [120, 119, 112, 113, 112, 113])];
   expect(pulseWindow(mixed, 0, 71000).map((r) => r.bpm)).toEqual([112, 113, 112, 113]);
+});
+
+it('a leitura do momento é a mediana dos 5 últimos segundos da cinta, com a subida em 30 s', () => {
+  const strap = (start: number, values: (number | null)[], speed = work.speed): TreadmillSample[] =>
+    values.map((bpm, i) => ({ ...sample(start + i * 1000, speed, work.incline, bpm), heartRateSource: 'strap' }));
+  const flat = (seconds: number, bpm: number | null) => Array.from({ length: seconds }, () => bpm);
+  // 40 s em 160 e depois 3 leituras em 172: nos últimos 5 s (160, 160, 172, 172, 172) a mediana já passou de 170.
+  const climbing = strap(0, [...flat(40, 160), 172, 172, 172]);
+  expect(livePulse(climbing, 42000)).toEqual({ bpm: 172, rise: 12 });
+  // Com duas leituras novas a mediana ainda é a de antes.
+  expect(livePulse(climbing.slice(0, 42), 41000)).toEqual({ bpm: 160, rise: 0 });
+  // Sem 3 leituras entre 35 e 25 s atrás não há subida a medir: ela vale 0.
+  expect(livePulse(strap(0, [160, 165, 170, 172, 174]), 4000)).toEqual({ bpm: 170, rise: 0 });
+  // A cinta lê uma vez por segundo e as amostras entre duas leituras vêm sem número: contam só as leituras.
+  const sparse = strap(0, [...flat(40, 160), 171, null, 171, null, 171]);
+  expect(livePulse(sparse, 44000)).toEqual({ bpm: 171, rise: 11 });
+  // Menos de 3 leituras nos últimos 5 s não bastam.
+  expect(livePulse(strap(0, [...flat(40, 160), null, null, null, 171, 171]), 44000)).toBeNull();
+  // Só com a cinta: a leitura mais recente do sensor de mão não vale, nem uma de mais de 5 s.
+  const grip = pulses(0, [160, 161, 162, 163, 164, 165]);
+  expect(livePulse(grip, 5000)).toBeNull();
+  expect(livePulse([...climbing, ...pulses(43000, [150])], 43000)).toBeNull();
+  expect(livePulse(climbing, 48000)).toBeNull();
+  // Com a lona parada a leitura não conta.
+  expect(livePulse(strap(0, [...flat(40, 160), 172, 172, 172], 0), 42000)).toBeNull();
 });
 
 it('resume as leituras em mediana, tendência e posição na faixa', () => {
@@ -374,8 +429,9 @@ it('dentro da faixa a carga só ganha os bpm que cabem até o teto, e nada quand
   // Caindo, ou no sensor de mão (poucas leituras), 1 bpm é ruído.
   expect(raiseRoom(minute(111, 110), load)).toBeGreaterThan(0);
   expect(raiseRoom(grip([109, 109, 109, 110, 110, 110]), load)).toBeGreaterThan(0);
-  // A carga só sobe em etapa principal, nos alvos, há 90 s ou mais.
+  // A carga só sobe em etapa principal que não seja um tiro, nos alvos, há 90 s ou mais.
   expect(raiseRoom(inside, { ...load, easy: true })).toBe(0);
+  expect(raiseRoom(inside, { ...load, short: true })).toBe(0);
   expect(raiseRoom(inside, { ...load, reached: false })).toBe(0);
   expect(raiseRoom(inside, { ...load, secondsAtLoad: 89 })).toBe(0);
   expect(raiseRoom(inside, { ...load, secondsAtLoad: 90 })).toBe(3);
@@ -403,6 +459,10 @@ it('fora da faixa o app corrige sozinho: alivia acima do teto sempre e sobe abai
   expect(correction(falling, load)).toBe('subir');
   expect(correction(steady(90), { ...load, secondsAtLoad: 90 })).toBe('subir');
   expect(correction(steady(90), { ...load, easy: true })).toBeNull();
+  // Num tiro (bloco de até 5 min) a FC ainda sobe até o fim: abaixo do piso a carga não sobe no meio.
+  expect(correction(steady(90), { ...load, short: true })).toBeNull();
+  // Acima do teto o tiro é aliviado como qualquer etapa.
+  expect(correction(steady(130), { ...load, short: true })).toBe('aliviar');
   expect(correction(steady(90), { ...load, reached: false })).toBeNull();
   expect(correction(steady(90), { ...load, secondsAtLoad: 89 })).toBeNull();
   expect(correction(rising, load)).toBeNull();

@@ -43,3 +43,9 @@ yarn-error.*
 
 # Artefatos locais de execução / capturas de tela
 /.phone/
+
+# Python (tools/)
+__pycache__/
+
+# Treinos baixados da cinta (tools/xoss/baixar.py)
+/tools/xoss/fixtures/

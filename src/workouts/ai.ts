@@ -5,9 +5,13 @@ import {
   assessPrompt,
   parseAssess,
   parsePlan,
+  parseReview,
   planPrompt,
   PROMPT_VERSION,
+  reviewPrompt,
   type Prompt,
+  type ReviewInput,
+  type ReviewReply,
 } from './prompts';
 import { saveCall } from './storage';
 import { sessionPlan, type Session } from './week';
@@ -23,22 +27,30 @@ export async function saveApiKey(value: string) {
   });
 }
 
-export type Kind = 'plan' | 'assess';
+export type Kind = 'plan' | 'review' | 'assess';
 
-// As duas chamadas usam o mesmo modelo, sempre com raciocínio ligado. Muda o
-// esforço: `high` para montar o plano e `max` na avaliação, que roda depois do
-// treino e pode demorar. Durante o treino a IA não é chamada: o ajuste da
-// carga é conta do app.
+// As três chamadas usam o mesmo modelo, sempre com raciocínio ligado. Muda o
+// esforço: `high` para montar o plano, `low` na revisão da carga durante o
+// treino e `max` na avaliação, que roda depois do treino e pode demorar.
+//
+// A revisão acontece a cada 30 s e a resposta só vale enquanto as leituras
+// enviadas ainda dizem o que está acontecendo: ela tem 12 s e nenhuma nova
+// tentativa. Sem resposta, o app segue com a própria conta, e a revisão
+// seguinte já vem com leituras novas. A trava que alivia a carga acima do teto
+// não depende da IA.
 //
 // Não vai `temperature`: a API da DeepSeek ignora esse parâmetro com raciocínio
 // ligado. O único controle de amostragem que vale nesse modo é `top_p`, aceito
 // de 0,95 a 1.
 const MODEL = 'deepseek-flash';
 const MAX_TOKENS = 393216; // o máximo aceito pela API
-const RETRIES = 3;
-const settings: Record<Kind, { effort: 'high' | 'max'; timeoutMs: number }> = {
-  plan: { effort: 'high', timeoutMs: 300_000 },
-  assess: { effort: 'max', timeoutMs: 2_400_000 },
+const settings: Record<
+  Kind,
+  { effort: 'low' | 'high' | 'max'; timeoutMs: number; retries: number }
+> = {
+  plan: { effort: 'high', timeoutMs: 300_000, retries: 3 },
+  review: { effort: 'low', timeoutMs: 12_000, retries: 0 },
+  assess: { effort: 'max', timeoutMs: 2_400_000, retries: 3 },
 };
 
 /** Erro que não muda ao repetir a chamada: chave, saldo ou requisição inválida. */
@@ -62,6 +74,38 @@ const wait = (ms: number, signal?: AbortSignal) =>
     });
   });
 
+/**
+ * A chave do armazenamento seguro sem esperar mais que `ms`, nem depois de
+ * quem pediu desistir: a revisão durante o treino não pode ficar presa nela.
+ */
+function keyWithin(ms: number, signal?: AbortSignal) {
+  return new Promise<string | null>((resolve, reject) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+    };
+    const cancel = () => {
+      done();
+      reject(new Error('Chamada cancelada.'));
+    };
+    const timer = setTimeout(() => {
+      done();
+      reject(new Error('A chave DeepSeek não pôde ser lida a tempo.'));
+    }, ms);
+    signal?.addEventListener('abort', cancel);
+    apiKey().then(
+      (key) => {
+        done();
+        resolve(key);
+      },
+      (error) => {
+        done();
+        reject(error);
+      },
+    );
+  });
+}
+
 /** O objeto JSON da resposta, mesmo que venha cercado de texto ou de marcação. */
 export function extractJson(content: unknown): unknown {
   if (typeof content !== 'string' || !content.trim())
@@ -77,8 +121,14 @@ export function extractJson(content: unknown): unknown {
 
 type Reply = { content: unknown; usage?: object };
 
-async function post(key: string, kind: Kind, prompt: Prompt, signal?: AbortSignal): Promise<Reply> {
-  const { effort, timeoutMs } = settings[kind];
+async function post(
+  key: string,
+  kind: Kind,
+  prompt: Prompt,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<Reply> {
+  const { effort } = settings[kind];
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const cancel = () => controller.abort();
@@ -113,6 +163,8 @@ async function post(key: string, kind: Kind, prompt: Prompt, signal?: AbortSigna
       throw new Error('A DeepSeek interrompeu a resposta (' + choice?.finish_reason + ').');
     return { content: choice.message?.content, usage: reply.usage };
   } catch (error) {
+    // Quem pediu desistiu (a trava, a troca de etapa): no diário isso não é falha de conexão.
+    if (signal?.aborted) throw new Error('Chamada cancelada.');
     if (controller.signal.aborted || error instanceof TypeError)
       throw new Error('Falha de conexão com a DeepSeek. Tente novamente.');
     throw error;
@@ -134,10 +186,11 @@ function record(kind: Kind, entry: Record<string, unknown>, journal: boolean) {
 }
 
 /**
- * Envia um prompt e devolve a resposta já validada por `parse`. Repete até 3
- * vezes em falha de rede, erro do servidor, resposta vazia, cortada ou fora do
- * formato; a doc da DeepSeek avisa que o modo JSON às vezes devolve conteúdo em
- * branco. Cada tentativa vai para o diário.
+ * Envia um prompt e devolve a resposta já validada por `parse`. O plano e a
+ * avaliação repetem até 3 vezes em falha de rede, erro do servidor, resposta
+ * vazia, cortada ou fora do formato; a doc da DeepSeek avisa que o modo JSON
+ * às vezes devolve conteúdo em branco. A revisão durante o treino não repete.
+ * Cada tentativa vai para o diário; sem chave nada é enviado nem gravado.
  */
 export async function callModel<T>(
   kind: Kind,
@@ -145,13 +198,17 @@ export async function callModel<T>(
   parse: (json: unknown) => T,
   { signal, onAttempt, journal = true }: CallOptions = {},
 ): Promise<T> {
-  const key = await apiKey();
+  // A leitura da chave conta no prazo da primeira tentativa: na revisão são 12 s ao todo.
+  const { retries, timeoutMs } = settings[kind];
+  const begun = Date.now();
+  const key = await keyWithin(timeoutMs, signal);
   if (!key) throw new Error('Configure a chave DeepSeek em Perfil.');
+  const attempts = retries + 1;
   let failure = new Error('Chamada cancelada.');
-  for (let attempt = 1; attempt <= RETRIES + 1 && !signal?.aborted; attempt++) {
+  for (let attempt = 1; attempt <= attempts && !signal?.aborted; attempt++) {
     if (attempt > 1) await wait(1000 * 2 ** (attempt - 1), signal);
     if (signal?.aborted) break;
-    onAttempt?.(attempt, RETRIES + 1);
+    onAttempt?.(attempt, attempts);
     const started = Date.now();
     const entry: Record<string, unknown> = {
       version: PROMPT_VERSION,
@@ -160,7 +217,8 @@ export async function callModel<T>(
       user: prompt.user,
     };
     try {
-      const reply = await post(key, kind, prompt, signal);
+      const budget = attempt === 1 ? Math.max(1, timeoutMs - (Date.now() - begun)) : timeoutMs;
+      const reply = await post(key, kind, prompt, budget, signal);
       Object.assign(entry, { content: reply.content, usage: reply.usage });
       const value = parse(extractJson(reply.content));
       record(kind, { ...entry, ms: Date.now() - started, ok: true }, journal);
@@ -195,4 +253,13 @@ export async function generatePlan(
 export function assess(w: Workout, history: Workout[], options?: CallOptions): Promise<Estimate> {
   const input = { workout: w, history };
   return callModel('assess', assessPrompt(input), parseAssess(assessBounds(input)), options);
+}
+
+/**
+ * A revisão da carga durante o treino. As decisões aceitas (`allowed`) e os
+ * limites vêm calculados pelo app; quem aplica a resposta, e confere se ela
+ * ainda vale, é a sessão.
+ */
+export function reviewLoad(input: ReviewInput, options?: CallOptions): Promise<ReviewReply> {
+  return callModel('review', reviewPrompt(input), parseReview(input.allowed), options);
 }

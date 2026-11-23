@@ -16,7 +16,7 @@ import {
 } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
-import { pendingAction, PULSE_READINGS } from '@/workouts/guidance';
+import { cueKey, pendingAction, PULSE_READINGS } from '@/workouts/guidance';
 import { REST_WINDOW_SECONDS } from '@/workouts/model';
 import { useTreadmill } from '@/treadmill/treadmill-context';
 import { formatDecimal } from '@/utils/format';
@@ -98,13 +98,9 @@ export function GuidanceSheet() {
   const reducedMotion = useReducedMotion();
   const action = pendingAction(g);
   const stage = g && active?.plan?.stages[g.index];
-  // Cada pedido de batimentos da etapa é um aviso novo: reabre e toca de novo,
-  // mesmo que o anterior tenha sido minimizado.
-  const request = action === 'bpm' ? '@' + g?.bpmRequestedAt : '';
-  const key =
-    action && active && g
-      ? active.id + '/' + g.index + '/' + action + request + '/' + stage?.speed + '/' + stage?.incline
-      : null;
+  // Cada pedido de batimentos e cada ajuste é um aviso novo: reabre e toca de
+  // novo, mesmo que o anterior tenha sido minimizado.
+  const key = active ? cueKey(active.id, g, stage ?? undefined) : null;
   const visible = !!key && key !== minimized;
   const player = useAudioPlayer(require('@/assets/audio/cue.wav'));
   const { isLoaded } = useAudioPlayerStatus(player);

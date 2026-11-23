@@ -18,7 +18,8 @@ function db() {
 
 /** Uma chamada à IA como ficou no diário: o que foi enviado, o que voltou e quanto demorou. */
 export type AiCall = { id: number; at: number; kind: string; data: Record<string, unknown> };
-const JOURNAL_SIZE = 200;
+/** A revisão durante o treino faz umas 90 chamadas por sessão: cabem algumas sessões inteiras. */
+const JOURNAL_SIZE = 600;
 
 export function saveCall(kind: string, data: object) {
   const { lastInsertRowId } = db().runSync(

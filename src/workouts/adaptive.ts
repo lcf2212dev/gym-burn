@@ -66,6 +66,14 @@ export const STRAP_WINDOW_MS = 60_000;
 /** O mínimo de cinta para uma revisão: 20 leituras espalhadas por 40 s. */
 const STRAP_READINGS = 20;
 const STRAP_SPAN_MS = 40_000;
+/**
+ * Um bloco de esforço de até 5 minutos é um tiro: a FC ainda está subindo
+ * quando ele acaba, e a conta de um aumento, que supõe a FC estabilizada, leva
+ * a pessoa acima do teto antes do fim.
+ */
+export const SHORT_BLOCK_SECONDS = 300;
+/** Maior alívio que a IA pode pedir numa revisão, em bpm. */
+export const MAX_REDUCE_BPM = 15;
 
 /**
  * As leituras que valem para rever a carga agora, da mais antiga para a mais
@@ -104,6 +112,43 @@ export function pulseWindow(samples: TreadmillSample[], stageSince: number, now:
     if (contact > 2 && s.at >= now - GRIP_WINDOW_MS) kept.push(reading(s));
   }
   return kept.length >= REVIEW_READINGS ? kept.slice(-10) : [];
+}
+
+/**
+ * A leitura do momento são os 5 últimos segundos da cinta. O sensor de mão lê
+ * em pegadas, e nas primeiras leituras de cada uma ele ainda está estabilizando:
+ * sem a cinta não há leitura do momento.
+ */
+const LIVE_WINDOW_MS = 5000;
+/** A subida do BPM compara o momento com a mediana de 35 a 25 s atrás: 30 s antes. */
+const RISE_FROM_MS = 35_000;
+const RISE_TO_MS = 25_000;
+const LIVE_READINGS = 3;
+
+/** O BPM do momento e quanto ele subiu nos últimos 30 s. */
+export type Live = { bpm: number; rise: number };
+
+/**
+ * O BPM de agora, para a trava que alivia a carga acima do teto sem esperar a
+ * mediana do minuto. Só vale com a cinta: a leitura válida mais recente (lona
+ * andando) tem de ser dela e ter no máximo 5 s. `bpm` é a mediana das leituras
+ * da cinta dos últimos 5 s (pelo menos 3); `rise`, essa mediana menos a das
+ * leituras de 35 a 25 s atrás (0 sem 3 leituras ali). As leituras não se
+ * limitam à etapa: no começo de um bloco a subida vem do trecho anterior.
+ */
+export function livePulse(samples: TreadmillSample[], now: number): Live | null {
+  const valid = samples.filter(
+    (s) => s.at <= now && (s.speedKmh ?? 0) > 0 && validBpm(s.heartRateBpm),
+  );
+  const last = valid[valid.length - 1];
+  if (!last || now - last.at > LIVE_WINDOW_MS || last.heartRateSource !== 'strap') return null;
+  const strap = valid.filter((s) => s.heartRateSource === 'strap');
+  const bpmOf = (list: TreadmillSample[]) => list.map((s) => s.heartRateBpm as number);
+  const recent = bpmOf(strap.filter((s) => s.at > now - LIVE_WINDOW_MS));
+  if (recent.length < LIVE_READINGS) return null;
+  const bpm = median(recent);
+  const before = bpmOf(strap.filter((s) => s.at >= now - RISE_FROM_MS && s.at <= now - RISE_TO_MS));
+  return { bpm, rise: before.length >= LIVE_READINGS ? bpm - median(before) : 0 };
 }
 
 export type Features = {
@@ -158,11 +203,16 @@ export type Load = {
   secondsAtLoad: number;
   /** Faltam 2 minutos ou menos e não há outro bloco de esforço depois: um aumento não teria tempo de fazer efeito. */
   closing?: boolean;
+  /** Bloco de esforço de até 5 minutos, um tiro: a carga não sobe no meio dele. */
+  short?: boolean;
 };
 
-/** A carga pode subir: bloco de esforço, com a esteira nos alvos há tempo suficiente. */
+/**
+ * A carga pode subir: bloco de esforço que não seja um tiro, com a esteira nos
+ * alvos há tempo suficiente.
+ */
 const raisable = (load: Load) =>
-  !load.easy && load.reached && load.secondsAtLoad >= STEADY_SECONDS;
+  !load.easy && !load.short && load.reached && load.secondsAtLoad >= STEADY_SECONDS;
 
 /** O que o app faz com uma leitura fora da faixa. */
 export type Correction = 'aliviar' | 'subir';
@@ -172,9 +222,9 @@ export type Correction = 'aliviar' | 'subir';
  * alivia em qualquer etapa, sem esperar a frequência cardíaca estabilizar; só
  * não empilha alívios: nos 3 minutos depois de um (`sinceRelief`, em
  * segundos), outro só sai com 3 bpm ou mais de excesso e a FC sem cair. Abaixo
- * do piso ele sobe a carga nos blocos de esforço, com a esteira nos alvos há
- * 90 s e o BPM sem disparar: subir a carga com a frequência cardíaca ainda
- * subindo é o que a leva acima do teto.
+ * do piso ele sobe a carga nos blocos de esforço que não são tiros, com a
+ * esteira nos alvos há 90 s e o BPM sem disparar: subir a carga com a
+ * frequência cardíaca ainda subindo é o que a leva acima do teto.
  */
 export function correction(
   features: Features,
@@ -206,12 +256,13 @@ export function correctionBpm(kind: Correction, features: Features, zone: Zone) 
 /**
  * O ajuste fino dentro da faixa: quantos bpm a carga pode ganhar agora sem
  * passar do teto, ou 0 quando é hora de manter. Só vale num bloco de esforço
- * com a esteira nos alvos há 90 s e a FC sem subir; com a cinta, 1 bpm de
- * diferença entre as duas metades do minuto já conta como subida. Com menos de
- * 4 minutos na carga, 3 bpm ficam reservados para o que a FC ainda sobe sozinha. Se o que
- * sobra já está no alvo (até 3 bpm do teto), nada muda; senão a carga sobe o
- * que couber, deixando até o teto 1 bpm ou um quinto da distância. Um degrau
- * que passaria disso não é dado: é `correctedStage` que procura um que caiba.
+ * que não seja um tiro, com a esteira nos alvos há 90 s e a FC sem subir; com
+ * a cinta, 1 bpm de diferença entre as duas metades do minuto já conta como
+ * subida. Com menos de 4 minutos na carga, 3 bpm ficam reservados para o que a
+ * FC ainda sobe sozinha. Se o que sobra já está no alvo (até 3 bpm do teto),
+ * nada muda; senão a carga sobe o que couber, deixando até o teto 1 bpm ou um
+ * quinto da distância. Um degrau que passaria disso não é dado: é
+ * `correctedStage` que procura um que caiba.
  */
 export function raiseRoom(features: Features, load: Load) {
   // Com o minuto inteiro da cinta a mediana de cada metade é firme: 1 bpm entre

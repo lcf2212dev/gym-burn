@@ -117,8 +117,8 @@ export default function ProfileScreen() {
         </View>
         <Text style={local.note}>
           Seu perfil fica neste celular. Ao usar a IA, a DeepSeek recebe sua idade e o resumo dos
-          treinos, com as frequências de repouso e máxima estimadas. Durante o treino nada é
-          enviado: o ajuste da carga é feito no próprio celular.
+          treinos, com as frequências de repouso e máxima estimadas. Durante o treino guiado, a IA
+          recebe BPM, velocidade e inclinação recentes para rever a carga.
         </Text>
       </Card>
       {hr && (

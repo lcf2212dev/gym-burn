@@ -1,14 +1,24 @@
 // Prompts enviados à DeepSeek e validação das respostas. Tudo aqui é função
 // pura, sem Expo, para ser testado direto e usado pelos cenários de diagnóstico.
 //
-// Três regras valem para os dois prompts: o modelo recebe números já
+// Três regras valem para os três prompts: o modelo recebe números já
 // calculados pelo app (não precisa comparar nem fazer conta), cada opção tem
 // definição escrita, e o formato de saída é descrito por tipo, sem exemplo
 // preenchido que puxe a resposta para um valor.
 //
-// Durante o treino a IA não é consultada: o ajuste da carga é conta do app
-// (`adaptive.ts`), feita na hora e sem depender de internet.
+// Durante o treino a IA revê a carga a cada 30 s, mas não é ela que segura o
+// teto: a trava do aparelho alivia sozinha quando a leitura do momento passa
+// dele, e as regras de `adaptive.ts` decidem quando a IA não responde.
 
+import type { TreadmillSample } from '@/treadmill/types';
+import {
+  MAX_REDUCE_BPM,
+  RELIEF_SETTLE_SECONDS,
+  SHORT_BLOCK_SECONDS,
+  type Features,
+  type Live,
+  type Load,
+} from './adaptive';
 import {
   acsm,
   evidence,
@@ -19,6 +29,7 @@ import {
   median,
   RUN_FROM_KMH,
   RUN_MAX_INCLINE_PERCENT,
+  validBpm,
   validLoad,
   validSession,
   WALK_TOP_KMH,
@@ -43,7 +54,7 @@ import {
 } from './physiology';
 import { describe, sessionMinutes, zones, type Session } from './week';
 
-export const PROMPT_VERSION = '7';
+export const PROMPT_VERSION = '8';
 export type Prompt = { system: string; user: object };
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -456,6 +467,211 @@ export const parsePlan =
     if (!sameLoad(choice, want) && !near)
       throw new Error('A IA não fechou a conta da carga de hoje. Tente novamente.');
     return choice;
+  };
+
+// --- Revisão durante o treino ----------------------------------------------
+
+/** O que a IA pode decidir numa revisão da carga. */
+export const reviewDecisions = ['manter', 'reduzir', 'aumentar'] as const;
+export type ReviewDecision = (typeof reviewDecisions)[number];
+
+const REVIEW = `Você acompanha um treino de esteira em andamento e, a cada 30 segundos, decide se a carga da etapa atual fica como está, é reduzida ou é aumentada. A sessão segue o plano semanal da pessoa: os blocos de esforço têm uma faixa de frequência cardíaca, e a pessoa quer passá-los no alto da faixa (aim), junto do teto (zone.high), sem passar dele. Seu papel é antecipar: reduzir antes de o BPM passar do teto quando a subida e o tempo que falta na etapa indicam que ele vai passar; manter quando o BPM vai terminar a etapa no alvo; aumentar só dentro do limite que o app dá. O teto nunca deve ser buscado com folga negativa: terminar acima de zone.high é o erro mais caro, e terminar 1 ou 2 bpm abaixo do alvo custa pouco.
+
+O app tem uma trava própria: com a cinta no peito, num bloco de esforço, assim que o BPM do momento passa do teto ele alivia a carga sozinho, sem consultar você, e a trava sempre vence a sua decisão. Quando a mediana do último minuto passa do teto, o app também alivia sem consultar você. Uma boa decisão sua é a que faz a trava não precisar agir. A pessoa ajusta a esteira à mão no painel, e cada mudança interrompe o treino com um aviso sonoro: só mude a carga quando os dados pedirem.
+
+ENTRADA (json)
+- zone: objective (nome da intensidade), low e high, a faixa de BPM dos blocos de esforço.
+- aim: o alvo dentro da faixa. bpm = o BPM a buscar no fim dos blocos de esforço; low e high = o trecho da faixa em que a carga já está certa. Em recuperação a faixa é um teto a não passar, e o alvo fica na parte de baixo dela.
+- maxBpm: a FC máxima estimada da pessoa.
+- stage: a etapa atual. name; kind ("principal" = bloco de esforço; "leve" = aquecimento, recuperação entre blocos ou volta à calma, em que o BPM vem caindo do bloco anterior e ninguém busca a faixa); targetKmh e targetInclinePercent (os alvos em vigor); secondsInStage e secondsRemaining; targetsReached (a esteira está nos dois alvos); secondsAtLoad (há quanto tempo está neles); shortBlock (true = bloco de esforço de até ${SHORT_BLOCK_SECONDS} s, um tiro, em que a FC ainda sobe até o fim e a carga não sobe no meio); laterBlocks (quantos blocos de esforço ainda virão depois deste).
+- bpm: as leituras de agora, resumidas pelo app.
+  - now: o BPM do momento: a mediana dos últimos 5 s da cinta. Sem essa leitura (sem a cinta, ou com menos de 3 leituras dela nos últimos 5 s), é median.
+  - risePer30s: quanto now subiu em relação a 30 s atrás (negativo = caiu). 0 quando ainda não há 30 s de cinta; null sem a leitura do momento.
+  - median, min e max: das leituras do último minuto com a cinta, ou dos últimos 12 s com o sensor de mão.
+  - trend: "subindo", "estável" ou "caindo"; compara a segunda metade dessas leituras com a primeira.
+  - position: now em relação à faixa: "abaixo", "na faixa" ou "acima".
+  - belowTopBpm: quantos bpm now está abaixo de zone.high (negativo = acima do teto).
+  - projectedEndBpm: onde o BPM chega no fim da etapa se continuar subindo no ritmo de risePer30s (now + risePer30s × secondsRemaining ÷ 30, sem passar de maxBpm; com o BPM caindo, fica em now). É uma reta: superestima quando a subida já está perdendo força, o que é comum depois dos primeiros 2 ou 3 minutos de uma carga. null sem a leitura do momento.
+  - projectedOverTopBpm: projectedEndBpm − zone.high. Positivo = a reta passa do teto antes do fim da etapa. null sem a leitura do momento.
+  - endsAboveTop: true quando projectedEndBpm passa de zone.high. null sem a leitura do momento.
+  - endsBelowAim: true quando o fim da etapa fica abaixo de aim.low: projectedEndBpm, ou now sem a leitura do momento.
+  - reduceToAimBpm: quantos bpm tirar para o fim da etapa voltar ao meio de aim, pela reta (ou por now, se now for maior), de 1 a limits.maxReduceBpm. null quando o fim da etapa não passa de aim.high.
+- series: os últimos 120 s em trechos de 10 s, do mais antigo ao mais novo, com secondsAgo (fim do trecho), bpm (mediana do trecho; null sem leitura), kmh e inclinePercent medidos. Um trecho sem amostra da esteira fica de fora.
+- blocks: os blocos de esforço já feitos hoje, em ordem, com name, kmh e inclinePercent (a carga em que terminaram), endBpm (BPM do fim do bloco; null sem leitura), peakBpm (maior BPM sustentado no bloco; null sem leitura) e aboveReadings (leituras acima de zone.high). Mostram o acúmulo de um bloco para o outro: num treino de tiros o BPM costuma subir mais depressa a cada tiro, na mesma carga.
+- session: goal, plannedMinutes, elapsedSeconds, restBpm (FC do primeiro minuto de hoje; null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia" ou "app"), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
+- allowed: as decisões que o app aceita agora.
+- limits: maxReduceBpm e maxRaiseBpm, os maiores ajustes que o app aplica, em bpm. maxRaiseBpm = 0 quando a carga não pode subir.
+
+DECISÕES
+- "manter": a carga fica como está.
+- "reduzir": o app alivia a carga o equivalente a bpm batimentos, pela reta entre carga e frequência cardíaca da pessoa, até o mínimo que a etapa permite.
+- "aumentar": o app sobe a carga o equivalente a bpm batimentos, nunca mais que limits.maxRaiseBpm. Só aparece em allowed quando a carga pode subir.
+
+COMO DECIDIR
+A frequência cardíaca leva de 2 a 4 minutos para responder a uma mudança de carga e, num bloco longo, continua subindo aos poucos na mesma carga. Leituras do sensor de mão oscilam 1 ou 2 bpm sem que isso seja tendência. Siga a primeira regra que servir:
+- Se session.reliefSettling é true, o último alívio ainda está fazendo efeito: reduza só se stage.targetsReached é true (o corte anterior já está no painel) e endsAboveTop é true; senão, mantenha. Um excesso claro o app e a trava aliviam sozinhos.
+- Numa etapa leve, reduza só se position é "acima" e risePer30s é null ou não é negativo; senão, mantenha.
+- Reduza se position é "acima", ou se endsAboveTop é true e a série não mostra a subida perdendo força. bpm: até reduceToAimBpm, e menos quando a subida está perdendo força.
+- Aumente se "aumentar" está em allowed e endsBelowAim é true. bpm: até limits.maxRaiseBpm.
+- Nos demais casos, mantenha.
+
+SAÍDA
+Responda somente com um objeto json, neste formato:
+{"reason": "<motivo>", "decision": "<decisão>", "bpm": <inteiro>}
+- reason: até 12 palavras em português do Brasil, citando o dado decisivo.
+- decision: exatamente uma das opções de allowed: ${list(reviewDecisions)}.
+- bpm: inteiro, quantos bpm o ajuste deve tirar (em "reduzir") ou pôr (em "aumentar"); 0 em "manter".`;
+
+export type ReviewInput = {
+  workout: Workout;
+  /** Índice da etapa atual e segundos que faltam nela. */
+  index: number;
+  left: number;
+  load: Load;
+  features: Features;
+  /** A leitura do momento; `null` sem a cinta. */
+  live: Live | null;
+  /** As amostras recentes da esteira, de onde sai a série dos últimos 2 minutos. */
+  samples: TreadmillSample[];
+  now: number;
+  allowed: ReviewDecision[];
+  /** O maior aumento que a regra local daria agora, em bpm; 0 quando a carga não pode subir. */
+  maxRaiseBpm: number;
+  /** Segundos desde o último alívio de carga; `null` sem nenhum. */
+  sinceRelief: number | null;
+};
+export type ReviewReply = { decision: ReviewDecision; bpm: number; reason: string };
+
+/** A série do prompt: 2 minutos em trechos de 10 s. */
+const SERIES_SECONDS = 120;
+const SERIES_STEP_SECONDS = 10;
+
+/**
+ * Os últimos 2 minutos de esteira, do trecho mais antigo ao mais novo: mediana
+ * das leituras de BPM e a última carga medida em cada trecho de 10 s.
+ */
+function series(samples: TreadmillSample[], now: number) {
+  const rows: { secondsAgo: number; bpm: number | null; kmh: number | null; inclinePercent: number | null }[] = [];
+  for (let ago = SERIES_SECONDS - SERIES_STEP_SECONDS; ago >= 0; ago -= SERIES_STEP_SECONDS) {
+    const end = now - ago * 1000;
+    const inside = samples.filter((s) => s.at > end - SERIES_STEP_SECONDS * 1000 && s.at <= end);
+    const last = inside[inside.length - 1];
+    if (!last) continue;
+    const bpm = inside.map((s) => s.heartRateBpm).filter(validBpm);
+    rows.push({
+      secondsAgo: ago,
+      bpm: bpm.length ? median(bpm) : null,
+      kmh: last.speedKmh === null ? null : round1(last.speedKmh),
+      inclinePercent: last.inclinationPercent === null ? null : round1(last.inclinationPercent),
+    });
+  }
+  return rows;
+}
+
+export function reviewPrompt(i: ReviewInput): Prompt {
+  const w = i.workout;
+  const stages = w.plan?.stages ?? [];
+  const { stage } = i.load;
+  const zone = dailyTarget(w.plan, w.profile, w.hr);
+  const maxBpm = w.hr?.max ?? ageMax(w.profile.age);
+  const elapsed = Math.floor(w.totals.movingMs / 1000);
+  const f = i.features;
+  const now = i.live?.bpm ?? f.median;
+  const rise = i.live?.rise ?? null;
+  const aim = aimBand(zone, zone.objective);
+  // A reta não desce: com o BPM caindo, a projeção fica no momento.
+  const projected =
+    rise === null ? null : Math.min(maxBpm, Math.round(now + (Math.max(0, rise) * i.left) / 30));
+  const end = Math.max(now, projected ?? now);
+  const reduceToAim =
+    end > aim.high
+      ? Math.min(MAX_REDUCE_BPM, Math.max(1, Math.round(end - (aim.low + aim.high) / 2)))
+      : null;
+  const sinceRelief = i.sinceRelief === null ? null : Math.round(i.sinceRelief);
+  const blocks = stages.slice(0, i.index).flatMap((s, k) => {
+    const log = w.log?.[k];
+    if (s.measure || !log || log.ms <= 0) return [];
+    return [
+      {
+        name: s.name,
+        kmh: s.speed,
+        inclinePercent: s.incline,
+        endBpm: log.tail.length >= 3 ? median(log.tail) : null,
+        peakBpm: log.top || null,
+        aboveReadings: log.zone[2],
+      },
+    ];
+  });
+  return {
+    system: REVIEW,
+    user: {
+      zone,
+      aim,
+      maxBpm,
+      stage: {
+        name: stage.name,
+        kind: stage.measure ? 'leve' : 'principal',
+        targetKmh: stage.speed,
+        targetInclinePercent: stage.incline,
+        secondsInStage: stage.seconds - i.left,
+        secondsRemaining: i.left,
+        targetsReached: i.load.reached,
+        secondsAtLoad: Math.round(i.load.secondsAtLoad),
+        shortBlock: !!i.load.short,
+        laterBlocks: stages.slice(i.index + 1).filter((s) => !s.measure).length,
+      },
+      bpm: {
+        now,
+        risePer30s: rise,
+        median: f.median,
+        min: f.min,
+        max: f.max,
+        trend: f.trend,
+        position: position(now, zone),
+        belowTopBpm: zone.high - now,
+        projectedEndBpm: projected,
+        projectedOverTopBpm: projected === null ? null : projected - zone.high,
+        endsAboveTop: projected === null ? null : projected > zone.high,
+        endsBelowAim: (projected ?? now) < aim.low,
+        reduceToAimBpm: reduceToAim,
+      },
+      series: series(i.samples, i.now),
+      blocks,
+      session: {
+        goal: w.plan?.goal ?? 'Livre',
+        plannedMinutes: w.plan?.minutes ?? null,
+        elapsedSeconds: elapsed,
+        restBpm: w.restBpm ?? null,
+        changes: (w.changes ?? []).map((c) => ({
+          secondsAgo: Math.max(0, elapsed - c.second),
+          decision: c.decision,
+          bpm: c.bpm,
+          from: c.from ?? null,
+          to: c.to ?? null,
+          by: c.by ?? null,
+        })),
+        secondsSinceRelief: sinceRelief,
+        reliefSettling: sinceRelief !== null && sinceRelief < RELIEF_SETTLE_SECONDS,
+      },
+      allowed: i.allowed,
+      limits: { maxReduceBpm: MAX_REDUCE_BPM, maxRaiseBpm: i.maxRaiseBpm },
+    },
+  };
+}
+
+/**
+ * Valida a resposta da revisão. A decisão tem de estar entre as aceitas agora e
+ * `bpm` tem de ser número; os limites de cada decisão são aplicados pela sessão.
+ */
+export const parseReview =
+  (allowed: readonly ReviewDecision[]) =>
+  (raw: unknown): ReviewReply => {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const decision = r.decision as ReviewDecision;
+    const bpm = Math.round(num(r.bpm));
+    if (!allowed.includes(decision) || !Number.isFinite(bpm))
+      throw new Error('Resposta de ajuste inválida.');
+    return { decision, bpm, reason: typeof r.reason === 'string' ? r.reason.trim().slice(0, 120) : '' };
   };
 
 // --- Avaliação ao fim do treino --------------------------------------------
