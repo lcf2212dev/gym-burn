@@ -1,7 +1,7 @@
+import { acceptRr, createRrFilter } from '@/heart/rr';
 import type { TreadmillSample } from '@/treadmill/types';
 import {
   acsm,
-  HILL_TOP_PERCENT,
   MAX_INCLINE_PERCENT,
   MAX_SPEED_KMH,
   median,
@@ -124,17 +124,74 @@ const LIVE_WINDOW_MS = 5000;
 const RISE_FROM_MS = 35_000;
 const RISE_TO_MS = 25_000;
 const LIVE_READINGS = 3;
+/**
+ * O BPM que a cinta manda já vem suavizado por ela e fica uns segundos atrás
+ * da FC numa subida rápida. Com pelo menos 5 batimentos (RR) aceitos pelo
+ * filtro de artefatos na janela, a mediana deles entra na conta: é o
+ * batimento a batimento, sem a suavização da cinta.
+ */
+const RR_BEATS = 5;
+/**
+ * Conferência dos RR: se o valor deles se afasta mais que isto da mediana do
+ * BPM da cinta na mesma janela, sobrou artefato que o filtro não pegou (ou a
+ * cinta perdeu batimentos), e vale a cinta.
+ */
+const RR_AGREE_BPM = 10;
+/**
+ * O filtro de artefatos precisa de uma referência antes da janela mais antiga
+ * que ele avalia: começa a ler os RR 10 s antes dela.
+ */
+const RR_SEED_MS = 10_000;
 
 /** O BPM do momento e quanto ele subiu nos últimos 30 s. */
 export type Live = { bpm: number; rise: number };
+
+type Beat = { at: number; bpm: number; moving: boolean };
+
+/**
+ * Os batimentos aceitos pelo filtro de artefatos (`acceptRr`) desde `from`, já
+ * em BPM (60000 / RR). Cada RR fica com o horário da amostra que o trouxe. O
+ * filtro lê os RR de todas as amostras, em ordem, para não perder a
+ * referência; quem usa escolhe os da lona andando.
+ */
+function acceptedBeats(samples: TreadmillSample[], from: number, now: number): Beat[] {
+  const filter = createRrFilter();
+  const beats: Beat[] = [];
+  for (const s of samples) {
+    if (s.at < from || s.at > now || !s.rrMs?.length) continue;
+    for (const rr of s.rrMs)
+      if (acceptRr(filter, rr)) beats.push({ at: s.at, bpm: 60000 / rr, moving: (s.speedKmh ?? 0) > 0 });
+  }
+  return beats;
+}
+
+/**
+ * O BPM de uma janela pelas duas contas: `strap`, a mediana das leituras da
+ * cinta (`null` com menos de 3), e `rr`, a mediana de 60000/RR dos batimentos
+ * aceitos (`null` com menos de 5, ou se ela se afasta mais de 10 bpm da cinta).
+ */
+function windowBpm(readings: number[], beats: number[]) {
+  if (readings.length < LIVE_READINGS) return { strap: null, rr: null };
+  const strap = median(readings);
+  if (beats.length < RR_BEATS) return { strap, rr: null };
+  const rr = Math.round(median(beats));
+  return { strap, rr: Math.abs(rr - strap) > RR_AGREE_BPM ? null : rr };
+}
 
 /**
  * O BPM de agora, para a trava que alivia a carga acima do teto sem esperar a
  * mediana do minuto. Só vale com a cinta: a leitura válida mais recente (lona
  * andando) tem de ser dela e ter no máximo 5 s. `bpm` é a mediana das leituras
- * da cinta dos últimos 5 s (pelo menos 3); `rise`, essa mediana menos a das
- * leituras de 35 a 25 s atrás (0 sem 3 leituras ali). As leituras não se
- * limitam à etapa: no começo de um bloco a subida vem do trecho anterior.
+ * da cinta dos últimos 5 s (pelo menos 3) ou, com 5 batimentos aceitos nesses
+ * 5 s que concordem com ela em até 10 bpm (veja `windowBpm`), o maior entre
+ * essa mediana e a de 60000/RR deles: os RR adiantam a subida, que a
+ * suavização da cinta atrasa, e nunca baixam a leitura que aciona a trava.
+ * `rise` é quanto ele subiu desde 35 a 25 s atrás (0 sem 3
+ * leituras ali), sempre pela mesma conta nas duas janelas: RR com RR, ou cinta
+ * com cinta. Misturar as duas poria na subida o atraso da suavização da
+ * cinta, e uma queda falsa seguraria a trava. As leituras não se limitam à
+ * etapa: no começo de um bloco a subida vem do trecho anterior. Sem RR (outra
+ * cinta, ou a cinta sem mandá-los) é a mediana das leituras, como antes.
  */
 export function livePulse(samples: TreadmillSample[], now: number): Live | null {
   const valid = samples.filter(
@@ -143,12 +200,24 @@ export function livePulse(samples: TreadmillSample[], now: number): Live | null 
   const last = valid[valid.length - 1];
   if (!last || now - last.at > LIVE_WINDOW_MS || last.heartRateSource !== 'strap') return null;
   const strap = valid.filter((s) => s.heartRateSource === 'strap');
-  const bpmOf = (list: TreadmillSample[]) => list.map((s) => s.heartRateBpm as number);
-  const recent = bpmOf(strap.filter((s) => s.at > now - LIVE_WINDOW_MS));
-  if (recent.length < LIVE_READINGS) return null;
-  const bpm = median(recent);
-  const before = bpmOf(strap.filter((s) => s.at >= now - RISE_FROM_MS && s.at <= now - RISE_TO_MS));
-  return { bpm, rise: before.length >= LIVE_READINGS ? bpm - median(before) : 0 };
+  const beats = acceptedBeats(samples, now - RISE_FROM_MS - RR_SEED_MS, now);
+  const between = (from: number, to: number, open: boolean) => {
+    const inside = (at: number) => (open ? at > from : at >= from) && at <= to;
+    return windowBpm(
+      strap.filter((s) => inside(s.at)).map((s) => s.heartRateBpm as number),
+      beats.filter((b) => b.moving && inside(b.at)).map((b) => b.bpm),
+    );
+  };
+  const current = between(now - LIVE_WINDOW_MS, now, true);
+  if (current.strap === null) return null;
+  // Os RR existem para adiantar a subida, nunca para atrasar a trava: com os
+  // dois de acordo, vale o maior.
+  const bpm = current.rr === null ? current.strap : Math.max(current.rr, current.strap);
+  const before = between(now - RISE_FROM_MS, now - RISE_TO_MS, false);
+  if (before.strap === null) return { bpm, rise: 0 };
+  const rise =
+    current.rr !== null && before.rr !== null ? current.rr - before.rr : current.strap - before.strap;
+  return { bpm, rise };
 }
 
 export type Features = {
@@ -205,14 +274,19 @@ export type Load = {
   closing?: boolean;
   /** Bloco de esforço de até 5 minutos, um tiro: a carga não sobe no meio dele. */
   short?: boolean;
+  /**
+   * A pessoa está fora da lona, ou voltou há menos de um minuto: o BPM baixo de
+   * quem parou ao lado dela ainda está nas leituras, e a carga não sobe.
+   */
+  offBelt?: boolean;
 };
 
 /**
  * A carga pode subir: bloco de esforço que não seja um tiro, com a esteira nos
- * alvos há tempo suficiente.
+ * alvos há tempo suficiente e a pessoa na lona.
  */
 const raisable = (load: Load) =>
-  !load.easy && !load.short && load.reached && load.secondsAtLoad >= STEADY_SECONDS;
+  !load.easy && !load.short && !load.offBelt && load.reached && load.secondsAtLoad >= STEADY_SECONDS;
 
 /** O que o app faz com uma leitura fora da faixa. */
 export type Correction = 'aliviar' | 'subir';
@@ -271,7 +345,16 @@ export function raiseRoom(features: Features, load: Load) {
   if (features.position !== 'na faixa' || features.trend === 'subindo' || climbing) return 0;
   if (!raisable(load) || load.closing) return 0;
   const pending = load.secondsAtLoad < SETTLED_SECONDS ? PENDING_RISE_BPM : 0;
-  const gap = features.belowTop - pending;
+  return raiseMargin(features.belowTop - pending);
+}
+
+/**
+ * Quantos bpm um aumento pode pôr quando o BPM está `gap` bpm abaixo do teto:
+ * nada a até 3 bpm dele (o alvo já foi atingido), e daí o que couber deixando
+ * 1 bpm, ou um quinto da distância, de folga. É a margem de `raiseRoom`, e a
+ * da decisão do bloco seguinte (`intervals.ts`).
+ */
+export function raiseMargin(gap: number) {
   if (gap <= AIM_SPAN_BPM) return 0;
   return gap - Math.max(RAISE_MARGIN_BPM, Math.round(gap * RAISE_MARGIN_SHARE));
 }
@@ -369,11 +452,12 @@ const cheapest = (points: Point[]) =>
  * (5,2 km/h) e o começo da corrida (6 km/h).
  *
  * Ao aliviar, o custo cai `mets`, ou 0,03 MET a menos que isso, com o corte
- * que chegar mais perto. A caminhada combina rampa e velocidade (veja
- * `walkSteps`). A corrida perde
- * velocidade até 6 km/h e, se ainda não bastar, passa para o alto da caminhada
- * (5,2 km/h com até 7,5% de rampa: só nesse salto a rampa pode subir) e segue
- * por ela.
+ * que chegar mais perto, e nem a velocidade nem a rampa sobem, sem exceção. A
+ * caminhada combina rampa e velocidade (veja `walkSteps`). A corrida perde
+ * velocidade até 6 km/h e, se ainda não bastar, passa a andar a 5,2 km/h com a
+ * mesma rampa (a do alvo, ou a medida, se menor). Essa troca já é o alívio: a
+ * carga não desce mais pela caminhada no mesmo ajuste, porque a queda real é
+ * grande e a equação de corrida superestima o custo da corrida lenta.
  *
  * Ao subir, o custo cresce no máximo `mets`, e nunca mais que 1 MET por
  * ajuste. A caminhada ganha velocidade até o teto e daí rampa; correndo, só a
@@ -398,21 +482,27 @@ export function correctedStage(
     incline = Math.max(0, relief(measured.inclinationPercent, incline, 2, 0.251));
     // Quem já baixou a esteira para andar num bloco de corrida está caminhando:
     // a conta parte dessa carga, pela equação de caminhada.
-    let running = speed >= RUN_FROM_KMH;
+    const running = speed >= RUN_FROM_KMH;
     const target = acsm(speed, incline, running) - mets;
     if (running) {
+      const ramp = incline;
       // Correndo a rampa não passa de 2%: um alvo antigo acima disso volta a ele.
       incline = Math.min(incline, RUN_MAX_INCLINE_PERCENT);
-      while (speed > RUN_FROM_KMH && acsm(speed, incline, true) > target) speed = round1(speed - 0.1);
-      if (acsm(speed, incline, true) > target) {
-        // Nem o começo da corrida basta: a carga desce para a linha de baixo
-        // da escada, o alto da caminhada, e segue por ela.
-        running = false;
+      // A mesma folga da caminhada: sem ela, 6,1 km/h com um corte de 0,1 MET
+      // fica 0,0005 MET aquém em 6 km/h e a carga pula para a caminhada.
+      const over = () => acsm(speed, incline, true) > target + RELIEF_TOLERANCE_METS;
+      while (speed > RUN_FROM_KMH && over()) speed = round1(speed - 0.1);
+      if (over()) {
+        // Nem o começo da corrida basta: a pessoa passa a andar a 5,2 km/h com
+        // a rampa que já tinha, e o alívio para aí. Pela equação, 5,2 km/h com
+        // 7,5% custa menos que correr a 6 km/h, mas nos dados de quem corre
+        // devagar é o contrário (a equação de corrida superestima a corrida
+        // lenta): um alívio nunca sobe a velocidade nem a rampa. A queda real
+        // dessa troca é grande; o que faltar vem na revisão seguinte.
         speed = WALK_TOP_KMH;
-        incline = HILL_TOP_PERCENT;
+        incline = ramp;
       }
-    }
-    if (!running) {
+    } else {
       // Um alvo antigo acima do teto da caminhada volta a ele.
       speed = Math.min(speed, WALK_TOP_KMH);
       const floor = Math.min(speed, stage.measure ? EASY_FLOOR_KMH : 1);

@@ -1,7 +1,7 @@
 import type { BackfillJob, StrapLink, StrapWishes } from '@/heart/strap-session';
 import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { ConsoleEvent, TreadmillSample } from '@/treadmill/types';
-import { formatDecimal } from '@/utils/format';
+import { formatDecimal, formatDuration } from '@/utils/format';
 import {
   changeLabel,
   correctedStage,
@@ -15,6 +15,7 @@ import {
   RELIEF_SETTLE_SECONDS,
   SHORT_BLOCK_SECONDS,
   STEADY_SECONDS,
+  STRAP_WINDOW_MS,
   URGENT_EXCESS_BPM,
   type Correction,
   type Features,
@@ -22,7 +23,28 @@ import {
   type Load,
 } from './adaptive';
 import { assess, reviewLoad } from './ai';
+import {
+  cadenceChange,
+  FATIGUE_TIP,
+  smoothCadence,
+  stepGait,
+  strideM,
+  trackBelt,
+  trackCadence,
+  type Belt,
+  type CadenceTrend,
+} from './gait';
 import { advanceGuidance, type Cue, type Guidance } from './guidance';
+import {
+  betweenBlocks,
+  blockEnd,
+  NEXT_BLOCK_AT_SECONDS,
+  nextBlockLoad,
+  paceRecovery,
+  type BlockEnd,
+  type NextBlock,
+  type Pace,
+} from './intervals';
 import {
   accumulate,
   currentCue,
@@ -32,6 +54,7 @@ import {
   logBeats,
   logLoads,
   logStage,
+  median,
   metabolicCost,
   newWorkout,
   REST_WINDOW_SECONDS,
@@ -48,6 +71,7 @@ import {
   bpmPerMet,
   dailyTarget,
   energyKcal,
+  foxMax,
   heartProfile,
   restingBpm,
   type Pulse,
@@ -63,7 +87,42 @@ import {
   saveProfile,
   saveWorkout,
 } from './storage';
-import { fillTrackFromFit, readTrack, TrackRecorder, trackGaps } from './track';
+import { fillTrackFromFit, readTrack, TRACK_FLAGS, TrackRecorder, trackGaps } from './track';
+
+/**
+ * O passo da pessoa agora, para o painel: a cadência suavizada (mediana de 10
+ * s, passos/min), a passada (m), se ela está correndo pela cadência (`null`
+ * sem cadência), se está fora da lona e quanto a cadência média dos últimos 30
+ * s mudou desde o primeiro minuto do bloco na mesma velocidade (fração; `null`
+ * sem comparação).
+ */
+export type GaitView = {
+  cadenceSpm: number | null;
+  strideM: number | null;
+  running: boolean | null;
+  offBelt: boolean;
+  cadenceChange: number | null;
+};
+
+/**
+ * A carga decidida na recuperação para o próximo bloco de esforço (`index`):
+ * os alvos dele, o BPM previsto para o fim dele na carga em que o anterior
+ * terminou, o que a previsão pediu e se a carga mudou.
+ */
+export type NextBlockView = {
+  index: number;
+  speed: number;
+  incline: number;
+  predictedBpm: number;
+  verdict: NextBlock['verdict'];
+  changed: boolean;
+};
+
+/**
+ * A última recuperação que o coração encurtou ou alongou: a etapa, a duração
+ * do plano, a nova e o porquê (veja `Pace`).
+ */
+export type RecoveryView = { index: number; planned: number; seconds: number; reason: Pace['reason'] };
 
 /** Intervalo mínimo entre revisões quando a pessoa volta a segurar o sensor. */
 const CONTACT_REVIEW_GAP = 20_000;
@@ -108,6 +167,11 @@ const STRAP_ALERT_ABOVE_BPM = 5;
 const BACKFILL_DAYS = 7;
 /** Quantos treinos a cinta procura no FIT de uma vez. */
 const BACKFILL_MAX = 5;
+/**
+ * Quantas amostras seguidas sem leitura do momento, com a lona andando, até a
+ * recuperação guiada pelo coração voltar ao tempo do plano.
+ */
+const LIVE_MISSING_SAMPLES = 5;
 /** Os encerramentos que deixam a trilha incompleta, com a cinta ainda gravando. */
 const BROKEN_ENDINGS = ['App interrompido', 'Esteira desconectada'];
 
@@ -149,9 +213,42 @@ export class WorkoutSession {
   private track: TrackRecorder | null = null;
   /** Se a trilha de um treino encerrado tem lacunas, lida uma vez só. */
   private readonly gaps = new Map<string, boolean>();
+  /** Andando ou correndo pela cadência, com histerese (`stepGait`); `null` sem cadência. */
+  private running: boolean | null = null;
+  /** O "fora da lona" da etapa em curso. */
+  private belt: Belt | null = null;
+  /** A cadência do bloco de esforço em curso, para o aviso de cadência caindo. */
+  private cadence: CadenceTrend | null = null;
+  /**
+   * Horário da última amostra fora da lona. A revisão olha o último minuto de
+   * leituras, que ainda tem o BPM baixo de quem estava parado ao lado da lona:
+   * a carga só volta a poder subir um minuto depois de ela voltar.
+   */
+  private offBeltAt = -Infinity;
+  /** Os fins dos blocos de esforço deste treino, medidos na recuperação seguinte. */
+  private ends: BlockEnd[] = [];
+  /** A última recuperação em que a carga do próximo bloco já foi decidida. */
+  private decidedAt = -1;
+  /** A duração de cada recuperação no plano, antes de o coração mudá-la. */
+  private planned = new Map<number, number>();
+  /** A última leitura do momento na recuperação `liveIndex` e há quantas amostras ela falta. */
+  private liveIndex = -1;
+  private lastLive: number | null = null;
+  private missingLive = 0;
   private state = {
     profile: readProfile(),
     coach: '',
+    /**
+     * Uma dica para a pessoa, à parte de `coach` (que cada revisão troca): o
+     * aviso de cadência caindo, uma vez por bloco. Some na troca de etapa.
+     */
+    tip: '',
+    /** O passo da pessoa, com a cadência da X2 Pro; `null` sem cadência nem treino. */
+    gait: null as GaitView | null,
+    /** A carga do próximo bloco, decidida na recuperação; some quando a etapa muda. */
+    nextBlock: null as NextBlockView | null,
+    /** A última recuperação encurtada ou alongada pelo coração neste treino. */
+    recovery: null as RecoveryView | null,
     guidance: null as Guidance | null,
     minimizedCue: null as string | null,
     active: null as Workout | null,
@@ -357,6 +454,10 @@ export class WorkoutSession {
     this.update({
       profile: null,
       coach: '',
+      tip: '',
+      gait: null,
+      nextBlock: null,
+      recovery: null,
       guidance: null,
       minimizedCue: null,
       active: null,
@@ -408,7 +509,17 @@ export class WorkoutSession {
       machine.samples.at(-1) ?? null,
       workout.started,
     );
-    this.update({ active: workout, guidance, minimizedCue: null, coach: '', error: '' });
+    this.update({
+      active: workout,
+      guidance,
+      minimizedCue: null,
+      coach: '',
+      tip: '',
+      gait: null,
+      nextBlock: null,
+      recovery: null,
+      error: '',
+    });
     this.wish();
   }
 
@@ -449,13 +560,36 @@ export class WorkoutSession {
       // A trilha anda no relógio, com a lona parada ou andando.
       if (this.track?.workoutId !== w.id) this.track = new TrackRecorder(w.id, w.started);
       this.track.add(sample);
-      const totals = accumulate(w.totals, sample, this.previous);
-      const elapsed = Math.floor(totals.movingMs / 1000);
+      // Andando ou correndo pela cadência: só para as kcal e o painel.
+      const cadence = smoothCadence(s.samples, sample.at);
+      this.running = stepGait(this.running, cadence);
+      // O tempo andado não depende do passo: a etapa sai dele, e o "fora da lona" da etapa.
+      const moved = accumulate(w.totals, sample, this.previous, { running: this.running });
+      const elapsed = Math.floor(moved.movingMs / 1000);
       const cue = w.plan && currentCue(w.plan, elapsed);
+      const gaitInput = {
+        stage: cue?.index ?? -1,
+        effort: !!cue && !cue.stage.measure,
+        at: sample.at,
+        kmh: sample.speedKmh,
+        spm: sample.cadenceSpm,
+      };
+      this.belt = trackBelt(this.belt, gaitInput);
+      const offBelt = this.belt.off;
+      if (offBelt) {
+        this.offBeltAt = sample.at;
+        // O mesmo segundo de relógio de `TrackRecorder.add`.
+        this.track.mark(Math.floor((sample.at - w.started) / 1000), TRACK_FLAGS.offBelt);
+      }
+      // Fora da lona o BPM não entra nos totais, e o gasto é o de repouso.
+      const totals = offBelt
+        ? accumulate(w.totals, sample, this.previous, { running: this.running, offBelt })
+        : moved;
       let next = this.measureRest({ ...w, totals }, sample, moving);
       next = {
         ...next,
-        beats: logBeats(next.beats, sample, this.previous, elapsed),
+        // Fora da lona o BPM baixo não entra nos minutos, de onde saem os patamares do próximo plano.
+        beats: logBeats(next.beats, sample, this.previous, elapsed, offBelt),
         loads: logLoads(next.loads, sample, this.previous, elapsed),
       };
       // O treino livre tem um registro só. No guiado, o que passa do fim do
@@ -467,9 +601,21 @@ export class WorkoutSession {
           { length: Math.max(index + 1, next.log?.length ?? 0) },
           (_, i) => next.log?.[i] ?? emptyLog(),
         );
-        log[index] = logStage(log[index], sample, this.previous, zone, cue ? cue.into : elapsed);
+        log[index] = logStage(log[index], sample, this.previous, zone, cue ? cue.into : elapsed, offBelt);
         next = { ...next, log };
       }
+      const drop = trackCadence(this.cadence, gaitInput);
+      this.cadence = drop.trend;
+      const gait: GaitView | null =
+        cadence === null && !offBelt
+          ? null
+          : {
+              cadenceSpm: cadence,
+              strideM: strideM(sample.speedKmh, cadence),
+              running: this.running,
+              offBelt,
+              cadenceChange: cadenceChange(this.cadence, sample.at),
+            };
       if (sample.at - this.checkpoint >= 10000) {
         saveWorkout(next);
         this.checkpoint = sample.at;
@@ -483,6 +629,7 @@ export class WorkoutSession {
       }
       const previous = this.state.guidance;
       let coach = this.state.coach;
+      let tip = drop.warn ? FATIGUE_TIP : this.state.tip;
       if (cue && previous?.index !== cue.index) {
         this.stageSince = sample.at;
         // O tempo na carga conta de novo em cada etapa, mesmo que a esteira já esteja nos alvos dela.
@@ -493,13 +640,150 @@ export class WorkoutSession {
         this.lastFloor = -Infinity;
         this.lastRealert = -Infinity;
         this.stageReached = false;
+        // O aviso de cadência caindo era do bloco que acabou.
+        tip = '';
       }
+      const changedStage = !!cue && previous?.index !== cue.index;
       const guidance = advanceGuidance(previous, cue, sample, sample.at);
-      this.update({ active: next, guidance, coach });
+      this.update({
+        active: next,
+        guidance,
+        coach,
+        tip,
+        gait,
+        ...(changedStage && { nextBlock: null }),
+      });
+      // A amostra já está somada: uma falha ao gravar uma decisão daqui em diante
+      // não pode fazer o mesmo intervalo entrar de novo na próxima amostra.
+      this.previous = sample;
       if (w.plan && totals.movingMs >= w.plan.minutes * 60000) this.finish('Duração concluída');
-      else if (cue && guidance && moving) this.consider(next, cue, guidance, sample, s.samples);
+      else if (cue && guidance && moving) {
+        // Na recuperação entre dois blocos: a carga do próximo e a duração desta.
+        this.planAhead(cue, sample, s.samples);
+        const paced = this.pace(cue, sample, s.samples);
+        this.consider(this.state.active ?? next, paced ?? cue, guidance, sample, s.samples);
+      }
     }
     this.previous = sample;
+  }
+
+  /**
+   * Aos 15 s de uma recuperação entre dois blocos de esforço, decide a carga
+   * do próximo pelo fim do que acabou (veja `nextBlockLoad`). Uma vez por
+   * recuperação. O fim do bloco (a carga dos últimos 20 s e o BPM do fim) fica
+   * guardado para medir o acúmulo nas recuperações seguintes. Só com a cinta.
+   */
+  private planAhead(cue: Cue, sample: TreadmillSample, samples: TreadmillSample[]) {
+    const active = this.state.active;
+    const plan = active?.plan;
+    if (!active || !plan || cue.into < NEXT_BLOCK_AT_SECONDS || this.decidedAt === cue.index) return;
+    if (!betweenBlocks(plan, cue.index)) return;
+    this.decidedAt = cue.index;
+    const block = cue.index - 1;
+    // O começo desta etapa é o fim do bloco: as amostras de antes dele são as do bloco.
+    const end = blockEnd(samples, this.stageSince, plan.stages[block]);
+    const tail = active.log?.[block]?.tail ?? [];
+    if (end && tail.length >= 3 && !this.ends.some((e) => e.index === block))
+      this.ends = [...this.ends, { index: block, speed: end.speed, incline: end.incline, bpm: median(tail) }];
+    const zone = dailyTarget(plan, active.profile, active.hr);
+    const decision = nextBlockLoad({
+      plan,
+      index: cue.index,
+      log: active.log ?? [],
+      changes: active.changes ?? [],
+      zone,
+      rest: active.hr?.rest ?? null,
+      ends: this.ends,
+      strapReadings: end?.strapReadings ?? 0,
+      offBelt: this.offBeltRecently(sample.at),
+    });
+    if (!decision) return;
+    const changed = decision.stages.length > 0;
+    const nextBlock: NextBlockView = {
+      index: decision.index,
+      speed: decision.to.speed,
+      incline: decision.to.incline,
+      predictedBpm: decision.predictedBpm,
+      verdict: decision.verdict,
+      changed,
+    };
+    if (!changed) {
+      this.update({ nextBlock });
+      return;
+    }
+    // `commit` não serve: ele exige a etapa em curso e reabre o aviso de ajuste,
+    // e aqui a carga é de um bloco que ainda vai começar.
+    const elapsed = Math.floor(active.totals.movingMs / 1000);
+    const { from, to } = decision;
+    const change: Change = {
+      second: elapsed,
+      stage: decision.index,
+      decision: changeLabel(from, to),
+      bpm: this.ends[this.ends.length - 1].bpm,
+      from: [from.speed, from.incline],
+      to: [to.speed, to.incline],
+      by: 'bloco',
+    };
+    const stages = plan.stages.map((s, i) =>
+      decision.stages.includes(i) ? { ...s, speed: to.speed, incline: to.incline } : s,
+    );
+    const next = { ...active, plan: { ...plan, stages }, changes: [...(active.changes ?? []), change] };
+    saveWorkout(next);
+    const name = to.seconds <= SHORT_BLOCK_SECONDS ? 'Próximo tiro: ' : 'Próximo bloco: ';
+    const incline = to.incline !== from.incline ? ' e ' + formatDecimal(to.incline, Number.isInteger(to.incline) ? 0 : 1) + '%' : '';
+    this.update({ active: next, nextBlock, coach: name + formatDecimal(to.speed, 1) + ' km/h' + incline });
+  }
+
+  /**
+   * Numa recuperação entre dois blocos, com leitura recente da cinta, a
+   * duração dela segue o coração (veja `paceRecovery`): termina quando o BPM do
+   * momento cai a 65% da FC máxima, de 2 a 5 min, e a volta à calma paga a
+   * diferença. Devolve o pedido do guia refeito quando a etapa mudou.
+   */
+  private pace(cue: Cue, sample: TreadmillSample, samples: TreadmillSample[]): Cue | null {
+    const active = this.state.active;
+    const plan = active?.plan;
+    if (!active || !plan || !betweenBlocks(plan, cue.index)) return null;
+    const planned = this.planned.get(cue.index) ?? plan.stages[cue.index].seconds;
+    this.planned.set(cue.index, planned);
+    // Uma lacuna curta da cinta (o rádio, ou a lona voltando a andar depois de
+    // uma pausa) não é "sem leitura": a última leitura vale por 5 amostras com
+    // a lona andando. Sem isso uma recuperação alongada terminaria na hora.
+    if (this.liveIndex !== cue.index) [this.liveIndex, this.lastLive, this.missingLive] = [cue.index, null, 0];
+    const fresh = livePulse(samples, sample.at);
+    if (fresh) [this.lastLive, this.missingLive] = [fresh.bpm, 0];
+    else this.missingLive += 1;
+    const bpm = fresh?.bpm ?? (this.missingLive < LIVE_MISSING_SAMPLES ? this.lastLive : null);
+    const live = bpm === null ? null : { bpm };
+    const pace = paceRecovery({
+      plan,
+      index: cue.index,
+      into: cue.into,
+      planned,
+      bpm,
+      maxBpm: active.hr?.max ?? foxMax(active.profile.age),
+    });
+    if (!pace) return null;
+    const next = { ...active, plan: { ...plan, stages: pace.stages } };
+    const elapsed = Math.floor(active.totals.movingMs / 1000);
+    const redone = currentCue(next.plan, elapsed);
+    if (!redone || redone.index !== cue.index) return null;
+    saveWorkout(next);
+    const time = formatDuration(pace.seconds);
+    const coach =
+      pace.reason === 'plano'
+        ? 'Sem leitura · recuperação no tempo do plano'
+        : pace.reason === 'cedo'
+          ? 'Recuperação encerrada aos ' + time + ' · ' + live?.bpm + ' BPM'
+          : pace.seconds > planned && pace.seconds > cue.into + 1
+            ? 'Recuperação alongada até ' + time + ' · ' + live?.bpm + ' BPM'
+            : 'Recuperação encerrada aos ' + time + ' · ' + live?.bpm + ' BPM';
+    this.update({
+      active: next,
+      recovery: { index: cue.index, planned, seconds: pace.seconds, reason: pace.reason },
+      coach,
+    });
+    return redone;
   }
 
   /** Guarda a FC de repouso do dia assim que as primeiras leituras do treino bastarem. */
@@ -528,7 +812,17 @@ export class WorkoutSession {
       secondsAtLoad: reached && this.reachedSince !== null ? (now - this.reachedSince) / 1000 : 0,
       closing: cue.left <= 120 && !later,
       short: !stage.measure && stage.seconds <= SHORT_BLOCK_SECONDS,
+      offBelt: this.offBeltRecently(now),
     };
+  }
+
+  /**
+   * A pessoa está fora da lona, ou voltou há menos de um minuto (a janela da
+   * revisão com a cinta): a carga não sobe, nem pela regra local, nem pela IA,
+   * nem pela decisão do bloco seguinte. A trava e as reduções seguem valendo.
+   */
+  private offBeltRecently(now: number) {
+    return now - this.offBeltAt < STRAP_WINDOW_MS;
   }
 
   /** A velocidade e a inclinação desta amostra foram medidas há pouco. */
@@ -567,11 +861,13 @@ export class WorkoutSession {
     const measured = metabolicCost(sample.speedKmh ?? 0, sample.inclinationPercent ?? 0);
     if (measured <= metabolicCost(stage.speed, stage.incline)) return false;
     if (sample.at - this.lastRealert < GUARD_WAIT) return true;
+    // Cada alvo que difere do que a esteira mede, para cima ou para baixo: o
+    // painel não pode esconder a rampa quando ela também precisa mudar.
     const parts: string[] = [];
-    if ((sample.speedKmh ?? 0) > stage.speed + SPEED_TOLERANCE_KMH)
+    if (Math.abs((sample.speedKmh ?? 0) - stage.speed) > SPEED_TOLERANCE_KMH)
       parts.push(formatDecimal(stage.speed, 1) + ' km/h');
     // A rampa anda de meio em meio ponto: 7,5% ou 2%, sem o ",0".
-    if ((sample.inclinationPercent ?? 0) > stage.incline + INCLINE_TOLERANCE_PERCENT)
+    if (Math.abs((sample.inclinationPercent ?? 0) - stage.incline) > INCLINE_TOLERANCE_PERCENT)
       parts.push(formatDecimal(stage.incline, Number.isInteger(stage.incline) ? 0 : 1) + '%');
     const target = parts.length ? parts.join(' e ') : formatDecimal(stage.speed, 1) + ' km/h';
     // O aviso reabre como num ajuste novo: os alvos em vigor passam a valer de agora.
@@ -788,6 +1084,7 @@ export class WorkoutSession {
           allowed,
           maxRaiseBpm,
           sinceRelief,
+          gait: this.state.gait,
         },
         { signal: abort.signal },
       );
@@ -800,9 +1097,14 @@ export class WorkoutSession {
     this.reviewing = false;
     try {
       const last = this.current(w.id, cue.index, load.stage);
-      // Um aumento só sai com a esteira ainda nos alvos: a resposta pode chegar 12 s depois do pedido.
+      // Um aumento só sai com a esteira ainda nos alvos, e com a pessoa na lona:
+      // a resposta pode chegar 12 s depois do pedido.
       const g = this.state.guidance;
-      const now = { ...load, reached: !!g?.speedReached && !!g.inclineReached };
+      const now = {
+        ...load,
+        reached: !!g?.speedReached && !!g.inclineReached,
+        offBelt: !!load.offBelt || (!!last && this.offBeltRecently(last.at)),
+      };
       if (!last) this.update({ coach: 'Aguardando nova leitura' });
       else if (reply) this.apply(w, cue.index, reply, features, zone, now, maxRaiseBpm, live, last);
       else if (!(fix || room) || !now.reached || !this.fresh(last, Date.now()))
@@ -810,6 +1112,8 @@ export class WorkoutSession {
       // A trava vence também a regra local: com o BPM do momento acima do teto, a carga não sobe.
       else if (this.overTop(zone, last.at))
         this.update({ coach: OFFLINE + 'Acima do teto · carga mantida' });
+      // A regra local que chega aqui sempre sobe a carga: fora da lona, não.
+      else if (now.offBelt) this.update({ coach: OFFLINE + 'Fora da lona · carga mantida' });
       else this.adjust(w, cue.index, fix, room, features, zone, load, last, 'app', OFFLINE);
     } catch {
       this.update({ error: SAVE_ERROR });
@@ -862,6 +1166,10 @@ export class WorkoutSession {
       this.update({ coach: 'IA · acima do teto, carga mantida' + note });
       return;
     }
+    if (raise && load.offBelt) {
+      this.update({ coach: 'IA · fora da lona, carga mantida' + note });
+      return;
+    }
     if (raise && !load.reached) {
       this.update({ coach: 'IA · ajuste a esteira aos alvos' + note });
       return;
@@ -911,6 +1219,16 @@ export class WorkoutSession {
     this.reachedSince = null;
     this.early = [];
     this.restDone = false;
+    this.running = null;
+    this.belt = null;
+    this.cadence = null;
+    this.offBeltAt = -Infinity;
+    this.ends = [];
+    this.decidedAt = -1;
+    this.planned = new Map();
+    this.liveIndex = -1;
+    this.lastLive = null;
+    this.missingLive = 0;
   }
 
   /**
@@ -1001,6 +1319,10 @@ export class WorkoutSession {
       minimizedCue: null,
       // O gasto estimado fica no painel até o próximo treino começar.
       coach: kcal ? 'Treino encerrado · cerca de ' + kcal + ' kcal' : '',
+      tip: '',
+      gait: null,
+      nextBlock: null,
+      recovery: null,
       history: [done, ...this.state.history],
     });
     if (wish) this.wish();
@@ -1070,6 +1392,8 @@ function localVerdict(f: Features, load: Load) {
   if (f.position === 'na faixa' && f.belowTop <= AIM_SPAN_BPM) return 'No alvo · ' + bpm;
   const gap = f.belowTop + ' bpm abaixo do teto · ' + bpm;
   if (!load.reached) return gap + ' · ajuste a esteira aos alvos';
+  // Parada ao lado da lona a FC cai: esse BPM não pede mais carga.
+  if (load.offBelt) return gap + ' · fora da lona: a carga não sobe';
   // Num tiro a FC ainda sobe até o fim: a carga não sobe no meio dele.
   if (load.short) return gap + ' · tiro curto: a carga não sobe no meio';
   if (load.secondsAtLoad < STEADY_SECONDS) return gap + ' · menos de ' + STEADY_SECONDS + ' s nesta carga';

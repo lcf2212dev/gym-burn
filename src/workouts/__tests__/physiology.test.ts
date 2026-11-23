@@ -140,9 +140,11 @@ it('limita a FC máxima prevista às estimativas pela idade, com o pico observad
 
 it('o piso da FC máxima soma 5 bpm ao pico de sessão levada até o fim sem redução', () => {
   expect([ageMax(40), ageMax(50)]).toEqual([180, 172]);
+  // Com plano, o pico fica no bloco de esforço (a etapa 1); no treino livre, no registro único.
   const peak = (top: number, seconds: number, extra: Partial<Workout> = {}): Workout => {
     const w = session(null, null);
-    return { ...w, totals: { ...w.totals, movingMs: seconds * 1000 }, log: [{ ...emptyLog(), top }], ...extra };
+    const log = extra.plan ? [emptyLog(), { ...emptyLog(), top }] : [{ ...emptyLog(), top }];
+    return { ...w, totals: { ...w.totals, movingMs: seconds * 1000 }, log, ...extra };
   };
   const change = (decision: string) => [{ second: 600, stage: 1, decision, bpm: 176 }];
   // Treino livre conta como levado até o fim com 20 min; guiado, com 90% dos 45 min do plano.
@@ -166,6 +168,83 @@ it('o piso da FC máxima soma 5 bpm ao pico de sessão levada até o fim sem red
   expect(maxFloor([peak(180, 600), peak(170, 1800)])).toBe(180);
   expect(maxFloor([peak(178, 600), peak(176, 1800)])).toBe(181);
   expect(maxFloor([session(null, null)])).toBeNull();
+});
+
+it('um pico seguido de outro bloco concluído, ou de 4 min no mesmo bloco sem alívio, sobe o piso mesmo com redução forçada', () => {
+  // O VO₂máx de 22/11: 41 anos, faixa de 161 a 170. A trava cortou o 3º tiro com 178 (redução forçada).
+  const age41 = { ...profile, age: 41 };
+  const vo2 = sessionPlan(week[2].session!, 6.6, 1);
+  const stage = (top: number, topAtSeconds: number, seconds: number) => ({
+    ...emptyLog(),
+    ms: seconds * 1000,
+    top,
+    topAtMs: topAtSeconds * 1000,
+  });
+  const shots = (fourth: number): Workout => {
+    const log = vo2.stages.map(() => emptyLog());
+    log[5] = stage(179, 235, 240);
+    log[7] = stage(176, 230, fourth);
+    return {
+      ...newWorkout(age41, 'ble', vo2),
+      totals: { ...newWorkout(age41, 'ble', vo2).totals, movingMs: 2700000 },
+      log,
+      changes: [{ second: 1940, stage: 5, decision: 'reduzir velocidade', bpm: 178, by: 'trava' }],
+    };
+  };
+  expect(forcedReductions(shots(240))).toBe(1);
+  // Chegou a 179 e ainda fez o 4º tiro inteiro: não estava no máximo, piso de 184.
+  expect(maxFloor([shots(240)])).toBe(184);
+  // Com 90% do 4º tiro feito ainda vale; com menos, o 179 é só o maior pico.
+  expect(maxFloor([shots(216)])).toBe(184);
+  expect(maxFloor([shots(215)])).toBe(179);
+  // Um bloco contínuo: pico de 150 aos 10 min e mais 25 min no bloco, com uma redução forçada no meio.
+  const base = sessionPlan(week[1].session!, 5, 1);
+  const { high } = dailyTarget(base, profile);
+  const steady = (reliefAfter: number): Workout => {
+    const log = [emptyLog(), stage(150, 600, 2100), emptyLog()];
+    const second = 300 + 600 + reliefAfter;
+    return {
+      ...newWorkout(profile, 'ble', base),
+      log,
+      changes: [{ second, stage: 1, decision: 'reduzir inclinação', bpm: high + 6, from: [5, 1], to: [5, 0.5], by: 'trava' }],
+    };
+  };
+  // Sem alívio no minuto seguinte ao pico, os 25 min depois dele bastam: piso de 155.
+  expect(maxFloor([steady(90)])).toBe(155);
+  // Com o alívio 30 s depois do pico e nenhum bloco depois, o pico vale sem folga.
+  expect(maxFloor([steady(30)])).toBe(150);
+  // O tempo fora da lona não conta como seguir: com 22 dos 25 min depois do pico ao lado dela, não sobe.
+  const aside = steady(90);
+  expect(maxFloor([{ ...aside, log: [emptyLog(), { ...aside.log![1], offBeltMs: 1_320_000 }, emptyLog()] }])).toBe(150);
+  // Nem um tiro seguinte feito fora da lona conta como concluído.
+  const offShot = shots(240);
+  offShot.log![7] = { ...offShot.log![7], offBeltMs: 60_000 };
+  expect(maxFloor([offShot])).toBe(179);
+  // Num registro mais antigo, sem o horário do pico, os 4 min no mesmo bloco não têm como ser medidos.
+  const old = steady(90);
+  expect(maxFloor([{ ...old, log: [emptyLog(), { ...old.log![1], topAtMs: undefined }, emptyLog()] }])).toBe(150);
+  // Mas outro bloco concluído depois do pico basta a ordem das etapas: o 22/11 sem horário também dá 184.
+  const undated = shots(240);
+  undated.log = undated.log!.map((l) => ({ ...l, topAtMs: undefined }));
+  expect(maxFloor([undated])).toBe(184);
+  // O pico de uma recuperação nunca leva folga, mesmo com tiros concluídos depois dele.
+  const recovering = shots(240);
+  recovering.log![5] = { ...recovering.log![5], top: 170 };
+  recovering.log![6] = { ...emptyLog(), ms: 180000, top: 182, topAtMs: 5000 };
+  expect(maxFloor([recovering])).toBe(182);
+  // Nem numa sessão levada até o fim sem redução forçada: o pico do aquecimento vale sem folga.
+  const warm = { ...shots(240), changes: [] };
+  warm.log![0] = { ...emptyLog(), ms: 600000, top: 183, topAtMs: 590000 };
+  expect(maxFloor([warm])).toBe(184);
+  warm.log![5] = { ...warm.log![5], top: 170 };
+  warm.log![7] = { ...warm.log![7], top: 170 };
+  expect(maxFloor([warm])).toBe(183);
+  // A folga não passa da maior estimativa pela idade + 10 (189 aos 41 anos); o pico observado, sim.
+  const capped = shots(240);
+  capped.log![5] = { ...capped.log![5], top: 186 };
+  expect(maxFloor([capped])).toBe(189);
+  capped.log![5] = { ...capped.log![5], top: 192 };
+  expect(maxFloor([capped])).toBe(192);
 });
 
 it('o alvo dos blocos de esforço é o alto da faixa; em recuperação, a faixa inteira', () => {

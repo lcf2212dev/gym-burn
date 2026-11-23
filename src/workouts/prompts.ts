@@ -54,7 +54,7 @@ import {
 } from './physiology';
 import { describe, sessionMinutes, zones, type Session } from './week';
 
-export const PROMPT_VERSION = '8';
+export const PROMPT_VERSION = '9';
 export type Prompt = { system: string; user: object };
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -92,7 +92,13 @@ function group(w: Workout, indexes: number[]) {
   // Corrida é o que foi planejado e feito de 6 km/h em diante. Um registro
   // antigo de caminhada apertada, com alvo abaixo disso e a lona a 6 km/h,
   // continua sendo caminhada: pela equação de corrida ele custaria 50% a mais.
+  // A cadência não entra aqui: `mets` é a escala por velocidade que liga carga
+  // e FC no plano e na avaliação.
   const running = kmh >= RUN_FROM_KMH && (!last || last.speed >= RUN_FROM_KMH);
+  const cadence = logs.map(stepping).filter((c): c is NonNullable<typeof c> => !!c);
+  const cadenceMs = sum(cadence, (c) => c.cadenceMs);
+  const cadenceDuration = sum(cadence, (c) => c.durationMs);
+  const [first, final] = [cadence[0], cadence[cadence.length - 1]];
   return {
     seconds: Math.round(ms / 1000),
     kmh,
@@ -102,7 +108,22 @@ function group(w: Workout, indexes: number[]) {
     targetInclinePercent: last?.incline ?? null,
     bpmEnd: ends.length ? median(ends) : null,
     bpmReadings: sum(logs, (l) => l.bpmCount),
+    cadenceSpm: cadenceDuration ? Math.round(cadenceMs / cadenceDuration) : null,
+    strideChangePercent: cadence.length >= 2 ? round1(100 * (final.strideM / first.strideM - 1)) : null,
   };
+}
+
+/**
+ * A cadência de uma etapa com a cinta XOSS: a soma no tempo e os ms que
+ * entraram nela, sem o tempo fora da lona (em que a cadência é zero), e a
+ * passada média, em metros por passo. `null` sem cadência.
+ */
+function stepping(l: StageLog) {
+  const durationMs = (l.cadenceDurationMs ?? 0) - (l.offBeltMs ?? 0);
+  const cadenceMs = l.cadenceMs ?? 0;
+  if (durationMs <= 0 || cadenceMs <= 0 || l.ms <= 0) return null;
+  const metersPerMinute = (l.distanceM * 60000) / l.ms;
+  return { cadenceMs, durationMs, strideM: metersPerMinute / (cadenceMs / durationMs) };
 }
 
 /** Um trecho de minutos seguidos na mesma carga, dentro de um bloco de esforço. */
@@ -483,9 +504,9 @@ ENTRADA (json)
 - zone: objective (nome da intensidade), low e high, a faixa de BPM dos blocos de esforço.
 - aim: o alvo dentro da faixa. bpm = o BPM a buscar no fim dos blocos de esforço; low e high = o trecho da faixa em que a carga já está certa. Em recuperação a faixa é um teto a não passar, e o alvo fica na parte de baixo dela.
 - maxBpm: a FC máxima estimada da pessoa.
-- stage: a etapa atual. name; kind ("principal" = bloco de esforço; "leve" = aquecimento, recuperação entre blocos ou volta à calma, em que o BPM vem caindo do bloco anterior e ninguém busca a faixa); targetKmh e targetInclinePercent (os alvos em vigor); secondsInStage e secondsRemaining; targetsReached (a esteira está nos dois alvos); secondsAtLoad (há quanto tempo está neles); shortBlock (true = bloco de esforço de até ${SHORT_BLOCK_SECONDS} s, um tiro, em que a FC ainda sobe até o fim e a carga não sobe no meio); laterBlocks (quantos blocos de esforço ainda virão depois deste).
+- stage: a etapa atual. name; kind ("principal" = bloco de esforço; "leve" = aquecimento, recuperação entre blocos ou volta à calma, em que o BPM vem caindo do bloco anterior e ninguém busca a faixa); targetKmh e targetInclinePercent (os alvos em vigor); secondsInStage e secondsRemaining (numa recuperação entre dois blocos de esforço, com a cinta, o app encurta ou alonga a etapa pelo BPM, e secondsRemaining pode mudar de uma revisão para outra); targetsReached (a esteira está nos dois alvos); secondsAtLoad (há quanto tempo está neles); shortBlock (true = bloco de esforço de até ${SHORT_BLOCK_SECONDS} s, um tiro, em que a FC ainda sobe até o fim e a carga não sobe no meio); laterBlocks (quantos blocos de esforço ainda virão depois deste).
 - bpm: as leituras de agora, resumidas pelo app.
-  - now: o BPM do momento: a mediana dos últimos 5 s da cinta. Sem essa leitura (sem a cinta, ou com menos de 3 leituras dela nos últimos 5 s), é median.
+  - now: o BPM do momento, dos últimos 5 s da cinta: a mediana das leituras dela ou, quando a cinta manda os intervalos entre batimentos e eles concordam com essa mediana em até 10 bpm, o maior entre ela e a mediana dos batimentos (que acompanha uma subida rápida sem o atraso da cinta). Sem essa leitura (sem a cinta, ou com menos de 3 leituras dela nos últimos 5 s), é median.
   - risePer30s: quanto now subiu em relação a 30 s atrás (negativo = caiu). 0 quando ainda não há 30 s de cinta; null sem a leitura do momento.
   - median, min e max: das leituras do último minuto com a cinta, ou dos últimos 12 s com o sensor de mão.
   - trend: "subindo", "estável" ou "caindo"; compara a segunda metade dessas leituras com a primeira.
@@ -497,8 +518,9 @@ ENTRADA (json)
   - endsBelowAim: true quando o fim da etapa fica abaixo de aim.low: projectedEndBpm, ou now sem a leitura do momento.
   - reduceToAimBpm: quantos bpm tirar para o fim da etapa voltar ao meio de aim, pela reta (ou por now, se now for maior), de 1 a limits.maxReduceBpm. null quando o fim da etapa não passa de aim.high.
 - series: os últimos 120 s em trechos de 10 s, do mais antigo ao mais novo, com secondsAgo (fim do trecho), bpm (mediana do trecho; null sem leitura), kmh e inclinePercent medidos. Um trecho sem amostra da esteira fica de fora.
+- gait: dois números informativos do passo da pessoa, medidos pela cinta; nenhuma regra abaixo depende deles. cadenceSpm = a cadência do momento, em passos por minuto (mediana dos últimos 10 s; null sem cadência medida). cadenceChangePercent = quanto a cadência média dos últimos 30 s mudou em relação à do primeiro minuto do bloco na mesma velocidade, em % (negativo = passos mais lentos); null fora de um bloco de esforço, sem cadência ou com a velocidade diferente da daquele minuto.
 - blocks: os blocos de esforço já feitos hoje, em ordem, com name, kmh e inclinePercent (a carga em que terminaram), endBpm (BPM do fim do bloco; null sem leitura), peakBpm (maior BPM sustentado no bloco; null sem leitura) e aboveReadings (leituras acima de zone.high). Mostram o acúmulo de um bloco para o outro: num treino de tiros o BPM costuma subir mais depressa a cada tiro, na mesma carga.
-- session: goal, plannedMinutes, elapsedSeconds, restBpm (FC do primeiro minuto de hoje; null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia" ou "app"), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
+- session: goal, plannedMinutes, elapsedSeconds, restBpm (FC do primeiro minuto de hoje; null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia", "app" ou "bloco"; "bloco" é a carga decidida numa recuperação, pelo fim do bloco anterior, para o bloco de esforço que vem depois dela: o ajuste vale para esse bloco, e bpm é o BPM do fim do anterior), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
 - allowed: as decisões que o app aceita agora.
 - limits: maxReduceBpm e maxRaiseBpm, os maiores ajustes que o app aplica, em bpm. maxRaiseBpm = 0 quando a carga não pode subir.
 
@@ -539,6 +561,12 @@ export type ReviewInput = {
   maxRaiseBpm: number;
   /** Segundos desde o último alívio de carga; `null` sem nenhum. */
   sinceRelief: number | null;
+  /**
+   * O passo da pessoa, informativo: a cadência do momento (passos/min) e
+   * quanto a média de 30 s mudou desde o primeiro minuto do bloco na mesma
+   * velocidade (fração). Ausente ou `null` sem cadência.
+   */
+  gait?: { cadenceSpm: number | null; cadenceChange: number | null } | null;
 };
 export type ReviewReply = { decision: ReviewDecision; bpm: number; reason: string };
 
@@ -636,6 +664,10 @@ export function reviewPrompt(i: ReviewInput): Prompt {
         reduceToAimBpm: reduceToAim,
       },
       series: series(i.samples, i.now),
+      gait: {
+        cadenceSpm: i.gait?.cadenceSpm ?? null,
+        cadenceChangePercent: i.gait?.cadenceChange == null ? null : round1(100 * i.gait.cadenceChange),
+      },
       blocks,
       session: {
         goal: w.plan?.goal ?? 'Livre',
@@ -682,16 +714,16 @@ ENTRADA (json)
 - profile: age.
 - session: a sessão avaliada.
   - goal (sessão do plano semanal; "Livre" = sem plano), objective (nome da intensidade), plannedMinutes, movingSeconds, completionPercent (null no treino livre), distanceMeters, averageKmh, averageIncline, endedBy (como terminou).
-  - bpmSource ("cinta" = cinta no peito, que lê o tempo todo; "sensor de mão" = sensor da esteira, que só lê enquanto a pessoa o segura), bpmReadings (leituras válidas, cerca de uma por segundo de leitura), bpmCoveragePercent, averageBpm, peakBpm (maior leitura isolada) e validatedPeakBpm (maior mediana de 3 leituras seguidas).
+  - bpmSource ("cinta" = cinta no peito, que lê o tempo todo; "sensor de mão" = sensor da esteira, que só lê enquanto a pessoa o segura), bpmReadings (leituras válidas, cerca de uma por segundo de leitura), bpmCoveragePercent, averageBpm, peakBpm (maior leitura isolada) e validatedPeakBpm (maior mediana de 10 leituras seguidas da cinta, ou de 3 do sensor de mão).
   - zone: low e high, a faixa de BPM dos blocos de esforço. zoneSharePercent: parcela das leituras dos blocos de esforço below, inside e above dessa faixa.
-  - work e easy: resumo dos blocos de esforço e dos blocos leves (aquecimento, recuperações e volta à calma). Cada um traz seconds, kmh e inclinePercent realizados, mets (custo metabólico dessa carga; 1 MET = repouso), targetKmh e targetInclinePercent (alvos em que o último bloco terminou), bpmEnd (mediana das últimas leituras dos blocos, o valor mais próximo do BPM estabilizado) e bpmReadings. null quando não houve o bloco. Quando work traz reference, a sessão foi contínua e gravada minuto a minuto, e kmh, inclinePercent, mets, os alvos e bpmEnd de work são os do patamar de referência: o primeiro trecho longo (5 minutos ou mais; sem nenhum assim, 3) na mesma carga em que o BPM ficou no alvo da sessão (de 3 bpm abaixo do teto da faixa até ele; em recuperação, a faixa inteira) ou, se nenhum ficou, o que chegou mais perto. reference.fromMinute é o minuto do bloco em que ele começou e reference.minutes, quanto durou.
-  - stages: o mesmo por etapa, quando a lista é curta. Aqui a carga é sempre a média da etapa e bpmEnd, o do fim dela.
+  - work e easy: resumo dos blocos de esforço e dos blocos leves (aquecimento, recuperações e volta à calma). Cada um traz seconds, kmh e inclinePercent realizados, mets (custo metabólico dessa carga; 1 MET = repouso), targetKmh e targetInclinePercent (alvos em que o último bloco terminou), bpmEnd (mediana das últimas leituras dos blocos, o valor mais próximo do BPM estabilizado), bpmReadings, cadenceSpm (cadência média em passos por minuto, medida pela cinta; null sem cadência) e strideChangePercent (quanto a passada, a distância de cada passo, mudou do primeiro para o último bloco do grupo com cadência, em %; negativo = passada mais curta; null com menos de dois blocos com cadência). null quando não houve o bloco. Quando work traz reference, a sessão foi contínua e gravada minuto a minuto, e kmh, inclinePercent, mets, os alvos e bpmEnd de work são os do patamar de referência: o primeiro trecho longo (5 minutos ou mais; sem nenhum assim, 3) na mesma carga em que o BPM ficou no alvo da sessão (de 3 bpm abaixo do teto da faixa até ele; em recuperação, a faixa inteira) ou, se nenhum ficou, o que chegou mais perto. reference.fromMinute é o minuto do bloco em que ele começou e reference.minutes, quanto durou.
+  - stages: o mesmo por etapa, quando a lista é curta. Aqui a carga é sempre a média da etapa, bpmEnd é o do fim dela e strideChangePercent fica null.
   - plateaus (só nas sessões gravadas minuto a minuto): os trechos de 2 minutos ou mais na mesma carga dentro dos blocos de esforço, em ordem, com fromMinute (minuto do bloco em que começou), minutes, kmh, inclinePercent, mets e bpm (BPM típico do trecho). Num bloco longo é normal a carga subir no começo e descer mais adiante: a frequência cardíaca sobe aos poucos na mesma carga.
   - recoveryDrops: queda em bpm entre o fim de um bloco de esforço e cerca de 1 minuto de recuperação.
-  - reductions: reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa. Os alívios menores, de rotina para quem treina junto do teto, não contam. increases: aumentos de carga durante a sessão.
+  - reductions: reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa. Os alívios menores, de rotina para quem treina junto do teto, não contam, nem a carga decidida numa recuperação para o bloco seguinte. increases: aumentos de carga durante a sessão, inclusive os decididos numa recuperação para o bloco seguinte.
   - restBpm: FC lida no primeiro minuto de hoje. Fica de 10 a 20 bpm acima do repouso real.
 - recent: até 6 sessões válidas anteriores, da mais nova para a mais antiga, resumidas: daysAgo (em relação a esta sessão), goal, completionPercent, work (kmh, inclinePercent, mets, bpmEnd, com reference quando é o patamar de referência), plateaus, zone, position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions, increases, restBpm e level. approximate = true marca registros antigos em que work traz médias da sessão inteira.
-- heart: os dois números que decidem a FC máxima, já calculados pelo app. ageEstimateBpm é a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade). floorBpm é o piso medido: o maior pico validado de todas as sessões, esta incluída, com 5 bpm a mais quando o pico é de uma sessão concluída sem reductions (quem seguiu até o fim depois do pico não estava no máximo); null se não há pico validado.
+- heart: os dois números que decidem a FC máxima, já calculados pelo app. ageEstimateBpm é a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade). floorBpm é o piso medido: o maior pico validado de todas as sessões, esta incluída, com 5 bpm a mais quando o pico é de um bloco de esforço e a pessoa seguiu depois dele: numa sessão concluída sem reductions, ou, mesmo com reductions, quando depois do pico ela concluiu outro bloco de esforço ou seguiu 4 minutos ou mais no mesmo bloco sem alívio de carga no minuto seguinte a ele (quem seguiu depois do pico não estava no máximo). Essa folga não passa da maior das duas fórmulas pela idade + 10; o pico em si vale mesmo acima disso. null se não há pico validado.
 
 NÍVEL (level)
 Aplique na ordem. Vale o primeiro critério atendido.

@@ -360,6 +360,36 @@ it('a leitura do momento é a mediana dos 5 últimos segundos da cinta, com a su
   expect(livePulse(strap(0, [...flat(40, 160), 172, 172, 172], 0), 42000)).toBeNull();
 });
 
+it('com os RR da cinta, a leitura do momento é o batimento a batimento, filtrado e conferido com a cinta', () => {
+  // 45 s com a cinta mandando 164 e os batimentos de verdade em `beat` bpm, com `junk` a cada RR bom.
+  const series = (beat: (t: number) => number, junk: number[] = []) => {
+    let phase = 0;
+    return Array.from({ length: 45 }, (_, t): TreadmillSample => {
+      const rr = Math.round(60000 / beat(t));
+      const rrMs: number[] = [];
+      for (phase += 1000; phase >= rr; phase -= rr) rrMs.push(rr, ...junk);
+      return { ...sample(t * 1000, work.speed, work.incline, 164), heartRateSource: 'strap', rrMs };
+    });
+  };
+  // Os RR dizem 168 (357 ms) e a cinta, suavizada, 164: vale o dos RR, e a subida em 30 s compara RR com RR.
+  expect(livePulse(series(() => 168), 44000)).toEqual({ bpm: 168, rise: 0 });
+  expect(livePulse(series((t) => (t < 20 ? 160 : 168)), 44000)).toEqual({ bpm: 168, rise: 8 });
+  // Metade dos RR é artefato (280 ms, 214 bpm, fora da faixa de 300 a 2000 ms): o filtro os descarta.
+  expect(livePulse(series(() => 168, [280]), 44000)).toEqual({ bpm: 168, rise: 0 });
+  // Um RR em cada dois a 20% ou mais do anterior (500 ms, 120 bpm): também descartado.
+  expect(livePulse(series(() => 168, [500]), 44000)).toEqual({ bpm: 168, rise: 0 });
+  // Os RR mais de 10 bpm longe da cinta (182 contra 164): sobrou artefato, e vale a cinta.
+  expect(livePulse(series(() => 182), 44000)).toEqual({ bpm: 164, rise: 0 });
+  // Os RR existem para adiantar a subida, nunca para atrasar a trava: com a cinta em 178 e os RR em 169
+  // (de acordo, a 9 bpm), vale o maior, 178, acima do teto de um VO₂máx de 161 a 170.
+  const strapAt = (bpm: number) => series(() => 169).map((s) => ({ ...s, heartRateBpm: bpm }));
+  expect(livePulse(strapAt(178), 44000)).toEqual({ bpm: 178, rise: 0 });
+  // Menos de 5 batimentos nos últimos 5 s (a cinta parou de mandar RR): vale a cinta, como sem RR,
+  // e a subida compara cinta com cinta, sem pôr nela a diferença entre as duas contas.
+  const few = series(() => 168).map((s) => (s.at >= 40000 ? { ...s, rrMs: s.at === 44000 ? [357, 357] : [] } : s));
+  expect(livePulse(few, 44000)).toEqual({ bpm: 164, rise: 0 });
+});
+
 it('resume as leituras em mediana, tendência e posição na faixa', () => {
   const features = grip;
   // Uma leitura solta (150) não tira a mediana da faixa.
@@ -507,7 +537,8 @@ it('a correção anda pela escada de cargas, proporcional à distância, sem exi
   expect(fix(stageAt(5, 0), 'subir', 126 - 105)).toEqual(stageAt(5.2, 2));
   // Correndo só a velocidade muda: no limiar, 173 BPM a 8 km/h e 1% (faixa de 153 a 162).
   expect(fix(stageAt(8, 1), 'aliviar', 173 - 159)).toEqual(stageAt(7, 1));
-  expect(fix(stageAt(10, 1), 'aliviar', 15)).toEqual(stageAt(8.9, 1));
+  // 9 km/h tira 0,995 MET de um pedido de 1: dentro da folga de 0,03, como na caminhada.
+  expect(fix(stageAt(10, 1), 'aliviar', 15)).toEqual(stageAt(9, 1));
   expect(fix(stageAt(10, 1), 'subir', 15)).toEqual(stageAt(11, 1));
   // Quanto mais longe da faixa, maior o degrau: abaixo de 4,9 km/h a caminhada é plana.
   expect([8, 13, 33].map((bpm) => fix(stageAt(5, 1), 'aliviar', bpm))).toEqual([
@@ -618,18 +649,25 @@ it('com rampa o ajuste fino é a velocidade, de 4,9 a 5,2 km/h: 0,1 km/h vale be
       }
 });
 
-it('aliviar uma corrida nunca deixa o alvo entre 5,2 e 6 km/h', () => {
+it('aliviar uma corrida nunca deixa o alvo entre 5,2 e 6 km/h, nem sobe a velocidade ou a rampa', () => {
   const at = (stage: Stage) => sample(0, stage.speed, stage.incline);
   const ease = (stage: Stage, mets: number) => correctedStage(stage, 'aliviar', mets, at(stage));
-  // Enquanto a corrida dá conta, só a velocidade desce, até 6 km/h.
-  expect(ease(stageAt(7, 1), 0.8)).toEqual(stageAt(6.1, 1));
+  // Enquanto a corrida dá conta, só a velocidade desce, até 6 km/h, com a mesma folga de 0,03 MET da caminhada.
+  // 6,2 km/h tira 0,796 MET de um pedido de 0,8.
+  expect(ease(stageAt(7, 1), 0.8)).toEqual(stageAt(6.2, 1));
   expect(ease(stageAt(7, 1), 0.99)).toEqual(stageAt(6, 1));
-  // Passou disso, a carga desce para a linha de baixo da escada: 5,2 km/h com a rampa que couber.
-  expect(ease(stageAt(6, 1), 0.1)).toEqual(stageAt(5.2, 7.5));
-  expect(ease(stageAt(6, 1), 0.3)).toEqual(stageAt(5.2, 7));
-  expect(ease(stageAt(6, 1), 1)).toEqual(stageAt(5, 6));
-  expect(ease(stageAt(7, 1), 1.4)).toEqual(stageAt(5.2, 7));
-  expect(ease(stageAt(6, 1), 3)).toEqual(stageAt(4.9, 1.5));
+  // 6,1 km/h com um corte de 0,1 MET: 6 km/h fica 0,0005 MET aquém, dentro da folga, e a pessoa segue correndo.
+  expect(ease(stageAt(6.1, 1), 0.1)).toEqual(stageAt(6, 1));
+  // Passou disso, a pessoa passa a andar a 5,2 km/h com a mesma rampa, e o alívio para aí, por maior
+  // que seja o pedido: pela equação 5,2 km/h com 7,5% custa menos que correr a 6, mas não para quem
+  // corre devagar, e a queda real da troca é grande. O resto vem na revisão seguinte.
+  for (const mets of [0.1, 0.3, 1, 3]) expect(ease(stageAt(6, 1), mets)).toEqual(stageAt(5.2, 1));
+  expect(ease(stageAt(7, 1), 1.4)).toEqual(stageAt(5.2, 1));
+  // Um alvo antigo de corrida com 3% de rampa: andando ela fica nos 3%; com a esteira medindo menos, na medida.
+  expect(ease(stageAt(6.6, 3), 1)).toEqual(stageAt(5.2, 3));
+  expect(correctedStage(stageAt(6.6, 3), 'aliviar', 1, sample(0, 6.6, 2))).toEqual(stageAt(5.2, 2));
+  // Já andando, a revisão seguinte desce pela caminhada, como sempre.
+  expect(ease(stageAt(5.2, 1), 0.3)).toEqual(stageAt(5.1, 0.5));
   // Quem já baixou a esteira para andar num bloco de corrida está caminhando: a conta parte da
   // carga medida, e o alívio não pede mais velocidade nem mais rampa do que a esteira tem.
   expect(correctedStage(stageAt(6, 1), 'aliviar', 0.3, sample(0, 5.5, 1))).toEqual(stageAt(5, 1));
@@ -651,6 +689,7 @@ it('aliviar uma corrida nunca deixa o alvo entre 5,2 e 6 km/h', () => {
         const eased = ease(stageAt(speed, incline), mets);
         expect(eased.speed <= 5.2 || eased.speed >= 6).toBe(true);
         expect(eased.speed).toBeLessThan(speed + 0.01);
+        expect(eased.incline).toBeLessThanOrEqual(incline);
       }
 });
 

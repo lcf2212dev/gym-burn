@@ -1,5 +1,6 @@
 import {
   accumulate,
+  acsm,
   currentCue,
   evidence,
   insufficient,
@@ -179,6 +180,49 @@ it('registra por etapa a posição na faixa, o fim do bloco, a recuperação e o
     top: 126,
   });
   expect(log!.inclineMs / log!.inclineDurationMs).toBe(2);
+});
+
+it('com a cinta o pico validado é a mediana de 10 leituras seguidas, e fica guardado quando ele aconteceu', () => {
+  const zone = { low: 100, high: 120 };
+  const feed = (values: number[], source?: 'strap') => {
+    let log: StageLog | undefined;
+    let previous: TreadmillSample | null = null;
+    values.forEach((bpm, t) => {
+      const s = { ...sample(t * 1000, 5, bpm), heartRateSource: source };
+      log = logStage(log, s, previous, zone, t);
+      previous = s;
+    });
+    return log!;
+  };
+  // 20 s em 150 e um surto de 4 s em 190 (artefato): com o sensor de mão ele viraria o pico.
+  const bpm = [...Array(20).fill(150), 190, 190, 190, 190, ...Array(10).fill(150)];
+  expect(feed(bpm)).toMatchObject({ top: 190, topAtMs: 21000 });
+  // Com a cinta, 4 leituras em 10 não seguram a mediana: o pico é 150, desde a 10ª leitura.
+  expect(feed(bpm, 'strap')).toMatchObject({ top: 150, topAtMs: 9000 });
+  // Uma subida de verdade, de 10 s ou mais, vira o pico quando passa a ser a maioria das 10 leituras.
+  const climb = [...Array(20).fill(150), ...Array(12).fill(172), ...Array(10).fill(165)];
+  expect(feed(climb, 'strap')).toMatchObject({ top: 172, topAtMs: 25000 });
+  // Fora da lona o tempo conta, mas o BPM não entra em nenhuma conta da etapa.
+  let log: StageLog | undefined;
+  let previous: TreadmillSample | null = null;
+  [130, 131, 90, 90].forEach((value, t) => {
+    const s = sample(t * 1000, 5, value);
+    log = logStage(log, s, previous, zone, t, t >= 2);
+    previous = s;
+  });
+  expect(log).toMatchObject({ ms: 3000, offBeltMs: 2000, bpmCount: 2, bpmSum: 261, tail: [130, 131], zone: [0, 0, 2] });
+  expect(logBeats([[261, 2]], sample(3000, 5, 90), sample(2000, 5, 90), 3, true)).toEqual([[261, 2]]);
+  // Nos totais também: o BPM de quem está ao lado da lona não conta, e o gasto desses segundos é o de repouso.
+  let totals = newWorkout(profile, 'ble', null).totals;
+  let last: TreadmillSample | null = null;
+  [130, 131, 90, 90].forEach((value, t) => {
+    const s = { ...sample(t * 1000, 5, value), heartRateSource: 'strap' as const };
+    totals = accumulate(totals, s, last, { offBelt: t >= 2 });
+    last = s;
+  });
+  expect(totals).toMatchObject({ movingMs: 3000, bpmCount: 2, bpmSum: 261, peakBpm: 131, strapCount: 2 });
+  // Um segundo na carga (5 km/h a 2%, 3,91 METs) e dois em repouso, a 1 MET.
+  expect(totals.metMs).toBeCloseTo(acsm(5, 2, false) * 1000 + 2 * 1000, 6);
 });
 
 it('guarda os batimentos minuto a minuto, só com a lona andando', () => {

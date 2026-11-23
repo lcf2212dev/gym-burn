@@ -1,0 +1,253 @@
+import type { TreadmillSample } from '@/treadmill/types';
+import {
+  betweenBlocks,
+  blockEnd,
+  carryBpm,
+  COOLDOWN_MIN_SECONDS,
+  nextBlockLoad,
+  paceRecovery,
+  type BlockEnd,
+  type NextBlockInput,
+} from '../intervals';
+import { emptyLog, metabolicCost, type Change, type Plan, type StageLog } from '../model';
+import { sessionPlan, week } from '../week';
+
+// O VO₂máx do plano semanal: 600 s aquecendo, 4 tiros de 240 s com 180 s leves e 420 s desaquecendo.
+// Tiros nas etapas 1, 3, 5 e 7; recuperações entre tiros nas 2, 4 e 6; a 8 vem antes da volta à calma.
+const vo2 = (pace: number, grade = 1) => sessionPlan(week[2].session!, pace, grade);
+// 41 anos e FC máxima de 179: faixa de 161 a 170.
+const zone = { low: 161, high: 170 };
+const withLoads = (plan: Plan, loads: Record<number, [number, number]>): Plan => ({
+  ...plan,
+  stages: plan.stages.map((s, i) => (loads[i] ? { ...s, speed: loads[i][0], incline: loads[i][1] } : s)),
+});
+const decide = (input: Partial<NextBlockInput> & Pick<NextBlockInput, 'plan' | 'index' | 'ends'>) =>
+  nextBlockLoad({
+    log: input.plan.stages.map(() => emptyLog()),
+    changes: [],
+    zone,
+    rest: null,
+    strapReadings: 20,
+    offBelt: false,
+    ...input,
+  });
+const end = (index: number, speed: number, bpm: number, incline = 1): BlockEnd => ({ index, speed, incline, bpm });
+
+it('a recuperação entre dois blocos é a etapa leve logo depois de um, com outro mais adiante', () => {
+  const plan = vo2(6.6);
+  expect(plan.stages.map((_, i) => betweenBlocks(plan, i))).toEqual([
+    false, false, true, false, true, false, true, false, false, false,
+  ]);
+});
+
+it('o fim do bloco é a carga medida nos últimos 20 s, nos degraus do guia, e as leituras da cinta ali', () => {
+  const stage = vo2(6.6).stages[1];
+  const at = (t: number, speedKmh: number, bpm: number | null, strap = true): TreadmillSample => ({
+    at: t * 1000,
+    speedKmh,
+    inclinationPercent: 0.995,
+    heartRateBpm: bpm,
+    heartRateSource: strap ? 'strap' : 'treadmill',
+    energyKcal: null,
+    distanceM: null,
+  });
+  // 30 s de bloco até 100 s: a lona a 6,1 nos últimos 20 s (a pessoa seguiu um corte), a cinta lendo 15 deles.
+  const samples = Array.from({ length: 30 }, (_, k) => at(70 + k, k < 10 ? 6.6 : 6.1, k % 4 === 0 ? null : 170));
+  expect(blockEnd(samples, 100000, stage)).toEqual({ speed: 6.1, incline: 1, strapReadings: 15 });
+  // Junto do alvo vale o alvo; sem a cinta não há leitura dela.
+  expect(blockEnd(samples.map((s) => ({ ...s, speedKmh: 6.62, heartRateSource: 'treadmill' })), 100000, stage)).toEqual({
+    speed: 6.6,
+    incline: 1,
+    strapReadings: 0,
+  });
+  expect(blockEnd(samples, 50000, stage)).toBeNull();
+});
+
+it('o acúmulo é a média das diferenças de fim entre tiros seguidos, descontada a mudança de carga', () => {
+  const plan = vo2(6.6);
+  expect(carryBpm(plan, [end(1, 6.6, 165)], null)).toBe(2);
+  // Mesma carga: 8 e 4 bpm de um tiro para o outro.
+  expect(carryBpm(plan, [end(1, 6.6, 162), end(3, 6.6, 170), end(5, 6.6, 174)], null)).toBe(6);
+  // O 2º tiro foi 0,4 km/h mais forte (0,4 MET, 6 bpm a 15 por MET): dos 10 bpm, 4 são acúmulo.
+  expect(carryBpm(plan, [end(1, 6.6, 160), end(3, 7.0, 170)], null)).toBeCloseTo(10 - 15 * (metabolicCost(7, 1) - metabolicCost(6.6, 1)), 6);
+  // Um tiro sem fim medido no meio: o par que pula um tiro não conta.
+  expect(carryBpm(plan, [end(1, 6.6, 160), end(5, 6.6, 172)], null)).toBe(2);
+  // Nunca negativo.
+  expect(carryBpm(plan, [end(1, 6.6, 168), end(3, 6.6, 164)], null)).toBe(0);
+  // Um par de caminhada com corrida (pela velocidade alvo) não entra: a diferença entre as duas equações
+  // não é o esforço real, e daria aqui um acúmulo falso de 15 bpm.
+  const walked = withLoads(plan, { 3: [5.2, 1] });
+  expect(carryBpm(walked, [end(1, 6.6, 175), end(3, 5.2, 172)], null)).toBe(2);
+  expect(carryBpm(walked, [end(1, 6.6, 175), end(3, 5.2, 172), end(5, 6.6, 174)], null)).toBe(2);
+  const both = withLoads(plan, { 1: [5.2, 1], 3: [5.2, 1] });
+  expect(carryBpm(both, [end(1, 5.2, 150, 1), end(3, 5.2, 155, 1)], null)).toBe(5);
+});
+
+it('a sessão real de 22/11, encadeada: cada tiro na carga que a decisão anterior deu, com os mesmos fins', () => {
+  // Os fins de 22/11 (161, 170 e 178) e o plano de partida a 6,0 km/h e 1%; cada decisão vai para o plano.
+  let plan = vo2(6.0);
+  const apply = (d: NonNullable<ReturnType<typeof decide>>) => {
+    plan = { ...plan, stages: plan.stages.map((s, i) => (d.stages.includes(i) ? d.to : s)) };
+  };
+  // 1ª recuperação: o 1º tiro terminou em 161. Sem par ainda, acúmulo de 2 e previsão de 163, 7 abaixo
+  // do teto. Cabem 6 bpm (1 de folga), 0,4 MET a 15 bpm por MET: o 2º tiro sobe para 6,4 km/h.
+  const ends = [end(1, 6.0, 161)];
+  const first = decide({ plan, index: 2, ends })!;
+  expect(first).toMatchObject({ index: 3, predictedBpm: 163, carryBpm: 2, verdict: 'aumentar', stages: [3] });
+  expect([first.to.speed, first.to.incline]).toEqual([6.4, 1]);
+  apply(first);
+  // 2ª: o 2º tiro, a 6,4 km/h, terminou em 170. Dos 9 bpm a mais, 6 são os 0,4 MET a mais: acúmulo de 3
+  // e previsão de 173. O corte de 6 bpm a partir de 6,4 cabe na corrida e dá 6,0 km/h, que já é a carga do
+  // 3º tiro no plano: nada muda.
+  ends.push(end(3, 6.4, 170));
+  const second = decide({ plan, index: 4, ends })!;
+  expect(second).toMatchObject({ index: 5, predictedBpm: 173, verdict: 'reduzir', stages: [] });
+  expect(second.carryBpm).toBeCloseTo(3.03, 2);
+  expect([second.to.speed, second.to.incline]).toEqual([6, 1]);
+  // 3ª: o 3º tiro, a 6,0 km/h, terminou em 178. Do 2º para o 3º, 8 bpm a mais com 0,4 MET a menos: o
+  // acúmulo médio vai a 8,5 e a previsão a 186 ou 187. O corte de 1 MET não cabe na corrida: o 4º tiro
+  // passa a andar a 5,2 km/h com a mesma rampa (1%), e para aí.
+  ends.push(end(5, 6.0, 178));
+  const third = decide({ plan, index: 6, ends })!;
+  expect(third).toMatchObject({ index: 7, verdict: 'reduzir', stages: [7] });
+  expect(third.carryBpm).toBeCloseTo(8.5, 6);
+  expect(third.predictedBpm).toBeGreaterThanOrEqual(186);
+  expect([third.to.speed, third.to.incline]).toEqual([5.2, 1]);
+  apply(third);
+  expect(plan.stages.filter((s) => !s.measure).map((s) => [s.speed, s.incline])).toEqual([
+    [6, 1], [6.4, 1], [6, 1], [5.2, 1],
+  ]);
+  // A última recuperação vem antes da volta à calma: não há bloco a decidir.
+  expect(decide({ plan, index: 8, ends: [...ends, end(7, 5.2, 165)] })).toBeNull();
+});
+
+it('depois de um corte da trava perto do fim, o tiro que termina 2 acima do teto reduz o seguinte sem empilhar', () => {
+  // A trava cortou o 1º tiro de 7,5 para 6,9 km/h a 90 s do fim, e a redução passou aos três tiros seguintes.
+  const plan = withLoads(vo2(7.5), { 3: [6.9, 1], 5: [6.9, 1], 7: [6.9, 1] });
+  const cut: Change = { second: 600 + 150, stage: 1, decision: 'reduzir velocidade', bpm: 172, from: [7.5, 1], to: [6.9, 1], by: 'trava' };
+  const ends = [end(1, 6.9, 172)];
+  const settled = decide({ plan, index: 2, ends, changes: [cut] })!;
+  // O fim do tiro ainda responde ao corte: sai só o excesso, 2 bpm, a partir de 6,9.
+  expect(settled).toMatchObject({ verdict: 'reduzir', stages: [3, 5, 7] });
+  expect([settled.to.speed, settled.to.incline]).toEqual([6.7, 1]);
+  expect(metabolicCost(6.9, 1) - metabolicCost(6.7, 1)).toBeLessThanOrEqual(0.5);
+  // Sem o corte, a previsão (172 + 2 de acúmulo = 174) pediria 7 bpm: bem mais.
+  const fresh = decide({ plan, index: 2, ends })!;
+  expect(fresh.to.speed).toBeLessThan(6.7);
+  // O corte feito há mais de 3 min do fim não segura a previsão.
+  const early = decide({ plan, index: 2, ends, changes: [{ ...cut, second: 600 + 50 }] })!;
+  expect(early.to).toEqual(fresh.to);
+  // Terminando no teto, depois do corte, nada muda, e a carga não sobe.
+  expect(decide({ plan, index: 2, ends: [end(1, 6.9, 160)], changes: [cut] })).toMatchObject({ verdict: 'manter', stages: [] });
+});
+
+it('a carga só sobe sem leitura acima do teto, sem corte da trava na sessão e com a pessoa na lona', () => {
+  const plan = vo2(6.6);
+  const ends = [end(1, 6.6, 158)];
+  // 158 no fim, previsão de 160: cabem 8 bpm, 0,53 MET a 15 por MET. Sobe, mas só o próximo tiro.
+  const raised = decide({ plan, index: 2, ends })!;
+  expect(raised).toMatchObject({ verdict: 'aumentar', predictedBpm: 160, stages: [3] });
+  expect(raised.to.speed).toBe(7.1);
+  // Bem abaixo, o aumento para em 1 MET.
+  const far = decide({ plan, index: 2, ends: [end(1, 6.6, 130)] })!;
+  expect(metabolicCost(far.to.speed, far.to.incline) - metabolicCost(6.6, 1)).toBeLessThanOrEqual(1);
+  expect(far.to.speed).toBe(7.6);
+  // Uma leitura acima do teto no bloco, um corte da trava em qualquer tiro, ou a pessoa fora da lona: não sobe.
+  const log: StageLog[] = plan.stages.map(() => emptyLog());
+  const above = log.map((l, i) => (i === 1 ? { ...l, zone: [0, 100, 1] as StageLog['zone'] } : l));
+  const off = log.map((l, i) => (i === 1 ? { ...l, offBeltMs: 12000 } : l));
+  const trava: Change = { second: 400, stage: 1, decision: 'reduzir velocidade', bpm: 172, from: [6.6, 1], to: [6.6, 1], by: 'trava' };
+  for (const input of [{ log: above }, { log: off }, { offBelt: true }, { changes: [trava] }])
+    expect(decide({ plan, index: 2, ends, ...input })).toMatchObject({ verdict: 'manter', stages: [], to: plan.stages[3] });
+  // Na faixa do alvo (previsão de 167 a 169) a carga do fim se repete: um próximo tiro mais pesado desce a ela.
+  const heavier = withLoads(plan, { 3: [7.0, 1], 5: [7.0, 1], 7: [6.0, 1] });
+  expect(decide({ plan: heavier, index: 2, ends: [end(1, 6.6, 166)] })).toMatchObject({
+    verdict: 'manter',
+    stages: [3, 5],
+    to: expect.objectContaining({ speed: 6.6, incline: 1 }),
+  });
+  // Um mais leve recebe a carga em que o anterior terminou no alvo, só ele (como um aumento): sem isso o
+  // aumento do bloco anterior, que deu certo, voltaria à carga do plano sem aviso.
+  const lighter = withLoads(plan, { 3: [6.0, 1], 5: [6.0, 1] });
+  expect(decide({ plan: lighter, index: 2, ends: [end(1, 6.6, 166)] })).toMatchObject({
+    verdict: 'manter',
+    stages: [3],
+    to: expect.objectContaining({ speed: 6.6, incline: 1 }),
+  });
+  // Com uma leitura acima do teto, um corte da trava ou tempo fora da lona nesse bloco, ele fica como está.
+  for (const input of [{ log: above }, { log: off }, { changes: [trava] }])
+    expect(decide({ plan: lighter, index: 2, ends: [end(1, 6.6, 166)], ...input })).toMatchObject({ verdict: 'manter', stages: [] });
+  // A pessoa terminou o tiro a 7,6 km/h, acima do alvo de 6,6, com previsão de 171: o corte a partir
+  // dali ainda passaria do alvo do próximo, e um corte nunca sobe a carga dele.
+  expect(decide({ plan, index: 2, ends: [end(1, 7.6, 169)] })).toMatchObject({ verdict: 'reduzir', stages: [], to: plan.stages[3] });
+  // Uma leitura acima do teto nos primeiros segundos da recuperação (a FC ainda subindo): também não sobe.
+  const late = log.map((l, i) => (i === 2 ? { ...l, zone: [0, 10, 2] as StageLog['zone'] } : l));
+  expect(decide({ plan, index: 2, ends, log: late })).toMatchObject({ verdict: 'manter', stages: [] });
+});
+
+it('sem a cinta, sem o fim medido ou com ele fora das cargas do guia, não há decisão', () => {
+  const plan = vo2(6.6);
+  expect(decide({ plan, index: 2, ends: [end(1, 6.6, 160)], strapReadings: 9 })).toBeNull();
+  expect(decide({ plan, index: 2, ends: [] })).toBeNull();
+  // O fim medido é do bloco anterior a outro: não serve para esta recuperação.
+  expect(decide({ plan, index: 4, ends: [end(1, 6.6, 160)] })).toBeNull();
+  // 5,6 km/h não é carga do guia (nem caminhada, nem corrida).
+  expect(decide({ plan, index: 2, ends: [end(1, 5.6, 160)] })).toBeNull();
+  // Uma etapa de esforço não é recuperação.
+  expect(decide({ plan, index: 3, ends: [end(1, 6.6, 160)] })).toBeNull();
+  // Um tiro de menos de 1 min: nos últimos 20 s dele a lona ainda pode estar acelerando.
+  const sprint = { ...plan, stages: plan.stages.map((s, i) => (i === 1 ? { ...s, seconds: 59 } : s)) };
+  expect(decide({ plan: sprint, index: 2, ends: [end(1, 6.6, 150)] })).toBeNull();
+  expect(decide({ plan: { ...sprint, stages: sprint.stages.map((s, i) => (i === 1 ? { ...s, seconds: 60 } : s)) }, index: 2, ends: [end(1, 6.6, 150)] })).not.toBeNull();
+});
+
+describe('a recuperação pelo coração', () => {
+  // Máxima de 179: a recuperação termina com o BPM do momento em 116 (65%).
+  const pace = (plan: Plan, index: number, into: number, bpm: number | null, planned = 180) =>
+    paceRecovery({ plan, index, into, planned, bpm, maxBpm: 179 });
+  const total = (plan: Plan) => plan.stages.reduce((n, s) => n + s.seconds, 0);
+  const apply = (plan: Plan, stages: Plan['stages']) => ({ ...plan, stages });
+
+  it('termina com o BPM a 65% da máxima, não antes de 2 min, e a volta à calma fica com o tempo', () => {
+    const plan = vo2(6.6);
+    expect(total(plan)).toBe(2700);
+    expect(pace(plan, 2, 100, 110)).toBeNull();
+    const early = pace(plan, 2, 119, 116)!;
+    expect(early).toMatchObject({ seconds: 120, reason: 'cedo' });
+    expect(early.stages[2].seconds).toBe(120);
+    expect(early.stages[9].seconds).toBe(480);
+    expect(total(apply(plan, early.stages))).toBe(2700);
+    // 117 ainda não é 65%; sem leitura, ou na última recuperação (antes da volta à calma), nada muda.
+    expect(pace(plan, 2, 130, 117)).toBeNull();
+    expect(pace(plan, 2, 130, null)).toBeNull();
+    expect(pace(plan, 8, 130, 100)).toBeNull();
+  });
+
+  it('com o BPM ainda alto ela é alongada, até 5 min, com o tempo da volta à calma dividido entre as que faltam', () => {
+    let plan = vo2(6.6);
+    // Faltam 3 recuperações e a volta à calma pode emprestar 4 min: 80 s para esta.
+    const first = pace(plan, 2, 174, 140)!;
+    expect(pace(plan, 2, 170, 140)).toBeNull();
+    expect(first).toMatchObject({ seconds: 260, reason: 'alongada' });
+    plan = apply(plan, first.stages);
+    expect([plan.stages[2].seconds, plan.stages[9].seconds, total(plan)]).toEqual([260, 340, 2700]);
+    // No tempo a mais o BPM cai: ela termina ali, e a volta à calma recebe o que sobrou.
+    const done = pace(plan, 2, 200, 115)!;
+    expect(done).toMatchObject({ seconds: 201, reason: 'alongada' });
+    expect([done.stages[9].seconds, total(apply(plan, done.stages))]).toEqual([399, 2700]);
+    // A leitura some no tempo a mais: vale o tempo do plano, ou agora, se ele já passou.
+    expect(pace(plan, 2, 150, null)).toMatchObject({ seconds: 180, reason: 'plano' });
+    expect(pace(plan, 2, 200, null)).toMatchObject({ seconds: 201, reason: 'plano' });
+    // As três recuperações alongadas até o fim: a volta à calma termina em 3 min, nunca menos.
+    plan = vo2(6.6);
+    for (const index of [2, 4, 6]) plan = apply(plan, pace(plan, index, 176, 150)!.stages);
+    expect(plan.stages.map((s) => s.seconds)).toEqual([600, 240, 260, 240, 260, 240, 260, 240, 180, COOLDOWN_MIN_SECONDS]);
+    expect(total(plan)).toBe(2700);
+    // Com uma volta à calma longa, o teto é de 5 min.
+    const long = { ...vo2(6.6), stages: vo2(6.6).stages.map((s, i) => (i === 9 ? { ...s, seconds: 1800 } : s)) };
+    expect(pace(long, 2, 176, 150)).toMatchObject({ seconds: 300 });
+    // Sem volta à calma que pague o tempo (3 min ou menos), ela não é alongada.
+    const short = { ...vo2(6.6), stages: vo2(6.6).stages.map((s, i) => (i === 9 ? { ...s, seconds: 180 } : s)) };
+    expect(pace(short, 2, 176, 150)).toBeNull();
+  });
+});

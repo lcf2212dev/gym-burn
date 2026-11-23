@@ -170,8 +170,9 @@ describe('anexar e reconciliar', () => {
     await flush();
 
     expect(stored.value?.xoss).toBe(true);
-    // Nada ligado pelo app: passos e alerta não são tocados, só lidos para o diagnóstico.
-    expect(strap.commands).toEqual(['ff 00', '71 00 00', '75 00', '09 00']);
+    // Nada ligado pelo app: passos e alerta não são tocados, só lidos para o diagnóstico
+    // (na ordem dos passos de desfazer: gravação, alerta, passos).
+    expect(strap.commands).toEqual(['ff 00', '75 00', '71 00 00', '09 00']);
     expect(session.getSnapshot().xoss).toMatchObject({
       model: 'X2PRO',
       alertBpm: null,
@@ -768,6 +769,30 @@ describe('donos: o app só desfaz o que ligou', () => {
     expect(transport.connections.length).toBe(2);
   });
 
+  it('parear de novo enquanto a esteira conecta: a cinta espera a vez e só depois procura e conecta', async () => {
+    const { transport, session } = makeSession();
+    const { strap } = await connect(transport, session);
+    await flush();
+    session.want({ workout: guided('w1', 140), profile: null });
+    await run(1000);
+    session.actions.startPairing();
+    await flush();
+    transport.see(STRAP_ID);
+    session.setQuiet(true);
+    session.actions.choose(STRAP_ID);
+    await run(5000);
+    expect(strap.disconnected).toBe(true);
+    expect(transport.connections).toHaveLength(1);
+    expect(session.getSnapshot().phase).toBe('searching');
+
+    session.setQuiet(false);
+    await flush();
+    transport.see(STRAP_ID);
+    await run(2000);
+    expect(transport.connections).toHaveLength(2);
+    expect(session.getSnapshot().phase).toBe('connected');
+  });
+
   it('trocar de cinta também desfaz o que o app ligou na anterior', async () => {
     const { transport, session } = makeSession();
     const { strap } = await connect(transport, session);
@@ -840,53 +865,20 @@ describe('donos: o app só desfaz o que ligou', () => {
     expect(recorded).toHaveBeenCalledWith({ workoutId: 'velho', recordedAt: T0 - 25 * 3_600_000 });
   });
 
-  it('a gravação do app já virou arquivo e há outra em curso: não encerra, e avisa o treino dono', async () => {
-    const startedAt = T0 - 3 * 3_600_000;
-    const recorded = jest.fn();
-    const { transport, session, stored } = orphan(startedAt);
-    session.onRecorded(recorded);
-    transport.configure = (strap) => {
-      strap.files.set(fitName(startedAt + 2000), encodeFit(startedAt, [{ bpm: 100, cadence: 100 }]));
-      strap.recording = true;
-      strap.recordingStartedAt = T0 - 20 * 60_000;
-    };
+  it('com a cinta listando a gravação em curso, o fim do treino guiado ainda a encerra (o app não confere pela lista)', async () => {
+    const { transport, session, stored } = makeSession();
+    transport.configure = (strap) => (strap.faults.listsCurrentRecording = true);
+    session.want({ workout: null, profile: null });
     const { strap } = await connect(transport, session);
-    await run(5000);
+    await flush();
+    session.want({ workout: guided('w1', 140), profile: null });
+    await run(60_000);
     expect(strap.recording).toBe(true);
-    expect(strap.commands).not.toContain('75 02');
-    expect(stored.value?.recording ?? null).toBeNull();
-    expect(recorded).toHaveBeenCalledWith({ workoutId: 'velho', recordedAt: startedAt });
-  });
-
-  it('com a lista vazia (não prova nada), a gravação da marca é encerrada', async () => {
-    const startedAt = T0 - 3 * 3_600_000;
-    const { transport, session } = orphan(startedAt);
-    transport.configure = (strap) => {
-      strap.files.set(fitName(startedAt), encodeFit(startedAt, [{ bpm: 100, cadence: 100 }]));
-      strap.faults.emptyList = true;
-      strap.recording = true;
-      strap.recordingStartedAt = startedAt;
-    };
-    const { strap } = await connect(transport, session);
+    session.want({ workout: null, profile: null, backfill: [{ workoutId: 'w0', recordedAt: T0 - 7_200_000 }] });
     await run(5000);
     expect(strap.recording).toBe(false);
     expect(strap.commands).toContain('75 02');
-  });
-
-  it('a órfã que já virou arquivo, achada no começo de um treino guiado: o app não a encerra nem grava por cima', async () => {
-    const startedAt = T0 - 3 * 3_600_000;
-    const { transport, session } = orphan(startedAt);
-    transport.configure = (strap) => {
-      strap.files.set(fitName(startedAt), encodeFit(startedAt, [{ bpm: 100, cadence: 100 }]));
-      strap.recording = true;
-      strap.recordingStartedAt = T0 - 20 * 60_000;
-    };
-    session.want({ workout: guided('w1', 140), profile: null });
-    const { strap } = await connect(transport, session);
-    await run(5000);
-    expect(strap.commands).not.toContain('75 02');
-    expect(strap.commands).not.toContain('75 01');
-    expect(session.getSnapshot().xoss).toMatchObject({ recording: true, ownRecording: false });
+    expect(stored.value?.recording ?? null).toBeNull();
   });
 
   it('o alerta do app fica marcado mesmo quando a reprogramação falha, e no fim volta ao da pessoa', async () => {
@@ -907,6 +899,9 @@ describe('donos: o app só desfaz o que ligou', () => {
     await run(3000);
     expect(strap.alert).toBe(140);
     expect(stored.value?.alert).toEqual({ workoutId: 'B', previous: 120, owned: [140, 150] });
+    // O alerta recusado não impede os passos nem a gravação do treino.
+    expect(strap).toMatchObject({ stepsOn: true, recording: true });
+    expect(stored.value?.recording).toMatchObject({ workoutId: 'B' });
 
     // A falha agenda nova volta, como as outras: com a cinta boa de novo, o 150 entra.
     strap.faults.frozenAlert = false;
@@ -961,6 +956,119 @@ describe('donos: o app só desfaz o que ligou', () => {
       // A resposta atrasada (75 04) não foi lida como o estado da gravação.
       expect(session.getSnapshot().xoss?.recording).toBe(false);
     }
+  });
+});
+
+describe('passos independentes e novas tentativas', () => {
+  it('com a cinta recusando o alerta, o fim do treino ainda encerra a gravação, desliga os passos e roda download e perfil, sem inundar o canal', async () => {
+    const { transport, session, stored } = makeSession();
+    const recordedAt = T0 - 3_600_000;
+    transport.configure = (strap) =>
+      strap.files.set(fitName(recordedAt), encodeFit(recordedAt, [{ bpm: 100, cadence: 100 }]));
+    const jobs = jest.fn();
+    session.onBackfill(jobs);
+    const { strap } = await connect(transport, session);
+    await flush();
+    session.want({ workout: guided('w1', 140), profile: USER, backfill: [] });
+    await run(1000);
+    expect(strap).toMatchObject({ recording: true, stepsOn: true, alert: 140 });
+
+    strap.faults.frozenAlert = true;
+    const before = strap.commands.length;
+    session.want({ workout: null, profile: USER, backfill: [{ workoutId: 'w0', recordedAt }] });
+    await run(60_000);
+    expect(strap).toMatchObject({ recording: false, stepsOn: false, alert: 140 });
+    expect(stored.value).toMatchObject({ recording: null, steps: null, alert: { owned: [140] } });
+    expect(jobs).toHaveBeenCalledTimes(1);
+    expect(strap.received).toHaveLength(1);
+    // Novas tentativas do alerta em 10 s e 30 s depois (cada uma: ler, programar, conferir).
+    const alerts = strap.commands.slice(before).filter((c) => c.startsWith('71'));
+    expect(alerts.length).toBeLessThanOrEqual(9);
+    // Só o alerta é refeito: nada de gravação, passos ou download de novo.
+    const retried = strap.commands.slice(before + 1);
+    expect(retried.filter((c) => c === '75 02')).toHaveLength(1);
+    expect(retried.filter((c) => c.startsWith('05'))).toHaveLength(4);
+
+    // Depois, uma a cada 60 s; e com a cinta boa de novo, o alerta volta ao da pessoa.
+    const at60 = strap.commands.filter((c) => c.startsWith('71')).length;
+    await run(120_000);
+    expect(strap.commands.filter((c) => c.startsWith('71')).length - at60).toBeLessThanOrEqual(6);
+    strap.faults.frozenAlert = false;
+    await run(61_000);
+    expect(strap.alert).toBe(0);
+    expect(stored.value?.alert ?? null).toBeNull();
+  });
+
+  it('as esperas entre as novas tentativas crescem: 10 s, 30 s, 60 s e depois a cada 60 s', async () => {
+    const { transport, session } = makeSession({
+      id: STRAP_ID,
+      name: 'XOSS_X2P_989171',
+      alert: { workoutId: 'A', previous: null, owned: [140] },
+    });
+    transport.configure = (strap) => {
+      strap.alert = 140;
+      strap.faults.frozenAlert = true;
+    };
+    const { strap } = await connect(transport, session);
+    const sets = () => strap.commands.filter((c) => c === '71 01 00').length;
+    await run(1000);
+    expect(sets()).toBe(1);
+    await run(9500);
+    expect(sets()).toBe(2);
+    await run(29_000);
+    expect(sets()).toBe(2);
+    await run(2000);
+    expect(sets()).toBe(3);
+    await run(60_000);
+    expect(sets()).toBe(4);
+    await run(60_000);
+    expect(sets()).toBe(5);
+  });
+});
+
+describe('espera crescente e relógio', () => {
+  it('um pedido novo zera a espera crescente: o treino que começa depois de várias falhas tenta de novo em 10 s', async () => {
+    const { transport, session } = makeSession({
+      id: STRAP_ID,
+      name: 'XOSS_X2P_989171',
+      alert: { workoutId: 'A', previous: null, owned: [140] },
+    });
+    transport.configure = (strap) => {
+      strap.alert = 140;
+      strap.faults.frozenAlert = true;
+    };
+    const { strap } = await connect(transport, session);
+    // Voltas falhas sem treino: aos 0, 10, 40 e 100 s; a próxima espera já é de 60 s.
+    await run(101_000);
+    expect(strap.commands.filter((c) => c === '71 01 00')).toHaveLength(4);
+
+    session.want({ workout: guided('w1', 150), profile: null });
+    await flush();
+    // O alerta do treino falhou uma vez; a cinta volta a aceitar.
+    expect(strap.alert).toBe(140);
+    strap.faults.frozenAlert = false;
+    await run(11_000);
+    expect(strap.alert).toBe(150);
+  });
+
+  it('sem o relógio acertado a gravação espera; alerta e passos seguem; com o relógio, a gravação começa', async () => {
+    const { transport, session } = makeSession();
+    transport.configure = (strap) => strap.faults.silent.add(0x54);
+    const { strap } = await connect(transport, session);
+    await flush();
+    session.want({ workout: guided('w1', 140), profile: null });
+    await run(3000);
+    expect(strap).toMatchObject({ stepsOn: true, alert: 140, recording: false, clock: null });
+    expect(strap.commands).not.toContain('75 01');
+
+    strap.faults.silent.delete(0x54);
+    await run(11_000);
+    expect(strap.clock).not.toBeNull();
+    expect(strap.recording).toBe(true);
+    // O relógio acertado (o último `54`, o que teve resposta) vem antes do começo da gravação.
+    const clockAt = strap.commands.map((c) => c.startsWith('54')).lastIndexOf(true);
+    expect(strap.commands.filter((c) => c.startsWith('54')).length).toBeGreaterThanOrEqual(2);
+    expect(clockAt).toBeLessThan(strap.commands.indexOf('75 01'));
   });
 });
 
