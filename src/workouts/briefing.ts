@@ -217,7 +217,8 @@ export function stageNote({
         ? 'carga reduzida'
         : nextBlock.verdict === 'aumentar'
           ? 'carga aumentada'
-          : 'carga ajustada';
+          : // Um "manter" que muda a carga leva adiante a do fim do tiro anterior.
+            'carga do anterior mantida';
     return { text: name + ' · ' + load + ' · ' + verdict, tone: 'info' };
   }
   if (recovery && recovery.index === index - 1 && recovery.reason !== 'plano' && into < ENDED_NOTE_SECONDS) {

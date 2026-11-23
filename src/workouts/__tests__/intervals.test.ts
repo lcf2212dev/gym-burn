@@ -79,6 +79,10 @@ it('o acúmulo é a média das diferenças de fim entre tiros seguidos, desconta
   const walked = withLoads(plan, { 3: [5.2, 1] });
   expect(carryBpm(walked, [end(1, 6.6, 175), end(3, 5.2, 172)], null)).toBe(2);
   expect(carryBpm(walked, [end(1, 6.6, 175), end(3, 5.2, 172), end(5, 6.6, 174)], null)).toBe(2);
+  // A modalidade sai da velocidade medida no fim: quem não seguiu um corte para a caminhada e continuou
+  // correndo a 6,6 conta como correndo, e o par entra; quem andou num tiro de corrida, como andando.
+  expect(carryBpm(walked, [end(1, 6.6, 165), end(3, 6.6, 170)], null)).toBe(5);
+  expect(carryBpm(plan, [end(1, 6.6, 175), end(3, 5.2, 172)], null)).toBe(2);
   const both = withLoads(plan, { 1: [5.2, 1], 3: [5.2, 1] });
   expect(carryBpm(both, [end(1, 5.2, 150, 1), end(3, 5.2, 155, 1)], null)).toBe(5);
 });
@@ -105,20 +109,21 @@ it('a sessão real de 22/11, encadeada: cada tiro na carga que a decisão anteri
   expect(second.carryBpm).toBeCloseTo(3.03, 2);
   expect([second.to.speed, second.to.incline]).toEqual([6, 1]);
   // 3ª: o 3º tiro, a 6,0 km/h, terminou em 178. Do 2º para o 3º, 8 bpm a mais com 0,4 MET a menos: o
-  // acúmulo médio vai a 8,5 e a previsão a 186 ou 187. O corte de 1 MET não cabe na corrida: o 4º tiro
-  // passa a andar a 5,2 km/h com a mesma rampa (1%), e para aí.
+  // acúmulo médio vai a 8,5 e a previsão a 186 ou 187. O corte de 1 MET não cabe na corrida, nem a 6,0
+  // km/h plano; mas um tiro de corrida não herda caminhada: o 4º fica no piso da corrida, 6,0 km/h plano,
+  // e o que faltar fica para a trava, dentro dele.
   ends.push(end(5, 6.0, 178));
   const third = decide({ plan, index: 6, ends })!;
   expect(third).toMatchObject({ index: 7, verdict: 'reduzir', stages: [7] });
   expect(third.carryBpm).toBeCloseTo(8.5, 6);
   expect(third.predictedBpm).toBeGreaterThanOrEqual(186);
-  expect([third.to.speed, third.to.incline]).toEqual([5.2, 1]);
+  expect([third.to.speed, third.to.incline]).toEqual([6, 0]);
   apply(third);
   expect(plan.stages.filter((s) => !s.measure).map((s) => [s.speed, s.incline])).toEqual([
-    [6, 1], [6.4, 1], [6, 1], [5.2, 1],
+    [6, 1], [6.4, 1], [6, 1], [6, 0],
   ]);
   // A última recuperação vem antes da volta à calma: não há bloco a decidir.
-  expect(decide({ plan, index: 8, ends: [...ends, end(7, 5.2, 165)] })).toBeNull();
+  expect(decide({ plan, index: 8, ends: [...ends, end(7, 6.0, 165, 0)] })).toBeNull();
 });
 
 it('depois de um corte da trava perto do fim, o tiro que termina 2 acima do teto reduz o seguinte sem empilhar', () => {
@@ -174,15 +179,54 @@ it('a carga só sobe sem leitura acima do teto, sem corte da trava na sessão e 
     stages: [3],
     to: expect.objectContaining({ speed: 6.6, incline: 1 }),
   });
-  // Com uma leitura acima do teto, um corte da trava ou tempo fora da lona nesse bloco, ele fica como está.
+  // Esse caminho tem as mesmas condições do aumento. Com uma leitura acima do teto, um corte da trava ou
+  // tempo fora da lona nesse bloco, ele fica como está.
   for (const input of [{ log: above }, { log: off }, { changes: [trava] }])
     expect(decide({ plan: lighter, index: 2, ends: [end(1, 6.6, 166)], ...input })).toMatchObject({ verdict: 'manter', stages: [] });
+  // Nem com o BPM do momento (o da trava, que pode vir dos RR) acima do teto no bloco, ou no começo da
+  // recuperação, sem nenhuma leitura da cinta acima dele.
+  const liveBlock = log.map((l, i) => (i === 1 ? { ...l, liveTop: 172 } : l));
+  const liveLate = log.map((l, i) => (i === 2 ? { ...l, liveTop: 171 } : l));
+  for (const input of [{ log: liveBlock }, { log: liveLate }])
+    expect(decide({ plan: lighter, index: 2, ends: [end(1, 6.6, 166)], ...input })).toMatchObject({ verdict: 'manter', stages: [] });
+  // Nem com um corte da trava em outro tiro da sessão: na 2ª recuperação, com o corte no 1º tiro.
+  const twice = [end(1, 6.6, 167), end(3, 6.6, 167)];
+  const second = withLoads(plan, { 5: [6.0, 1], 7: [6.0, 1] });
+  expect(decide({ plan: second, index: 4, ends: twice })).toMatchObject({ verdict: 'manter', stages: [5] });
+  expect(decide({ plan: second, index: 4, ends: twice, changes: [trava] })).toMatchObject({ verdict: 'manter', stages: [] });
+  // A carga passada fica no máximo 1 MET acima da planejada: quem terminou a 7,6 km/h, num alvo de 6,0,
+  // em 166, leva o próximo tiro a 7,0, e não a 7,6.
+  const capped = decide({ plan: lighter, index: 2, ends: [end(1, 7.6, 166)] })!;
+  expect(capped).toMatchObject({ verdict: 'manter', stages: [3] });
+  expect([capped.to.speed, capped.to.incline]).toEqual([7, 1]);
+  expect(metabolicCost(7, 1) - metabolicCost(6, 1)).toBeLessThanOrEqual(1);
+  // O aumento tem o mesmo limite, a partir da carga planejada.
+  const fast = decide({ plan: lighter, index: 2, ends: [end(1, 7.6, 140)] })!;
+  expect(fast).toMatchObject({ verdict: 'aumentar', stages: [3] });
+  expect(metabolicCost(fast.to.speed, fast.to.incline) - metabolicCost(6, 1)).toBeLessThanOrEqual(1);
   // A pessoa terminou o tiro a 7,6 km/h, acima do alvo de 6,6, com previsão de 171: o corte a partir
   // dali ainda passaria do alvo do próximo, e um corte nunca sobe a carga dele.
   expect(decide({ plan, index: 2, ends: [end(1, 7.6, 169)] })).toMatchObject({ verdict: 'reduzir', stages: [], to: plan.stages[3] });
   // Uma leitura acima do teto nos primeiros segundos da recuperação (a FC ainda subindo): também não sobe.
   const late = log.map((l, i) => (i === 2 ? { ...l, zone: [0, 10, 2] as StageLog['zone'] } : l));
   expect(decide({ plan, index: 2, ends, log: late })).toMatchObject({ verdict: 'manter', stages: [] });
+});
+
+it('um tiro de corrida não herda caminhada da decisão, e depois de um tiro que terminou andando pela troca ela não reduz de novo', () => {
+  // O fim a 6,6 km/h em 182: previsão de 184 e corte de 1 MET, que não cabe nem a 6,0 km/h plano. Os
+  // tiros seguintes ficam no piso da corrida, 6,0 km/h plano; o que faltar fica para a trava.
+  const deep = decide({ plan: vo2(6.6), index: 2, ends: [end(1, 6.6, 182)] })!;
+  expect(deep).toMatchObject({ verdict: 'reduzir', stages: [3, 5, 7] });
+  expect([deep.to.speed, deep.to.incline]).toEqual([6, 0]);
+  // A trava tirou o 1º tiro da corrida (6,0 km/h com 1% para 5,2 km/h com 1%) a 2 min do fim, e os tiros
+  // seguintes já começam no piso da corrida: a decisão mostra o veredito e a previsão, mas não reduz de
+  // novo a partir da caminhada.
+  const plan = vo2(6.0);
+  const walkOff: Change = { second: 700, stage: 1, decision: 'reduzir velocidade', bpm: 171, from: [6, 1], to: [5.2, 1], by: 'trava' };
+  const after = decide({ plan, index: 2, ends: [end(1, 5.2, 172)], changes: [walkOff] })!;
+  expect(after).toMatchObject({ verdict: 'reduzir', predictedBpm: 174, stages: [], to: plan.stages[3] });
+  // Com a troca mais cedo (o fim já não responde a ela), também não.
+  expect(decide({ plan, index: 2, ends: [end(1, 5.2, 172)], changes: [{ ...walkOff, second: 610 }] })).toMatchObject({ stages: [] });
 });
 
 it('sem a cinta, sem o fim medido ou com ele fora das cargas do guia, não há decisão', () => {

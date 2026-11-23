@@ -8,6 +8,7 @@ import {
   makePlan,
   median,
   newWorkout,
+  type Change,
   type MinuteBeats,
   type MinuteLoad,
   type Plan,
@@ -622,6 +623,22 @@ it('a origem do repouso vai nos três prompts, para a IA não descontar duas vez
   expect(review(done(0)).user).toMatchObject({ session: { restBpm: null, restSource: null } });
   expect(review(today).system).toContain('com restSource "parado" foi medida com a lona parada, antes do treino');
   expect(review(today).system).not.toContain('restBpm (FC do primeiro minuto de hoje; null sem leitura)');
+});
+
+it('a carga do fim de um tiro passada ao seguinte ("manter carga") não conta como aumento nem como redução', () => {
+  const w = done(0);
+  const changes: Change[] = [
+    { second: 600, stage: 3, decision: 'aumentar velocidade', bpm: 161, from: [6, 1], to: [6.4, 1], by: 'bloco' },
+    { second: 1000, stage: 5, decision: 'manter carga', bpm: 167, from: [6, 1], to: [6.4, 1], by: 'bloco' },
+    { second: 1400, stage: 7, decision: 'manter carga', bpm: 175, from: [6, 1], to: [6.4, 1], by: 'bloco' },
+  ];
+  expect(summarize({ ...w, changes })).toMatchObject({ increases: 1, reductions: 0 });
+  expect(assessPrompt({ workout: { ...w, changes }, history: [] }).system).toContain('("manter carga") não conta');
+  const zone = dailyTarget(w.plan, profile, w.hr);
+  const features = pulseFeatures([{ bpm: 125, at: 0, kmh: 5.2, incline: 3 }], zone)!;
+  const load = { stage: w.plan!.stages[1], easy: false, reached: true, secondsAtLoad: 100, closing: false, short: false };
+  const { system } = reviewPrompt({ workout: { ...w, changes }, index: 1, left: 100, load, features, live: null, samples: [], now: 0, allowed: ['manter', 'reduzir'], maxRaiseBpm: 0, sinceRelief: null });
+  expect(system).toContain('com decision "manter carga"');
 });
 
 it('com a cadência da cinta, a avaliação recebe a cadência média e a variação da passada, e a revisão dois números informativos', () => {

@@ -150,6 +150,13 @@ export type StageLog = {
    * das leituras que o validaram. Não existe nos registros mais antigos.
    */
   topAtMs?: number;
+  /**
+   * O maior BPM do momento na etapa, o que a trava usa (`livePulse`, que pode
+   * vir dos RR). Diz que a etapa passou do teto mesmo quando nenhuma leitura
+   * da cinta passou. Só com a cinta, fora da lona não; não existe nos
+   * registros mais antigos.
+   */
+  liveTop?: number;
   /** Os ms em que a pessoa estava fora da lona (veja `gait.ts`); só aparece quando houve. */
   offBeltMs?: number;
   // Os quatro abaixo só existem com a cadência da XOSS X2 Pro.

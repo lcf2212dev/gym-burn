@@ -247,6 +247,10 @@ describe('painel com a cadência, a recuperação e o próximo tiro', () => {
     expect(stageNote({ ...base, index: 4, into: 20, nextBlock: { ...next, speed: 9.8, incline: 1.5, verdict: 'aumentar' } })?.text).toBe(
       'Próximo tiro · 9,8 km/h e 1,5% · carga aumentada',
     );
+    // O "manter" que leva adiante a carga do fim do tiro anterior.
+    expect(stageNote({ ...base, index: 4, into: 20, nextBlock: { ...next, speed: 9.8, verdict: 'manter', changed: true } })?.text).toBe(
+      'Próximo tiro · 9,8 km/h e 1% · carga do anterior mantida',
+    );
     // Um bloco longo é "bloco", não "tiro".
     const long = makePlan('Limiar', { warmup: 10, reps: 3, work: 8, recovery: 2, cooldown: 5 }, 8, 1);
     expect(stageNote({ ...base, plan: long, index: 2, into: 20, nextBlock: { ...next, index: 3 } })?.text).toMatch(/^Próximo bloco/);
