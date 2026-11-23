@@ -41,3 +41,9 @@ export function useStrapHold(): void {
   const store = useStore();
   useEffect(() => store.hold(), [store]);
 }
+
+/** Na XOSS X2 Pro, mantém a contagem de passos ligada e consultada enquanto a tela estiver aberta. */
+export function useStrapCadence(): void {
+  const store = useStore();
+  useEffect(() => store.watchCadence(), [store]);
+}

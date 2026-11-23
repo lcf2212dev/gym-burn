@@ -29,8 +29,10 @@ export function createAppServices(): AppServices {
   // usa uma esteira (inclusive a simulada), e solta quando não há mais nenhuma.
   let release: (() => void) | null = null;
   session.subscribe(() => {
-    const { phase, scan } = session.getSnapshot();
+    const { phase, scan, metrics } = session.getSnapshot();
     const busy = phase !== 'idle' || scan !== 'idle';
+    // Com a lona andando a cinta não começa a sincronizar o perfil: o treino pode começar a qualquer instante.
+    strap.setBeltMoving(phase === 'connected' && (metrics.speedKmh ?? 0) > 0);
     // A conexão da esteira tem a vez: a busca pela cinta espera ela terminar.
     strap.setQuiet(phase === 'connecting');
     if (busy && !release) {

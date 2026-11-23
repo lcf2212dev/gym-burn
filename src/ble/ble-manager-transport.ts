@@ -18,7 +18,7 @@ import {
 } from '@/ftms';
 
 import { requestBlePermissions } from './permissions';
-import { BleUnavailableError } from './transport';
+import { BleUnavailableError, MAX_WRITE_BYTES } from './transport';
 import type {
   BleConnection,
   BleTransport,
@@ -142,6 +142,8 @@ function toCharacteristicInfo(characteristic: Characteristic): CharacteristicInf
     canRead: properties.Read !== undefined,
     canNotify: properties.Notify !== undefined,
     canIndicate: properties.Indicate !== undefined,
+    canWrite: properties.Write !== undefined,
+    canWriteWithoutResponse: properties.WriteWithoutResponse !== undefined,
   };
 }
 
@@ -158,6 +160,26 @@ function createConnection(
 
   const valueHandlers = new Map<string, Set<(data: Uint8Array) => void>>();
   const disconnectListeners = new Set<() => void>();
+
+  /**
+   * Escritas uma por vez, cada uma só depois da anterior resolver. No Android a
+   * biblioteca resolve todas as escritas com resposta pendentes no primeiro
+   * `onCharacteristicWrite`, sem conferir a característica
+   * (`Peripheral.java:561` e `:1121`): duas disparadas juntas fariam a segunda
+   * resolver com a confirmação da primeira.
+   */
+  let writeChain: Promise<unknown> = Promise.resolve();
+  /**
+   * Quem ainda espera uma escrita. Uma escrita que estava na fila nativa quando
+   * o link acaba nunca resolve nem rejeita: a queda e o `disconnect()`
+   * rejeitam todas daqui.
+   */
+  const pendingWrites = new Set<(error: Error) => void>();
+  function failPendingWrites(): void {
+    const pending = [...pendingWrites];
+    pendingWrites.clear();
+    pending.forEach((fail) => fail(new Error('A conexão acabou antes de a escrita terminar.')));
+  }
 
   // Um único listener global de valores por conexão; o despacho é por característica.
   const valueSubscription = BleManager.onDidUpdateValueForCharacteristic((event) => {
@@ -179,6 +201,7 @@ function createConnection(
     dropped = true;
     releaseNativeListeners();
     valueHandlers.clear();
+    failPendingWrites();
     const listeners = [...disconnectListeners];
     disconnectListeners.clear();
     listeners.forEach((listener) => listener());
@@ -283,6 +306,70 @@ function createConnection(
       };
     },
 
+    writer: {
+      write(serviceUuid, characteristicUuid, data, mode) {
+        // Acima de 20 bytes a biblioteca fatia sozinha e, sem resposta, dorme na
+        // thread principal entre os pedaços (`Peripheral.java:1226`): quem fatia é
+        // o cliente da cinta, que confirma cada pedaço pela resposta dela.
+        if (data.length > MAX_WRITE_BYTES) {
+          return Promise.reject(
+            new Error(`Escrita de ${data.length} bytes; o limite é ${MAX_WRITE_BYTES}.`),
+          );
+        }
+        if (closed || dropped) {
+          return Promise.reject(new Error('A conexão já acabou.'));
+        }
+        const nativeService = toNativeUuid(serviceUuid);
+        const nativeCharacteristic = toNativeUuid(characteristicUuid);
+        const bytes = Array.from(data);
+        return new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            pendingWrites.delete(fail);
+            reject(error);
+          };
+          pendingWrites.add(fail);
+          const run = async () => {
+            // O link acabou enquanto esta escrita esperava a vez.
+            if (settled) return;
+            try {
+              // Com até 20 bytes e `maxByteSize` 20 não há fatiamento, e a espera
+              // entre pedaços (`queueSleepTime`) nunca é usada.
+              if (mode === 'response') {
+                await BleManager.write(
+                  deviceId,
+                  nativeService,
+                  nativeCharacteristic,
+                  bytes,
+                  MAX_WRITE_BYTES,
+                );
+              } else {
+                await BleManager.writeWithoutResponse(
+                  deviceId,
+                  nativeService,
+                  nativeCharacteristic,
+                  bytes,
+                  MAX_WRITE_BYTES,
+                  0,
+                );
+              }
+              if (!settled) {
+                settled = true;
+                pendingWrites.delete(fail);
+                resolve();
+              }
+            } catch (error) {
+              fail(wrapError(`Falha ao escrever em ${characteristicName(characteristicUuid)}`, error));
+            }
+          };
+          const turn = writeChain.then(run);
+          writeChain = turn.catch(noop);
+        });
+      },
+    },
+
     onDisconnect(listener) {
       if (closed) {
         return { remove: noop };
@@ -317,6 +404,7 @@ function createConnection(
         releaseNativeListeners();
         valueHandlers.clear();
         disconnectListeners.clear();
+        failPendingWrites();
         disconnecting = BleManager.disconnect(deviceId).catch(noop);
       }
       return disconnecting;

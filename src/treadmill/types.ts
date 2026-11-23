@@ -124,6 +124,19 @@ export interface TreadmillSample {
    * leitura é contínua e ninguém precisa segurar o sensor.
    */
   heartRateSource?: HeartRateSource | null;
+  /**
+   * Os intervalos RR (ms) que a cinta mandou desde a amostra anterior, na
+   * ordem. Só existe com a cinta em uso; vazio quando nenhum chegou. A sessão
+   * guarda o último que consumiu, então nenhum se perde quando duas
+   * notificações da cinta caem entre dois pacotes da esteira (nem se repete).
+   */
+  rrMs?: number[];
+  /**
+   * Cadência em passos por minuto, da X2 Pro. `undefined`: não há fonte (outra
+   * cinta, ou sem cinta). `null`: há fonte, sem valor dos últimos 3 s. `0`:
+   * parado, medido. É nível, não evento: vai em toda amostra enquanto recente.
+   */
+  cadenceSpm?: number | null;
   energyKcal: number | null;
   distanceM: number | null;
 }

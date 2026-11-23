@@ -98,6 +98,13 @@ export type Totals = {
    * estimativa de kcal. Não existe nos registros mais antigos.
    */
   metMs?: number;
+  // Os três abaixo só existem com a cadência da XOSS X2 Pro.
+  /** Cadência somada no tempo, em passos/min × ms, com a lona andando. */
+  cadenceMs?: number;
+  /** Os ms que entraram em `cadenceMs`. */
+  cadenceDurationMs?: number;
+  /** Passos estimados: a cadência vezes o tempo com a lona andando. */
+  steps?: number;
 };
 /** FC de repouso e máxima usadas para calcular a faixa do treino. */
 export type HeartProfile = { rest: number | null; max: number; maxSource: 'idade' | 'IA' };
@@ -118,6 +125,13 @@ export type StageLog = {
   early: number[];
   /** Maior mediana de 3 leituras seguidas: um pico que não depende de uma leitura solta. */
   top: number;
+  // Os quatro abaixo só existem com a cadência da XOSS X2 Pro.
+  /** Cadência somada no tempo, em passos/min × ms. */
+  cadenceMs?: number;
+  cadenceDurationMs?: number;
+  /** A primeira e a última cadência medidas na etapa, em passos/min. */
+  cadenceFirst?: number;
+  cadenceLast?: number;
 };
 /** Soma e quantidade das leituras de BPM de um minuto de treino em movimento. */
 export type MinuteBeats = [sum: number, count: number];
@@ -161,6 +175,14 @@ export type Workout = {
   beats?: MinuteBeats[];
   /** A carga medida minuto a minuto, de onde saem os patamares da sessão. Os registros mais antigos não têm. */
   loads?: MinuteLoad[];
+  /** Como a FC de repouso foi medida: com a lona parada ou já andando. */
+  restSource?: 'parado' | 'andando';
+  /**
+   * A gravação do treino na memória da XOSS X2 Pro: quando o app a começou
+   * (`recordedAt`), o arquivo FIT que casou com ela e quantos segundos da
+   * trilha vieram dele.
+   */
+  strap?: { recordedAt?: number; file?: string; backfilledSeconds?: number };
 };
 export const levels = [
   'Dados insuficientes',
@@ -306,13 +328,29 @@ function step(sample: TreadmillSample, previous: TreadmillSample | null) {
     dt: gap > 0 && gap <= 5000 ? gap : 0,
     bpm: validBpm(sample.heartRateBpm) ? sample.heartRateBpm : null,
     strap: sample.heartRateSource === 'strap',
+    cadence: inRange(sample.cadenceSpm, 0, 300) ? sample.cadenceSpm : null,
   };
 }
 
-export function accumulate(t: Totals, sample: TreadmillSample, previous: TreadmillSample | null) {
+/** Soma a cadência no tempo. Os campos só aparecem quando há cadência (ou já existiam). */
+function cadenceTotals(
+  t: { cadenceMs?: number; cadenceDurationMs?: number },
+  cadence: number | null,
+  dt: number,
+) {
+  if (cadence === null && t.cadenceMs === undefined) return null;
+  return {
+    cadenceMs: (t.cadenceMs ?? 0) + (cadence ?? 0) * dt,
+    cadenceDurationMs: (t.cadenceDurationMs ?? 0) + (cadence === null ? 0 : dt),
+  };
+}
+
+export function accumulate(t: Totals, sample: TreadmillSample, previous: TreadmillSample | null): Totals {
   const s = step(sample, previous);
   if (!s) return t;
+  const cadence = cadenceTotals(t, s.cadence, s.dt);
   return {
+    ...(cadence && { ...cadence, steps: (t.steps ?? 0) + ((s.cadence ?? 0) * s.dt) / 60000 }),
     movingMs: t.movingMs + s.dt,
     distanceM: t.distanceM + (s.speed * s.dt) / 3600,
     inclineMs: t.inclineMs + (sample.inclinationPercent ?? 0) * s.dt,
@@ -349,8 +387,14 @@ export function logStage(
   const l = log ?? emptyLog();
   const s = step(sample, previous);
   if (!s) return l;
-  const next = {
+  const cadence = cadenceTotals(l, s.cadence, s.dt);
+  const next: StageLog = {
     ...l,
+    ...(cadence && {
+      ...cadence,
+      cadenceFirst: l.cadenceFirst ?? s.cadence ?? undefined,
+      cadenceLast: s.cadence ?? l.cadenceLast,
+    }),
     ms: l.ms + s.dt,
     distanceM: l.distanceM + (s.speed * s.dt) / 3600,
     inclineMs: l.inclineMs + (sample.inclinationPercent ?? 0) * s.dt,

@@ -36,6 +36,8 @@ jest.mock('react-native-ble-manager', () => {
       read: jest.fn(),
       startNotification: jest.fn(),
       stopNotification: jest.fn(),
+      write: jest.fn(),
+      writeWithoutResponse: jest.fn(),
       onDiscoverPeripheral: on('discover'),
       onStopScan: on('stopScan'),
       onDidUpdateState: on('state'),
@@ -65,6 +67,8 @@ type Mocked = jest.Mocked<
     | 'read'
     | 'startNotification'
     | 'stopNotification'
+    | 'write'
+    | 'writeWithoutResponse'
   >
 > & {
   __emit(name: string, event: unknown): void;
@@ -105,6 +109,8 @@ beforeEach(() => {
   ble.disconnect.mockResolvedValue(undefined);
   ble.startNotification.mockResolvedValue(undefined);
   ble.stopNotification.mockResolvedValue(undefined);
+  ble.write.mockResolvedValue(undefined);
+  ble.writeWithoutResponse.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -664,12 +670,16 @@ describe('BleConnection', () => {
           canRead: false,
           canNotify: true,
           canIndicate: false,
+          canWrite: false,
+          canWriteWithoutResponse: false,
         },
         {
           uuid: FTMS.feature,
           canRead: true,
           canNotify: false,
           canIndicate: false,
+          canWrite: false,
+          canWriteWithoutResponse: true,
         },
       ]);
       expect(await connection.getCharacteristics('1826')).toHaveLength(2);
@@ -904,6 +914,87 @@ describe('BleConnection', () => {
       expect(ble.stopNotification).not.toHaveBeenCalled();
       expect(ble.__listenerCount('value')).toBe(0);
       expect(ble.__listenerCount('disconnect')).toBe(0);
+    });
+  });
+
+  describe('writer', () => {
+    const XOSS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const CONTROL = '6e400004-b5a3-f393-e0a9-e50e24dcca9e';
+    const RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+
+    it('escreve com e sem resposta, até 20 bytes, sem fatiar nem esperar entre pedaços', async () => {
+      await connection.writer!.write(XOSS, CONTROL, Uint8Array.of(0xff, 0x00, 0xff), 'response');
+      await connection.writer!.write(XOSS, RX, new Uint8Array(20), 'noResponse');
+
+      expect(ble.write).toHaveBeenCalledWith(DEVICE_ID, XOSS, CONTROL, [0xff, 0x00, 0xff], 20);
+      expect(ble.writeWithoutResponse).toHaveBeenCalledWith(
+        DEVICE_ID,
+        XOSS,
+        RX,
+        new Array(20).fill(0),
+        20,
+        0,
+      );
+    });
+
+    it('recusa mais de 20 bytes sem chamar o nativo', async () => {
+      await expect(
+        connection.writer!.write(XOSS, RX, new Uint8Array(21), 'noResponse'),
+      ).rejects.toThrow('o limite é 20');
+      expect(ble.writeWithoutResponse).not.toHaveBeenCalled();
+    });
+
+    it('uma escrita por vez: a segunda só vai ao nativo depois de a primeira resolver', async () => {
+      let confirm!: () => void;
+      ble.write.mockReturnValueOnce(new Promise<void>((resolve) => (confirm = resolve)));
+
+      const first = connection.writer!.write(XOSS, CONTROL, Uint8Array.of(1), 'response');
+      const second = connection.writer!.write(XOSS, CONTROL, Uint8Array.of(2), 'response');
+      await flush();
+      expect(ble.write).toHaveBeenCalledTimes(1);
+
+      confirm();
+      await first;
+      await second;
+      expect(ble.write).toHaveBeenCalledTimes(2);
+      expect(ble.write.mock.calls[1][3]).toEqual([2]);
+    });
+
+    it('embrulha o erro nativo e não trava as escritas seguintes', async () => {
+      ble.write.mockRejectedValueOnce('Write failed');
+
+      await expect(
+        connection.writer!.write(XOSS, CONTROL, Uint8Array.of(1), 'response'),
+      ).rejects.toThrow('Falha ao escrever em 6e400004-b5a3-f393-e0a9-e50e24dcca9e: Write failed');
+      await expect(
+        connection.writer!.write(XOSS, CONTROL, Uint8Array.of(2), 'response'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('a queda do link rejeita as escritas que nunca voltariam da fila nativa', async () => {
+      // A fila nativa presa: a promise do nativo nunca resolve.
+      ble.write.mockReturnValue(new Promise<void>(() => {}));
+      const stuck = connection.writer!.write(XOSS, CONTROL, Uint8Array.of(1), 'response');
+      const queued = connection.writer!.write(XOSS, CONTROL, Uint8Array.of(2), 'response');
+      await flush();
+
+      ble.__emit('disconnect', { peripheral: DEVICE_ID, status: 8 });
+
+      await expect(stuck).rejects.toThrow('A conexão acabou');
+      await expect(queued).rejects.toThrow('A conexão acabou');
+      await expect(
+        connection.writer!.write(XOSS, CONTROL, Uint8Array.of(3), 'response'),
+      ).rejects.toThrow('A conexão já acabou.');
+      expect(ble.write).toHaveBeenCalledTimes(1);
+    });
+
+    it('disconnect() também rejeita as escritas pendentes', async () => {
+      ble.write.mockReturnValue(new Promise<void>(() => {}));
+      const stuck = connection.writer!.write(XOSS, CONTROL, Uint8Array.of(1), 'response');
+
+      await connection.disconnect();
+
+      await expect(stuck).rejects.toThrow('A conexão acabou');
     });
   });
 

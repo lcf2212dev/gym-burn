@@ -7,8 +7,8 @@ import { IconBadge, Rings, StatusPill } from '@/components/kit';
 import { UiButton } from '@/components/ui-button';
 import { styles, WorkoutPage } from '@/components/workout-ui';
 import { Colors, Metric, Neon, NumeralType, TitleType, neonGlow } from '@/constants/theme';
-import { useStrap, useStrapActions, useStrapHold } from '@/heart/strap-context';
-import type { StrapPhase } from '@/heart/strap-session';
+import { useStrap, useStrapActions, useStrapCadence, useStrapHold } from '@/heart/strap-context';
+import type { StrapPhase, XossStatus } from '@/heart/strap-session';
 
 const STATUS: Record<StrapPhase, string> = {
   idle: 'Em espera.',
@@ -26,7 +26,7 @@ const PILL: Record<StrapPhase, [string, string]> = {
 /** O que muda no treino com a cinta em uso. */
 const WITH_STRAP = [
   'O guia deixa de pedir as mãos no sensor.',
-  'A carga é revista a cada minuto, pela mediana das leituras.',
+  'A carga é revista a cada 30 s, pela mediana do último minuto de leituras.',
   'Se a conexão cair, voltam a valer os batimentos do sensor de mão da esteira.',
 ];
 /** Um traçado de pulso, só de enfeite, atrás da leitura. */
@@ -40,10 +40,13 @@ const TRACE =
  */
 export default function StrapScreen() {
   useStrapHold();
+  // Na X2 Pro, a cadência aparece ao vivo no diagnóstico mesmo sem treino.
+  useStrapCadence();
   const saved = useStrap((s) => s.saved);
   const phase = useStrap((s) => s.phase);
   const bpm = useStrap((s) => s.bpm);
   const battery = useStrap((s) => s.battery);
+  const xoss = useStrap((s) => s.xoss);
   const pairing = useStrap((s) => s.pairing);
   const candidates = useStrap((s) => s.candidates);
   const error = useStrap((s) => s.error);
@@ -130,6 +133,7 @@ export default function StrapScreen() {
               </Text>
             )}
           </Card>
+          {connected && xoss && <XossDiagnostics xoss={xoss} battery={battery} />}
           <Card style={local.list}>
             <Kicker>Com a cinta no peito</Kicker>
             {WITH_STRAP.map((line) => (
@@ -191,6 +195,58 @@ export default function StrapScreen() {
   );
 }
 
+/**
+ * O protocolo da XOSS X2 Pro, para conferir no aparelho sem treino: o que a
+ * cinta respondeu por último a cada consulta.
+ */
+function XossDiagnostics({ xoss, battery }: { xoss: XossStatus; battery: number | null }) {
+  const rows: [string, string][] = [
+    ['Modelo', xoss.model],
+    [
+      'Cadência ao vivo',
+      xoss.cadence ? xoss.cadence.spm + ' passos/min · ' + xoss.cadence.steps + ' passos' : '—',
+    ],
+    ['Memória livre', xoss.space ? xoss.space.freeKb + ' de ' + xoss.space.totalKb + ' kB' : '—'],
+    [
+      'Gravação',
+      xoss.recording === null
+        ? '—'
+        : xoss.recording
+          ? xoss.ownRecording
+            ? 'Em curso, do app'
+            : 'Em curso, fora do app'
+          : 'Nenhuma',
+    ],
+    [
+      'Alerta de FC',
+      xoss.alertBpm === undefined ? '—' : xoss.alertBpm !== null ? xoss.alertBpm + ' BPM' : 'Desligado',
+    ],
+    ['Bateria', battery !== null ? battery + '%' : '—'],
+    [
+      'Último download',
+      xoss.lastDownload
+        ? xoss.lastDownload.file +
+          ' · ' +
+          (xoss.lastDownload.ok ? xoss.lastDownload.bytes + ' bytes' : 'falhou') +
+          ' em ' +
+          (xoss.lastDownload.ms / 1000).toFixed(1).replace('.', ',') +
+          ' s'
+        : '—',
+    ],
+  ];
+  return (
+    <Card style={local.list}>
+      <Kicker>Protocolo da X2 Pro{xoss.transferring ? ' · transferindo' : ''}</Kicker>
+      {rows.map(([label, value]) => (
+        <View key={label} style={local.row} accessible accessibilityLabel={label + ': ' + value}>
+          <Text style={local.factLabel}>{label}</Text>
+          <Text style={local.rowValue}>{value}</Text>
+        </View>
+      ))}
+    </Card>
+  );
+}
+
 function Fact({ icon, value, label }: { icon: 'battery' | 'timer'; value: string; label: string }) {
   return (
     <View style={local.fact} accessible accessibilityLabel={label + ': ' + value}>
@@ -220,6 +276,8 @@ const local = StyleSheet.create({
   factValue: { ...NumeralType, fontSize: 22, lineHeight: 26, color: Colors.dark.text },
   factLabel: { fontSize: 12, lineHeight: 16, color: Colors.dark.textSecondary },
   rule: { width: 1, height: 34, backgroundColor: Colors.dark.border },
+  row: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 },
+  rowValue: { flexShrink: 1, fontSize: 14, lineHeight: 20, color: Colors.dark.text, textAlign: 'right' },
   centered: { textAlign: 'center' },
   list: { gap: 10 },
   bullet: { flexDirection: 'row', gap: 10 },

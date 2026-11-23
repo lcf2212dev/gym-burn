@@ -1,6 +1,7 @@
 import { openDatabaseSync } from 'expo-sqlite';
 import type { SessionMode } from '@/treadmill/types';
 import type { Plan, Profile, Workout } from './model';
+import type { TrackChunk } from './track';
 
 let database: ReturnType<typeof openDatabaseSync>;
 function db() {
@@ -11,7 +12,9 @@ function db() {
       CREATE TABLE IF NOT EXISTS profile (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workouts (id TEXT PRIMARY KEY, started INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS ai_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS tracks (workout TEXT NOT NULL, minute INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (workout, minute));
+      CREATE TABLE IF NOT EXISTS readiness (day TEXT PRIMARY KEY, at INTEGER NOT NULL, data TEXT NOT NULL);`);
   }
   return database;
 }
@@ -40,19 +43,21 @@ export function readCalls(): AiCall[] {
 }
 
 /**
- * Apaga perfil, treinos, planos preparados e o diário da IA. A chave da
- * DeepSeek fica no armazenamento seguro do sistema, fora deste banco, e não é
- * tocada. A cinta de batimentos pareada (`settings`) também fica: é
- * equipamento, não dado de treino, e tem o seu próprio "Esquecer".
+ * Apaga perfil, treinos (com as trilhas por segundo), as medidas de prontidão,
+ * planos preparados e o diário da IA. A chave da DeepSeek fica no
+ * armazenamento seguro do sistema, fora deste banco, e não é tocada. A cinta
+ * de batimentos pareada (`settings`) também fica: é equipamento, não dado de
+ * treino, e tem o seu próprio "Esquecer".
  */
 export function clearData() {
   db().execSync(
-    'DELETE FROM prepared; DELETE FROM profile; DELETE FROM workouts; DELETE FROM ai_calls;',
+    'DELETE FROM prepared; DELETE FROM profile; DELETE FROM workouts; DELETE FROM ai_calls; DELETE FROM tracks; DELETE FROM readiness;',
   );
 }
 
 export function deleteWorkout(id: string) {
   db().runSync('DELETE FROM workouts WHERE id = ?', id);
+  db().runSync('DELETE FROM tracks WHERE workout = ?', id);
 }
 
 /**
@@ -63,12 +68,58 @@ export function clearSource(source: SessionMode) {
   const ids = readWorkouts()
     .filter((w) => w.source === source)
     .map((w) => w.id);
-  for (const id of ids) db().runSync('DELETE FROM workouts WHERE id = ?', id);
+  for (const id of ids) {
+    db().runSync('DELETE FROM workouts WHERE id = ?', id);
+    db().runSync('DELETE FROM tracks WHERE workout = ?', id);
+  }
   db().runSync('DELETE FROM prepared WHERE source = ?', source);
 }
 
-/** A cinta de batimentos pareada neste celular. */
-export type SavedStrap = { id: string; name: string | null };
+/**
+ * Um minuto da trilha por segundo de um treino. Fica fora do JSON do treino,
+ * que é regravado inteiro a cada 10 s e carregado na abertura do app: a
+ * trilha só é lida sob demanda.
+ */
+export function saveTrackChunk(workout: string, minute: number, chunk: TrackChunk) {
+  db().runSync(
+    'INSERT OR REPLACE INTO tracks VALUES (?, ?, ?)',
+    workout,
+    minute,
+    JSON.stringify(chunk),
+  );
+}
+
+export function readTrackChunks(workout: string): { minute: number; chunk: TrackChunk }[] {
+  return db()
+    .getAllSync<{ minute: number; data: string }>(
+      'SELECT minute, data FROM tracks WHERE workout = ? ORDER BY minute',
+      workout,
+    )
+    .map((row) => ({ minute: row.minute, chunk: JSON.parse(row.data) }));
+}
+
+/**
+ * Mantém as trilhas dos `keep` treinos mais recentes e apaga as outras (e as
+ * de treinos que já não existem). Uns 45 minutos de trilha ocupam algumas
+ * dezenas de kB.
+ */
+export function pruneTracks(keep = 150) {
+  db().runSync(
+    'DELETE FROM tracks WHERE workout NOT IN (SELECT id FROM workouts ORDER BY started DESC LIMIT ?)',
+    keep,
+  );
+}
+
+/**
+ * A cinta de batimentos pareada neste celular; os campos opcionais são os da
+ * XOSS X2 Pro (ver `SavedStrap` em `src/heart/strap-session.ts`).
+ */
+export type SavedStrap = {
+  id: string;
+  name: string | null;
+  xoss?: boolean;
+  recording?: { workoutId: string; startedAt: number } | null;
+};
 
 export function readStrap(): SavedStrap | null {
   const row = db().getFirstSync<{ value: string }>("SELECT value FROM settings WHERE key = 'strap'");

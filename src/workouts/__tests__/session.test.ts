@@ -22,6 +22,10 @@ jest.mock('../storage', () => ({
   readProfile: jest.fn(),
   readWorkouts: jest.fn(),
   saveWorkout: jest.fn(),
+  // A trilha por segundo: fora do registro do treino, gravada no checkpoint.
+  pruneTracks: jest.fn(),
+  saveTrackChunk: jest.fn(),
+  readTrackChunks: jest.fn(() => []),
 }));
 
 type Reply = Awaited<ReturnType<typeof reviewLoad>>;

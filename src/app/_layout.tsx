@@ -65,7 +65,7 @@ export default function RootLayout() {
       <ThemeProvider value={navigationTheme}>
         <StatusBar style="light" />
         <StrapProvider store={services.strap}>
-          <WorkoutProvider store={services.session}>
+          <WorkoutProvider store={services.session} strap={services.strap}>
             <Stack screenOptions={{ headerShown: false }} />
             <GuidanceSheet />
           </WorkoutProvider>
