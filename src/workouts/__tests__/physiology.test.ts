@@ -24,6 +24,7 @@ import {
   mets,
   observedPeak,
   restingBpm,
+  restOf,
 } from '../physiology';
 import { sessionPlan, week } from '../week';
 
@@ -57,7 +58,25 @@ it('usa a menor leitura de repouso recente, com desconto, e a mediana das previs
     session(86, null),
     session(60, 150), // sexta leitura e quarta previsão: já ficam de fora
   ];
-  expect(heartProfile(profile, history)).toEqual({ rest: 71, max: 184, maxSource: 'IA' });
+  // Registros sem origem do repouso são do primeiro minuto andando: perdem os 15 bpm.
+  expect(heartProfile(profile, history)).toEqual({ rest: 71, restSource: 'andando', max: 184, maxSource: 'IA' });
+});
+
+it('desconta os 15 bpm só das medidas andando: a feita parado vale como está', () => {
+  const at = (restBpm: number, restSource?: Workout['restSource']) => ({ ...session(restBpm, null), restSource });
+  // Parado 68 contra andando 80 (65): vale o 65 do andando.
+  expect(heartProfile(profile, [at(68, 'parado'), at(80, 'andando')])).toMatchObject({
+    rest: 65,
+    restSource: 'andando',
+  });
+  // Parado 62 contra um registro antigo de 80 (65): vale o 62 parado, sem desconto.
+  expect(heartProfile(profile, [at(62, 'parado'), at(80)])).toMatchObject({ rest: 62, restSource: 'parado' });
+  // Só medidas paradas: a menor delas, como está.
+  expect(heartProfile(profile, [at(64, 'parado'), at(61, 'parado')])).toMatchObject({ rest: 61, restSource: 'parado' });
+  expect(restOf(at(70, 'parado'))).toBe(70);
+  expect(restOf(at(70, 'andando'))).toBe(55);
+  expect(restOf(at(70))).toBe(55);
+  expect(restOf({ restBpm: null })).toBeNull();
 });
 
 it('a faixa de cada sessão são os percentuais do plano semanal sobre a FC máxima', () => {

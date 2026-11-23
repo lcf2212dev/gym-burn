@@ -97,7 +97,7 @@ it('a revisão vai com esforço baixo e desiste em 12 s, sem nova tentativa', as
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ reasoning_effort: 'low' });
   expect(saveCall).toHaveBeenCalledTimes(1);
-  expect(saveCall).toHaveBeenCalledWith('review', expect.objectContaining({ ok: false, attempt: 1, effort: 'low', version: '9' }));
+  expect(saveCall).toHaveBeenCalledWith('review', expect.objectContaining({ ok: false, attempt: 1, effort: 'low', version: '10' }));
 });
 
 it('uma revisão cancelada fica no diário como cancelada, e não como falha de conexão', async () => {

@@ -1,4 +1,4 @@
-import type { BackfillJob, StrapLink, StrapWishes } from '@/heart/strap-session';
+import type { BackfillJob, StrapBeatEvent, StrapLink, StrapWishes } from '@/heart/strap-session';
 import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { ConsoleEvent, TreadmillSample } from '@/treadmill/types';
 import { formatDecimal, formatDuration } from '@/utils/format';
@@ -78,13 +78,25 @@ import {
 } from './physiology';
 import type { ReviewDecision, ReviewReply } from './prompts';
 import {
+  addStillBeat,
+  dayKey,
+  STILL_GAP_MS,
+  stillHrv,
+  stillRest,
+  stillSeconds,
+  type ReadinessRecord,
+  type StillBeat,
+} from './rest';
+import {
   clearData,
   clearSource,
   deleteWorkout,
   pruneTracks,
   readProfile,
+  readReadiness,
   readWorkouts,
   saveProfile,
+  saveReadiness,
   saveWorkout,
 } from './storage';
 import { fillTrackFromFit, readTrack, TRACK_FLAGS, TrackRecorder, trackGaps } from './track';
@@ -172,6 +184,10 @@ const BACKFILL_MAX = 5;
  * recuperação guiada pelo coração voltar ao tempo do plano.
  */
 const LIVE_MISSING_SAMPLES = 5;
+/** Depois de um treino a FC e a HRV ainda são as do esforço por este tempo: a janela parado espera. */
+const POST_EFFORT_MS = 10 * 60_000;
+/** Um treino com tanto tempo em movimento conta como esforço para a medida parado. */
+const EFFORT_MS = 60_000;
 /** Os encerramentos que deixam a trilha incompleta, com a cinta ainda gravando. */
 const BROKEN_ENDINGS = ['App interrompido', 'Esteira desconectada'];
 
@@ -207,6 +223,13 @@ export class WorkoutSession {
   /** Leituras do início do treino, de onde sai a FC de repouso do dia. */
   private early: Pulse[] = [];
   private restDone = false;
+  /**
+   * Os batimentos da cinta com a esteira conectada e a lona parada, antes do
+   * treino: de onde saem o repouso e a prontidão do dia quando a lona começa
+   * a andar (veja `rest.ts`). Não é zerada com a revisão: o treino livre
+   * começa na mesma amostra em que a janela é lida.
+   */
+  private still: StillBeat[] = [];
   private checkpoint = 0;
   private waitForStop = false;
   /** A trilha por segundo do treino em curso, fora do estado React. */
@@ -249,6 +272,15 @@ export class WorkoutSession {
     nextBlock: null as NextBlockView | null,
     /** A última recuperação encurtada ou alongada pelo coração neste treino. */
     recovery: null as RecoveryView | null,
+    /**
+     * Os segundos de leitura da cinta com a lona parada, na medida em curso
+     * (veja `still`); `null` sem medida em curso.
+     */
+    stillSeconds: null as number | null,
+    /** A janela parado em curso já dá o repouso do dia (60 s, com 30 s seguidos de leitura). */
+    stillReady: false,
+    /** As medidas de prontidão dos últimos dias, da mais nova à mais antiga. */
+    readiness: loadReadiness(),
     guidance: null as Guidance | null,
     minimizedCue: null as string | null,
     active: null as Workout | null,
@@ -422,12 +454,64 @@ export class WorkoutSession {
       this.recorded(workoutId, recordedAt),
     );
     const offBackfill = this.strap?.onBackfill((job) => this.backfilled(job));
+    const offBeat = this.strap?.onBeat((beat) => this.beat(beat));
     return () => {
       offTreadmill();
       offRecorded?.();
       offBackfill?.();
+      offBeat?.();
     };
   };
+
+  /**
+   * Uma notificação da cinta. Com a esteira conectada, a lona parada (ou ainda
+   * sem leitura de velocidade) e o repouso de hoje ainda por medir, ela entra
+   * na janela parado; fora disso a janela recomeça. Quem já vinha andando num
+   * registro livre não está mais em repouso, e nos 10 minutos depois de um
+   * treino de 1 minuto ou mais a FC e a HRV ainda são as do esforço.
+   */
+  private beat(beat: StrapBeatEvent) {
+    const machine = this.treadmill.getSnapshot();
+    const active = this.state.active;
+    const resting =
+      machine.phase === 'connected' &&
+      !((machine.samples.at(-1)?.speedKmh ?? 0) > 0) &&
+      !this.restDone &&
+      !(active && active.totals.movingMs > 0) &&
+      this.sinceEffort(beat.at) >= POST_EFFORT_MS;
+    if (!resting) {
+      this.dropStill();
+      return;
+    }
+    // Sem contato com a pele não há leitura: a lacuna não conta como tempo medido.
+    if (beat.bpm === null) return;
+    this.still = addStillBeat(this.still, { at: beat.at, bpm: beat.bpm, rrMs: beat.rrMs });
+    const seconds = stillSeconds(this.still);
+    const ready = stillRest(this.still) !== null;
+    if (seconds !== this.state.stillSeconds || ready !== this.state.stillReady)
+      this.update({ stillSeconds: seconds, stillReady: ready });
+  }
+
+  /** Esvazia a janela parado. */
+  private dropStill() {
+    this.still = [];
+    if (this.state.stillSeconds !== null) this.update({ stillSeconds: null, stillReady: false });
+  }
+
+  /**
+   * Os treinos da esteira de verdade com 1 minuto ou mais em movimento: o
+   * esforço que ainda pesa na FC e na HRV de quem fica parado depois. Saem do
+   * histórico, e valem também com o app reaberto logo depois do treino.
+   */
+  private efforts() {
+    return this.state.history.filter((w) => w.source === 'ble' && !!w.ended && w.totals.movingMs >= EFFORT_MS);
+  }
+
+  /** Há quantos ms terminou o último esforço; `Infinity` sem nenhum. */
+  private sinceEffort(now: number) {
+    const ended = Math.max(-Infinity, ...this.efforts().map((w) => w.ended!));
+    return now - ended;
+  }
 
   minimizeCue(key: string | null) {
     this.update({ minimizedCue: key });
@@ -449,6 +533,7 @@ export class WorkoutSession {
     this.track = null;
     this.gaps.clear();
     this.previous = null;
+    this.still = [];
     // Com a lona andando, um registro novo só começa depois de uma parada.
     this.waitForStop = true;
     this.update({
@@ -458,6 +543,9 @@ export class WorkoutSession {
       gait: null,
       nextBlock: null,
       recovery: null,
+      stillSeconds: null,
+      stillReady: false,
+      readiness: [],
       guidance: null,
       minimizedCue: null,
       active: null,
@@ -487,13 +575,14 @@ export class WorkoutSession {
       throw new Error('Conecte a esteira e confira a chave de segurança.');
     }
     // Quem já vinha andando num registro livre não está mais em repouso: vale
-    // a leitura que aquele registro fez, se fez.
+    // a leitura que aquele registro fez, se fez, com a origem dela.
     const walking = !!active && active.totals.movingMs > 0;
     // Sem declarar "sem treino" à cinta no meio: o pedido do treino novo vem logo abaixo.
     if (active) this.finish('Início do treino guiado', false);
-    const workout = {
+    const workout: Workout = {
       ...newWorkout(profile, machine.mode, plan, heartProfile(profile, this.sameSource(machine.mode))),
       restBpm: walking ? (active.restBpm ?? null) : null,
+      ...(walking && active.restSource && { restSource: active.restSource }),
     };
     saveWorkout(workout);
     this.track = new TrackRecorder(workout.id, workout.started);
@@ -786,9 +875,15 @@ export class WorkoutSession {
     return redone;
   }
 
-  /** Guarda a FC de repouso do dia assim que as primeiras leituras do treino bastarem. */
+  /**
+   * Guarda a FC de repouso do dia. Quando a lona começa a andar, com 60 s ou
+   * mais de leitura da cinta parado, ela sai da janela parado (`'parado'`);
+   * senão, das primeiras leituras do treino, já andando (`'andando'`).
+   */
   private measureRest(w: Workout, sample: TreadmillSample, moving: boolean): Workout {
     if (this.restDone) return w;
+    const still = moving ? this.settleStill(w, sample.at) : null;
+    if (still) return still;
     const closed = w.totals.movingMs > REST_WINDOW_SECONDS * 1000;
     if (!closed && moving && validBpm(sample.heartRateBpm))
       this.early.push({ at: sample.at, bpm: sample.heartRateBpm });
@@ -796,9 +891,56 @@ export class WorkoutSession {
     if (rest === null && !closed) return w;
     this.restDone = true;
     if (rest === null) return w;
-    const measured = { ...w, restBpm: rest };
-    // A faixa do dia é refeita com a medição de hoje.
+    return this.rested(w, rest, 'andando');
+  }
+
+  /**
+   * A lona começou a andar: o repouso do dia sai da janela parado, se ela tem
+   * 60 s ou mais de leitura e chega até agora (uma janela que parou de receber
+   * leituras, com a cinta sem contato ou desligada, é de outro momento), e a
+   * prontidão do dia é gravada se os RR servirem. A janela é lida uma vez só.
+   * Devolve o registro com o repouso, ou `null` quando vale o caminho andando.
+   */
+  private settleStill(w: Workout, now: number): Workout | null {
+    if (!this.still.length) return null;
+    const beats = this.still;
+    this.dropStill();
+    if (now - beats[beats.length - 1].at > STILL_GAP_MS) return null;
+    const rest = stillRest(beats);
+    if (rest === null) return null;
+    this.restDone = true;
+    // A esteira simulada não diz se a pessoa estava parada: a medida dela não entra na base.
+    if (w.source === 'ble') this.keepReadiness(beats, rest, now);
+    return this.rested(w, rest, 'parado');
+  }
+
+  /** O registro com o repouso de hoje e a faixa do dia refeita com ele. */
+  private rested(w: Workout, rest: number, restSource: Workout['restSource']): Workout {
+    const measured = { ...w, restBpm: rest, restSource };
     return { ...measured, hr: heartProfile(w.profile, [measured, ...this.sameSource(w.source)]) };
+  }
+
+  /**
+   * Grava a medida de prontidão do dia, se a HRV da janela vale (veja
+   * `stillHrv`). Uma linha por dia: a mais recente vale. Depois de um treino
+   * no mesmo dia a HRV ainda está deprimida por horas: essa medida não
+   * substitui a de antes dele (o repouso parado continua valendo para o
+   * treino). Uma falha ao gravar não para o treino: a prontidão é só uma
+   * sugestão na tela.
+   */
+  private keepReadiness(beats: StillBeat[], rest: number, now: number) {
+    const today = dayKey(now);
+    if (this.efforts().some((e) => dayKey(e.started) === today || dayKey(e.ended!) === today)) return;
+    const hrv = stillHrv(beats);
+    if (!hrv) return;
+    const at = Date.now();
+    const record: ReadinessRecord = { ...hrv, day: dayKey(at), at, restBpm: rest };
+    try {
+      saveReadiness(record);
+    } catch {
+      return;
+    }
+    this.update({ readiness: [record, ...this.state.readiness.filter((r) => r.day !== record.day)] });
   }
 
   private load(plan: Plan, cue: Cue, g: Guidance, now: number): Load {
@@ -1363,6 +1505,15 @@ export class WorkoutSession {
     } finally {
       this.update({ assessing: this.state.assessing.filter((id) => id !== w.id) });
     }
+  }
+}
+
+/** As medidas de prontidão guardadas; sem conseguir ler o banco, nenhuma. */
+function loadReadiness(): ReadinessRecord[] {
+  try {
+    return readReadiness() ?? [];
+  } catch {
+    return [];
   }
 }
 

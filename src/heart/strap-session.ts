@@ -201,6 +201,8 @@ export interface StrapLink {
   onBackfill(listener: (job: BackfillJob) => void): () => void;
   /** O app começou uma gravação na cinta para este treino. */
   onRecorded(listener: (event: { workoutId: string; recordedAt: number }) => void): () => void;
+  /** Cada notificação de batimentos: o repouso e a HRV medidos com a lona parada, antes do treino. */
+  onBeat(listener: (beat: StrapBeatEvent) => void): () => void;
 }
 
 /** O protocolo da XOSS X2 Pro anexado: o que a tela da cinta mostra no diagnóstico. */

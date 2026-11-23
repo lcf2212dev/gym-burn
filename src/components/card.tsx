@@ -33,17 +33,23 @@ export function Card({ children, style, accent, hero = false, padded = true }: C
   );
 }
 
-/** Rótulo miúdo em caixa alta, o "kicker" de cada bloco. */
+/** Rótulo miúdo em caixa alta, o "kicker" de cada bloco. `numberOfLines` corta o que não couber. */
 export function Kicker({
   children,
   color,
   style,
+  numberOfLines,
 }: {
   children: ReactNode;
   color?: string;
   style?: StyleProp<TextStyle>;
+  numberOfLines?: number;
 }) {
-  return <Text style={[styles.kicker, LabelType, color ? { color } : null, style]}>{children}</Text>;
+  return (
+    <Text numberOfLines={numberOfLines} style={[styles.kicker, LabelType, color ? { color } : null, style]}>
+      {children}
+    </Text>
+  );
 }
 
 const styles = StyleSheet.create({

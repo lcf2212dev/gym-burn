@@ -170,7 +170,7 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
     zone: { objective: 'Recuperação', low: 90, high: 108 },
     aim: { bpm: 96, low: 90, high: 108 },
   });
-  expect(user.hr).toEqual({ restBpm: null, maxBpm: 180, maxSource: 'idade' });
+  expect(user.hr).toEqual({ restBpm: null, restSource: null, maxBpm: 180, maxSource: 'idade' });
   expect(user.loads[0]).toEqual({ pace: 3, grade: 0, mets: 2.4 });
   // A escada não tem carga entre o teto da caminhada e o começo da corrida, e o prompt diz isso.
   expect(user.loads.filter((r) => r.pace > 5.2 && r.pace < 6)).toEqual([]);
@@ -187,7 +187,7 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   );
   // O prompt já não fala em leitura só de 3 em 3 minutos: com a cinta ela é contínua.
   expect(system).toContain('o tempo todo com a cinta no peito');
-  expect(PROMPT_VERSION).toBe('9');
+  expect(PROMPT_VERSION).toBe('10');
   // Vão até 6 sessões válidas, e não mais 5.
   const seven = [1, 2, 3, 4, 5, 6, 7].map((days) => done(days));
   expect(data(base, seven).recent.map((r) => r.daysAgo)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -516,7 +516,9 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
     session: {
       goal: 'VO₂máx',
       elapsedSeconds: 1120,
+      // Registro sem origem do repouso: é do primeiro minuto andando.
       restBpm: 98,
+      restSource: 'andando',
       changes: [{ secondsAgo: 120, decision: 'reduzir velocidade', bpm: 174, from: [4, 0], to: [3.5, 0], by: 'app' }],
       // O alívio foi há 2 minutos: a FC ainda está respondendo a ele.
       secondsSinceRelief: 120,
@@ -570,6 +572,56 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
     'Se session.reliefSettling é true, o último alívio ainda está fazendo efeito: reduza só se stage.targetsReached é true (o corte anterior já está no painel) e endsAboveTop é true; senão, mantenha.',
   );
   expect(system).toContain('json');
+});
+
+it('a origem do repouso vai nos três prompts, para a IA não descontar duas vezes', () => {
+  const still: Workout = { ...done(2), restBpm: 62, restSource: 'parado' };
+  const walked: Workout = { ...done(4), restBpm: 86, restSource: 'andando' };
+  // Registro sem origem: é do primeiro minuto andando.
+  const legacy: Workout = { ...done(6), restBpm: 84 };
+  // Plano: o repouso em uso já vem pronto (62 parado contra 71 e 69 andando) e diz de onde saiu.
+  const plan = planPrompt({ profile, session: base, history: [still, walked, legacy], now: NOW });
+  expect(plan.user.hr).toEqual({ restBpm: 62, restSource: 'parado', maxBpm: 180, maxSource: 'idade' });
+  expect(plan.user.recent.map((r) => [r.restBpm, r.restSource])).toEqual([
+    [62, 'parado'],
+    [86, 'andando'],
+    [84, 'andando'],
+  ]);
+  expect(planPrompt({ profile, session: base, history: [walked, legacy], now: NOW }).user.hr).toMatchObject({
+    restBpm: 69,
+    restSource: 'andando',
+  });
+  expect(plan.system).toContain('não desconte nada dela');
+  expect(plan.system).toContain('"parado" = com a lona parada, perto do repouso real');
+  expect(plan.system).not.toContain('menos 15 bpm porque a pessoa já está andando');
+
+  // Avaliação: o repouso de hoje e o das sessões anteriores, cada um com a origem.
+  const today: Workout = { ...done(0), restBpm: 60, restSource: 'parado' };
+  const assessed = assessPrompt({ workout: today, history: [walked, legacy] });
+  expect(assessed.user).toMatchObject({
+    session: { restBpm: 60, restSource: 'parado' },
+    recent: [
+      { restBpm: 86, restSource: 'andando' },
+      { restBpm: 84, restSource: 'andando' },
+    ],
+  });
+  expect(assessPrompt({ workout: done(0), history: [] }).user).toMatchObject({
+    session: { restBpm: null, restSource: null },
+  });
+  expect(assessed.system).toContain('Com restSource "parado" ela foi medida com a lona parada');
+  expect(assessed.system).not.toContain('restBpm: FC lida no primeiro minuto de hoje. Fica de 10 a 20 bpm acima do repouso real.');
+
+  // Revisão: o repouso de hoje, com a origem.
+  const zone = dailyTarget(today.plan, profile, today.hr);
+  const features = pulseFeatures([{ bpm: 126, at: 0, kmh: 5.2, incline: 3 }], zone)!;
+  const load = { stage: today.plan!.stages[1], easy: false, reached: true, secondsAtLoad: 100, closing: false };
+  const review = (w: Workout) =>
+    reviewPrompt({ workout: w, index: 1, left: 200, load, features, live: null, samples: [], now: 0, allowed: ['manter'], maxRaiseBpm: 0, sinceRelief: null });
+  expect(review(today).user).toMatchObject({ session: { restBpm: 60, restSource: 'parado' } });
+  expect(review(legacy).user).toMatchObject({ session: { restBpm: 84, restSource: 'andando' } });
+  expect(review(done(0)).user).toMatchObject({ session: { restBpm: null, restSource: null } });
+  expect(review(today).system).toContain('com restSource "parado" foi medida com a lona parada, antes do treino');
+  expect(review(today).system).not.toContain('restBpm (FC do primeiro minuto de hoje; null sem leitura)');
 });
 
 it('com a cadência da cinta, a avaliação recebe a cadência média e a variação da passada, e a revisão dois números informativos', () => {

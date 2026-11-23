@@ -111,8 +111,19 @@ export type Totals = {
   /** Passos estimados: a cadência vezes o tempo com a lona andando. */
   steps?: number;
 };
-/** FC de repouso e máxima usadas para calcular a faixa do treino. */
-export type HeartProfile = { rest: number | null; max: number; maxSource: 'idade' | 'IA' };
+/** Como a FC de repouso foi medida: com a lona parada (pela cinta) ou já andando. */
+export type RestSource = 'parado' | 'andando';
+/**
+ * FC de repouso e máxima usadas para calcular a faixa do treino. `restSource`
+ * é a origem da medida que deu `rest`; não existe nos registros mais antigos
+ * nem sem repouso medido.
+ */
+export type HeartProfile = {
+  rest: number | null;
+  restSource?: RestSource;
+  max: number;
+  maxSource: 'idade' | 'IA';
+};
 export type Zone = { low: number; high: number };
 /** O que foi medido em uma etapa do plano (ou no treino livre inteiro). */
 export type StageLog = {
@@ -185,7 +196,11 @@ export type Workout = {
   reason: string;
   estimate: Estimate | null;
   // Os campos abaixo não existem nos registros anteriores à versão 2.1.
-  /** FC lida no primeiro minuto e meio de lona em movimento. */
+  /**
+   * FC de repouso do dia: a medida parado, com a cinta, antes de a lona andar
+   * (`restSource: 'parado'`), ou a lida no primeiro minuto e meio de lona em
+   * movimento (`'andando'`; os registros sem `restSource` são desta).
+   */
   restBpm?: number | null;
   hr?: HeartProfile;
   log?: StageLog[];
@@ -194,8 +209,8 @@ export type Workout = {
   beats?: MinuteBeats[];
   /** A carga medida minuto a minuto, de onde saem os patamares da sessão. Os registros mais antigos não têm. */
   loads?: MinuteLoad[];
-  /** Como a FC de repouso foi medida: com a lona parada ou já andando. */
-  restSource?: 'parado' | 'andando';
+  /** Como a FC de repouso foi medida: com a lona parada ou já andando. Ausente = andando. */
+  restSource?: RestSource;
   /**
    * A gravação do treino na memória da XOSS X2 Pro: quando o app a começou
    * (`recordedAt`), o arquivo FIT que casou com ela e quantos segundos da
