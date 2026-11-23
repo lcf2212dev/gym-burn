@@ -16,7 +16,7 @@ import { formatClock } from '@/utils/format';
 
 const kindLabel: Record<string, string> = {
   plan: 'Plano do dia',
-  // Antes a IA também revia a carga durante o treino: o diário antigo ainda traz essas chamadas.
+  // A revisão da carga durante o treino ainda não tem cenários: aparece só no diário.
   review: 'Revisão durante o treino',
   assess: 'Avaliação',
 };

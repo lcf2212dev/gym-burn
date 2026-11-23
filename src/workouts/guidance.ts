@@ -1,5 +1,5 @@
 import type { TreadmillSample } from '@/treadmill/types';
-import { currentCue, validBpm } from './model';
+import { currentCue, validBpm, type Stage } from './model';
 
 export type Cue = NonNullable<ReturnType<typeof currentCue>>;
 export type Guidance = {
@@ -39,6 +39,19 @@ export function pendingAction(g: Guidance | null) {
   const bpm = g.bpmRequestedAt !== null && !g.bpmReceived;
   if (bpm && (g.adjusted || g.bpmSlot === 0 || g.bpmRequestedAt! > g.targetsSince)) return 'bpm';
   return g.adjusted ? null : 'adjust';
+}
+
+/**
+ * A identidade do aviso que a tela mostra: uma chave nova reabre o aviso
+ * minimizado e toca os bipes de novo. Cada pedido de batimentos é um aviso
+ * novo; um ajuste, também, a cada vez que os alvos passam a valer, inclusive
+ * quando o app volta a pedir uma redução que ainda não chegou ao painel.
+ */
+export function cueKey(workoutId: string, g: Guidance | null, stage: Stage | undefined) {
+  const action = pendingAction(g);
+  if (!action || !g) return null;
+  const request = action === 'bpm' ? '@' + g.bpmRequestedAt : '@' + g.targetsSince;
+  return workoutId + '/' + g.index + '/' + action + request + '/' + stage?.speed + '/' + stage?.incline;
 }
 
 export function advanceGuidance(

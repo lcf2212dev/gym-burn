@@ -1,10 +1,12 @@
 import type { TreadmillSample } from '@/treadmill/types';
+import { livePulse, pulseFeatures, pulseWindow } from '../adaptive';
 import {
   accumulate,
   currentCue,
   levels,
   logStage,
   makePlan,
+  median,
   newWorkout,
   type MinuteBeats,
   type MinuteLoad,
@@ -21,10 +23,13 @@ import {
   historyItem,
   parseAssess,
   parsePlan,
+  parseReview,
   planProcedure,
   planPrompt,
   plateaus,
   PROMPT_VERSION,
+  reviewDecisions,
+  reviewPrompt,
   summarize,
 } from '../prompts';
 import { sessionPlan, week, zones, type Session } from '../week';
@@ -181,7 +186,7 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   );
   // O prompt já não fala em leitura só de 3 em 3 minutos: com a cinta ela é contínua.
   expect(system).toContain('o tempo todo com a cinta no peito');
-  expect(PROMPT_VERSION).toBe('7');
+  expect(PROMPT_VERSION).toBe('8');
   // Vão até 6 sessões válidas, e não mais 5.
   const seven = [1, 2, 3, 4, 5, 6, 7].map((days) => done(days));
   expect(data(base, seven).recent.map((r) => r.daysAgo)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -419,4 +424,160 @@ it('a avaliação recebe só os dois números que decidem a FC máxima e prende 
   expect(() => parse({ level: levels[0], summary: 'ok', maxBpm: 180 })).toThrow();
   expect(() => parse({ level: 'Base em formação', summary: '', maxBpm: 180 })).toThrow();
   expect(() => parse({ level: 'Base em formação', summary: 'ok' })).toThrow();
+});
+
+it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a série e os tiros já feitos', () => {
+  // VO₂máx a 6,6 km/h e 1% (162 a 171 BPM com a máxima de 180): 600 s de aquecimento, tiros
+  // de 240 s com 180 s leves. Aos 1120 s de treino a pessoa está a 100 s do 2º tiro.
+  const plan = sessionPlan(vo2, 6.6, 1);
+  const bpmAt = (stage: Stage | null, _: number, into: number) =>
+    !stage || stage.measure ? 125 : Math.round(150 + into / 8);
+  const done = simulate(plan, bpmAt, 1120);
+  const w: Workout = {
+    ...done,
+    ended: null,
+    restBpm: 98,
+    changes: [{ second: 1000, stage: 2, decision: 'reduzir velocidade', bpm: 174, from: [4, 0], to: [3.5, 0], by: 'app' }],
+  };
+  const now = 1_120_000;
+  const strap: TreadmillSample[] = Array.from({ length: 125 }, (_, k) => {
+    const at = now - (124 - k) * 1000;
+    const into = 100 - (124 - k);
+    return {
+      at,
+      speedAt: at,
+      inclineAt: at,
+      speedKmh: into >= 0 ? 6.6 : 4,
+      inclinationPercent: into >= 0 ? 1 : 0,
+      heartRateBpm: into >= 0 ? Math.round(150 + into / 8) : 125,
+      heartRateSource: 'strap',
+      energyKcal: null,
+      distanceM: null,
+    };
+  });
+  const zone = { low: 162, high: 171 };
+  const live = livePulse(strap, now)!;
+  expect(live).toEqual({ bpm: 162, rise: 3 });
+  const features = pulseFeatures(pulseWindow(strap, now - 100_000, now), zone)!;
+  const load = { stage: plan.stages[3], easy: false, reached: true, secondsAtLoad: 100, closing: false, short: true };
+  const { system, user } = reviewPrompt({
+    workout: w,
+    index: 3,
+    left: 140,
+    load,
+    features,
+    live,
+    samples: strap,
+    now,
+    allowed: ['manter', 'reduzir'],
+    maxRaiseBpm: 0,
+    sinceRelief: 120,
+  });
+  expect(user).toMatchObject({
+    zone: { objective: 'VO₂máx', low: 162, high: 171 },
+    aim: { bpm: 171, low: 168, high: 171 },
+    maxBpm: 180,
+    stage: {
+      name: 'VO₂máx 2/4',
+      kind: 'principal',
+      targetKmh: 6.6,
+      targetInclinePercent: 1,
+      secondsInStage: 100,
+      secondsRemaining: 140,
+      targetsReached: true,
+      secondsAtLoad: 100,
+      shortBlock: true,
+      laterBlocks: 2,
+    },
+    // 162 agora, 3 acima de 30 s atrás: a reta chega a 162 + 3 × 140 ÷ 30 = 176, 5 acima do teto.
+    // Para voltar ao meio do alvo (169,5) seriam 7 bpm a menos.
+    bpm: {
+      now: 162,
+      risePer30s: 3,
+      median: features.median,
+      trend: 'subindo',
+      position: 'na faixa',
+      belowTopBpm: 9,
+      projectedEndBpm: 176,
+      projectedOverTopBpm: 5,
+      endsAboveTop: true,
+      endsBelowAim: false,
+      reduceToAimBpm: 7,
+    },
+    allowed: ['manter', 'reduzir'],
+    limits: { maxReduceBpm: 15, maxRaiseBpm: 0 },
+    session: {
+      goal: 'VO₂máx',
+      elapsedSeconds: 1120,
+      restBpm: 98,
+      changes: [{ secondsAgo: 120, decision: 'reduzir velocidade', bpm: 174, from: [4, 0], to: [3.5, 0], by: 'app' }],
+      // O alívio foi há 2 minutos: a FC ainda está respondendo a ele.
+      secondsSinceRelief: 120,
+      reliefSettling: true,
+    },
+  });
+  const data = user as {
+    series: { secondsAgo: number; bpm: number | null; kmh: number | null; inclinePercent: number | null }[];
+    blocks: object[];
+  };
+  // Dois minutos em trechos de 10 s, do mais antigo ao mais novo, atravessando a troca de etapa.
+  expect(data.series.map((r) => r.secondsAgo)).toEqual([110, 100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0]);
+  expect(data.series[0]).toEqual({ secondsAgo: 110, bpm: 125, kmh: 4, inclinePercent: 0 });
+  expect(data.series[11]).toEqual({ secondsAgo: 0, bpm: 162, kmh: 6.6, inclinePercent: 1 });
+  // O 1º tiro, já feito: a carga em que terminou, o BPM do fim, o pico e as leituras acima do teto.
+  const first = w.log![1];
+  expect(data.blocks).toEqual([
+    { name: 'VO₂máx 1/4', kmh: 6.6, inclinePercent: 1, endBpm: median(first.tail), peakBpm: first.top, aboveReadings: first.zone[2] },
+  ]);
+  expect(first.zone[2]).toBeGreaterThan(0);
+  const at = (moment: typeof live | null, sinceRelief: number | null = null) =>
+    reviewPrompt({ workout: w, index: 3, left: 140, load, features, live: moment, samples: strap, now, allowed: ['manter', 'reduzir'], maxRaiseBpm: 0, sinceRelief }).user;
+  // A reta não passa da FC máxima e, com o BPM caindo, fica no momento.
+  expect(at({ bpm: 175, rise: 10 })).toMatchObject({
+    bpm: { projectedEndBpm: 180, projectedOverTopBpm: 9, position: 'acima', belowTopBpm: -4, endsAboveTop: true, reduceToAimBpm: 11 },
+  });
+  expect(at({ bpm: 165, rise: -4 })).toMatchObject({
+    bpm: { risePer30s: -4, projectedEndBpm: 165, projectedOverTopBpm: -6, endsAboveTop: false, endsBelowAim: true, reduceToAimBpm: null },
+  });
+  // Sem a cinta não há leitura do momento: vale a mediana, e a subida e a projeção ficam em branco.
+  expect(at(null)).toMatchObject({
+    bpm: { now: features.median, risePer30s: null, projectedEndBpm: null, projectedOverTopBpm: null, endsAboveTop: null, endsBelowAim: true },
+  });
+  // Passados os 3 minutos, ou sem alívio nenhum, a FC já não responde a ele.
+  expect(at(live, 180)).toMatchObject({ session: { secondsSinceRelief: 180, reliefSettling: false } });
+  expect(at(live)).toMatchObject({ session: { secondsSinceRelief: null, reliefSettling: false } });
+  // Do perfil nada vai além do que a conta precisa.
+  expect(JSON.stringify(user)).not.toMatch(/weightKg|heightCm/);
+  // O texto diz o papel da IA, que existe a trava, e define cada decisão e a saída por tipo.
+  expect(system).toContain('Seu papel é antecipar');
+  expect(system).toContain('O app tem uma trava própria');
+  expect(system).toContain('folga negativa');
+  for (const decision of reviewDecisions) expect(system).toContain('- "' + decision + '"');
+  expect(system).toContain('{"reason": "<motivo>", "decision": "<decisão>", "bpm": <inteiro>}');
+  expect(system).toContain('superestima');
+  // Logo depois de um alívio a IA só reduz com o corte anterior já no painel e a reta acima do teto.
+  expect(system).toContain(
+    'Se session.reliefSettling é true, o último alívio ainda está fazendo efeito: reduza só se stage.targetsReached é true (o corte anterior já está no painel) e endsAboveTop é true; senão, mantenha.',
+  );
+  expect(system).toContain('json');
+});
+
+it('a resposta da revisão só vale com uma decisão aceita e bpm em número', () => {
+  const parse = parseReview(['manter', 'reduzir']);
+  expect(parse({ reason: ' sobe 4 por 30 s, vai passar do teto ', decision: 'reduzir', bpm: '6' })).toEqual({
+    decision: 'reduzir',
+    bpm: 6,
+    reason: 'sobe 4 por 30 s, vai passar do teto',
+  });
+  expect(parse({ decision: 'reduzir', bpm: '5,4' }).bpm).toBe(5);
+  expect(parse({ decision: 'manter', bpm: 0 })).toEqual({ decision: 'manter', bpm: 0, reason: '' });
+  // Uma decisão fora da lista do momento é recusada, mesmo que exista em outra revisão.
+  expect(() => parse({ decision: 'aumentar', bpm: 3 })).toThrow();
+  expect(() => parse({ decision: 'subir', bpm: 3 })).toThrow();
+  expect(parseReview(['manter', 'reduzir', 'aumentar'])({ decision: 'aumentar', bpm: 3 }).decision).toBe('aumentar');
+  // Sem bpm em número também.
+  expect(() => parse({ decision: 'reduzir' })).toThrow();
+  expect(() => parse({ decision: 'reduzir', bpm: 'muito' })).toThrow();
+  expect(() => parse({ decision: 'manter', bpm: '' })).toThrow();
+  expect(() => parse(null)).toThrow();
 });

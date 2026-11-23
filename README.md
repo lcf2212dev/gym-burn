@@ -134,7 +134,8 @@ Daí em diante o app conecta sozinho na cinta sempre que procura ou usa uma este
 
 - o guia deixa de pedir as mãos no sensor: os pedidos de 3 em 3 minutos já nascem atendidos e o aviso não abre;
 - a FC de repouso do dia sai das primeiras leituras do treino, sem ninguém segurar nada;
-- a carga é revista a cada minuto, pela mediana do último minuto de leituras, e não a cada pedido de leitura.
+- a carga é revista a cada 30 segundos, pela mediana do último minuto de leituras, e não a cada pedido de leitura;
+- nos blocos de esforço vale também a leitura do momento (os últimos 5 segundos), que aciona a trava contra o BPM acima do teto (veja [Ajuste da carga durante o treino](#ajuste-da-carga-durante-o-treino)).
 
 A esteira continua como reserva. Vale a leitura dela sempre que a cinta não tem uma leitura dos últimos 5 segundos: cinta fora do alcance, sem bateria, sem contato com a pele ou ainda conectando. Nesse caso o pedido seguinte volta a pedir as mãos no sensor, e fecha sozinho se a cinta voltar. No painel, o rótulo do número diz de onde ele vem: **Cinta** ou **Batimentos** (sensor da esteira).
 
@@ -150,36 +151,41 @@ O painel da esteira calcula as kcal com um peso padrão quando não dá para inf
 
 ### Quando a IA é chamada
 
-As duas chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com raciocínio ligado. A API ignora `temperature` nesse modo, por isso o app não envia esse parâmetro.
+As três chamadas usam o modelo `deepseek-flash` da DeepSeek, sempre com raciocínio ligado. A API ignora `temperature` nesse modo, por isso o app não envia esse parâmetro.
 
 | Chamada | Quando | Esforço de raciocínio | O que a DeepSeek recebe |
 | --- | --- | --- | --- |
 | Plano do dia | toque em **Gerar treino com IA** | `high` | idade, FC de repouso e máxima, sessão do dia com a faixa de BPM, resumo e patamares das 6 sessões válidas mais recentes e a escada de cargas |
+| Revisão da carga | durante o treino guiado, a cada 30 segundos com a cinta (ou a cada pegada no sensor de mão), quando a mediana não está acima da faixa | `low` | faixa e alvo, FC máxima, etapa atual com os alvos e o tempo que falta, BPM do momento, subida em 30 s e projeção até o fim da etapa, os últimos 2 minutos de BPM e carga, os blocos de esforço já feitos, os ajustes de hoje e o que a IA pode decidir |
 | Avaliação | ao fim de uma sessão com 3 minutos e 10 leituras ou mais | `max` | idade, resumo da sessão por tipo de bloco, patamares, de onde vieram os batimentos, sessões anteriores e estimativas de FC máxima |
 
-Peso e altura ficam só no aparelho: nenhuma chamada os envia. Durante o treino nada é enviado.
+Peso e altura ficam só no aparelho: nenhuma chamada os envia. A revisão da carga não leva o perfil: só a FC de repouso do dia e a máxima em uso.
 
-Cada chamada tem até 3 novas tentativas em falha de rede, erro do servidor ou resposta fora do formato.
+O plano e a avaliação têm até 3 novas tentativas em falha de rede, erro do servidor ou resposta fora do formato. A revisão da carga tem 12 segundos e nenhuma nova tentativa: a seguinte já vem 30 segundos depois, com leituras novas. Sem chave da DeepSeek configurada, nada é enviado nem gravado no diário, e o treino segue com a conta do app.
 
 ### Ajuste da carga durante o treino
 
-Durante o treino a IA não é consultada: quem ajusta a carga é o app, na hora e mesmo sem internet. Antes o ajuste fino dentro da faixa ia à IA, que só aplicava uma regra fixa; a conta passou para o aparelho.
+Três coisas cuidam da carga durante o treino, nesta ordem de força:
 
-As leituras que valem dependem de onde vêm. Do **sensor de mão**, são as dos últimos 12 segundos: pelo menos 4, depois de descartar as 2 primeiras de cada pegada. Da **cinta**, é o último minuto inteiro (ao menos 20 leituras em 40 segundos): 10 segundos de cinta são um piscar, e um 135 de passagem não é o BPM da carga. Nos dois casos vale a mediana. O que o app faz depende de onde ela está:
+1. **A trava**, no aparelho, a cada amostra. Com a cinta, num bloco de esforço, ela alivia a carga assim que o BPM do momento (a mediana dos últimos 5 segundos da cinta) passa do teto da faixa, sem esperar a mediana do minuto, a IA nem o minuto entre ajustes. A trava sempre vence a IA. No tiro de 4 minutos de 22/11 a mediana do minuto só acusou o excesso a 25 segundos do fim, depois de 89 segundos acima do teto; a trava age nos primeiros segundos. O corte parte da carga medida, quando a esteira está abaixo do alvo, leva o BPM a 3 abaixo do teto e tira também o que ele subiu nos últimos 30 segundos (até 10 bpm), que ainda vai chegar. BPM acima do teto num bloco de esforço nunca fica sem reação: se a esteira está acima dos alvos, um corte já pedido não chegou ao painel, e em vez de cortar de novo a trava reabre o aviso de ajuste, com bipes, a cada 30 segundos, e diz no painel até onde reduzir (**Acima do teto · 176 BPM · reduza para 6,1 km/h**). Depois de um alívio feito com o BPM acima do teto no mesmo bloco, de quem for, a trava espera 30 segundos, e até 3 minutos depois dele só corta de novo com 3 bpm ou mais de excesso e o BPM sem cair; uma redução antecipada da IA, com o BPM ainda no teto, não segura a trava, e depois de um aumento ela age na hora. No começo de um bloco ela espera a esteira chegar aos alvos, por até 30 segundos: a lona ainda acelera desde a etapa leve, e o BPM é o do bloco anterior. Nas etapas leves (aquecimento, recuperação entre blocos e volta à calma) ela não age: nelas o BPM vem caindo sozinho do bloco anterior. Sem a cinta não há leitura do momento, e não há trava.
+2. **A regra local de alívio**, a cada revisão: com a mediana acima da faixa, o app alivia na hora, em qualquer etapa e sem consultar a IA (veja abaixo). É o que protege as etapas leves e quem usa o sensor de mão. Como a trava, ela não corta por cima de um corte que não chegou ao painel: reabre o aviso.
+3. **A IA**, nas demais revisões, a cada 30 segundos. Ela recebe o estado do treino e escolhe entre manter, reduzir e, quando a regra local deixaria a carga subir, aumentar. O papel dela é antecipar: reduzir antes de o BPM passar do teto quando a subida e o tempo que falta indicam que ele vai passar, e manter quando o BPM vai terminar no alvo. O app prende o pedido dela aos limites: uma redução tira de 1 a 15 bpm, e um aumento não passa do que a regra local subiria e só sai com a esteira nos alvos. Nos 3 minutos depois de um alívio feito com o BPM acima do teto, no mesmo bloco, ela só reduz se o corte anterior já está no painel e a projeção termina acima do teto. A resposta só vale para a mesma etapa, sem nenhum ajuste feito desde o pedido; a trava, a troca de etapa, um ajuste e o fim do treino cancelam a chamada em curso, e uma revisão nova não começa com outra ainda sem resposta. Enquanto ela responde o painel mostra **IA analisando…**, e depois o motivo dela e o que mudou. Sem resposta em 12 segundos (contando a leitura da chave), com erro, sem internet ou sem chave, vale a regra local abaixo, e o painel começa com **Sem IA**; também ela não sobe a carga com o BPM do momento acima do teto.
+
+As leituras que valem dependem de onde vêm. Do **sensor de mão**, são as dos últimos 12 segundos: pelo menos 4, depois de descartar as 2 primeiras de cada pegada. Da **cinta**, é o último minuto inteiro (ao menos 20 leituras em 40 segundos): 10 segundos de cinta são um piscar, e um 135 de passagem não é o BPM da carga. Nos dois casos vale a mediana. A regra local depende de onde ela está; abaixo e dentro da faixa, ela é o que vale quando a IA não responde, e o limite do aumento que a IA pode pedir:
 
 - **Acima da faixa**: o app alivia a carga já na primeira medida, em qualquer etapa. Não há tolerância de poucos bpm nem espera para a frequência cardíaca estabilizar. A única espera é a de não empilhar alívios: nos 3 minutos depois de um, outro só sai com 3 bpm ou mais de excesso e a FC sem cair. A FC leva de 2 a 3 minutos para responder, e dois cortes seguidos a derrubam abaixo do alvo.
-- **Abaixo da faixa**, num bloco de esforço: o app sobe a carga, desde que a esteira esteja nos alvos há 90 segundos e o BPM não esteja disparando. Essas duas travas valem só para aumentos: subir a carga com a FC ainda respondendo é o que a leva acima do teto.
+- **Abaixo da faixa**, num bloco de esforço: o app sobe a carga, desde que a esteira esteja nos alvos há 90 segundos e o BPM não esteja disparando. Essas duas condições valem só para aumentos: subir a carga com a FC ainda respondendo é o que a leva acima do teto.
 - **Dentro da faixa e abaixo do teto**, num bloco de esforço com os alvos atingidos há 90 segundos e a FC sem subir (com a cinta, 1 bpm de diferença entre as duas metades do minuto já conta como subida): é o ajuste fino. A até 3 bpm do teto o alvo já foi atingido e nada muda. Mais longe que isso, a carga sobe o que couber deixando 1 bpm de folga até o teto (um quinto da distância, quando ela é grande), nunca um degrau que passaria disso. Nos primeiros 4 minutos de uma carga, 3 bpm ficam reservados para o que a FC ainda sobe sozinha. Nos 2 últimos minutos do último bloco a carga não sobe mais.
 
 Todo ajuste é proporcional à distância. O app converte os bpm em METs pela reta entre carga e frequência cardíaca da pessoa (a FC de repouso e a leitura atual; sem repouso medido, 15 bpm por MET) e anda em degraus de 0,1 km/h e 0,5%. Meio ponto de rampa vale uns 5 bpm, mais que os 3 do alvo; por isso, com rampa, a caminhada usa a velocidade como ajuste fino, de 4,9 a 5,2 km/h, em que cada 0,1 km/h vale pouco mais de 1 bpm. Abaixo de 4,9 km/h a caminhada é plana. Entre duas cargas de custo quase igual vale a mais rápida.
 
 Ao aliviar, o app mira 3 bpm abaixo do teto e faz o menor corte que tira isso; nenhum alvo fica acima do que a esteira está medindo, e um alívio nunca sobe velocidade nem rampa. A corrida perde velocidade até 6 km/h; se ainda não bastar, o alvo desce para o alto da caminhada (5,2 km/h com até 7,5% de rampa, o único caso em que a rampa sobe num alívio) e segue por ela, sem parar de 5,3 a 5,9 km/h. Quem já baixou a esteira para andar num bloco de corrida é tratado como caminhando. Uma etapa leve não é aliviada abaixo de 3 km/h. Ao subir de fora da faixa, mira o meio dela, com no máximo 1 MET por correção (cerca de 2 pontos de rampa) e pelo menos um degrau: a velocidade vai até 5,2 km/h e o resto sobe pela rampa, que durante o treino pode passar dos 7,5% do plano. Correndo, só a velocidade muda, e a rampa nunca passa de 2%: um alvo antigo de corrida com mais rampa volta a 2% no primeiro ajuste, com a velocidade compensando a diferença. Fora esse caso, um aumento nunca desce velocidade nem rampa.
 
-A carga nunca sobe em etapa leve nem em dia de recuperação, em que a faixa é teto. Num bloco longo é normal o guia pedir mais carga no começo e aliviar mais adiante: a FC sobe aos poucos na mesma carga. Depois de um ajuste, o guia espera 1 minuto antes de rever a carga de novo. O ajuste de um bloco de esforço vale também para os blocos iguais que ainda virão. Cada ajuste fica no registro do treino com a carga de antes e a de depois.
+A carga nunca sobe em etapa leve nem em dia de recuperação, em que a faixa é teto. Também não sobe no meio de um **tiro**, um bloco de esforço de até 5 minutos, nem pela regra local nem pela IA: num tiro a FC ainda está subindo quando ele acaba, e a conta do aumento supõe a FC estabilizada. Num bloco longo é normal o guia pedir mais carga no começo e aliviar mais adiante: a FC sobe aos poucos na mesma carga. Depois de um ajuste, a revisão espera 1 minuto antes de rever a carga de novo; a trava não espera. Só uma redução passa para os blocos seguintes: todo bloco de esforço que ainda vem e custa mais que a carga nova fica com ela. Um aumento vale só para o bloco em que foi feito; num treino de tiros a FC parte de mais alto a cada tiro. Cada ajuste fica no registro do treino com a carga de antes, a de depois e quem decidiu (a trava, a IA ou o app).
 
 ### Diagnóstico da IA
 
-Em **Meu perfil → Diagnóstico da IA** ficam o diário das 200 últimas chamadas (o que foi enviado, o que voltou e quanto demorou), que pode ser compartilhado, e um conjunto de cenários fixos que mede o acerto da IA com a sua chave. Uma rodada completa leva vários minutos e custa centavos de dólar. Pelo adb:
+Em **Meu perfil → Diagnóstico da IA** ficam o diário das 600 últimas chamadas (o que foi enviado, o que voltou e quanto demorou; a revisão da carga faz umas 90 por treino), que pode ser compartilhado, e um conjunto de cenários fixos que mede o acerto da IA no plano e na avaliação com a sua chave. Uma rodada completa leva vários minutos e custa centavos de dólar. Pelo adb:
 
 ```bash
 adb shell am start -a android.intent.action.VIEW -d 'gymburn://diagnostico?rodar=1' com.gymburn.app
@@ -281,7 +287,8 @@ A cinta de batimentos tem a sua própria sessão (`src/heart/strap-session.ts`),
 `BleTransport` e no mesmo rádio: as duas buscas dividem uma única busca nativa. A sessão da esteira
 pergunta à da cinta, a cada pacote, se há leitura recente; se há, é ela que entra nas métricas e
 nas amostras, marcada com a origem. O resto do app (guia, ajuste da carga, registro do treino) lê
-os batimentos das amostras; só o ajuste da carga olha a origem, para saber quantas leituras valem.
+os batimentos das amostras; só o ajuste da carga olha a origem, para saber quantas leituras valem e
+se há leitura do momento para a trava.
 
 ```
 telas e componentes (src/screens, src/components)

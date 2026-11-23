@@ -129,6 +129,8 @@ export type MinuteLoad = [kmhMs: number, inclineMs: number, ms: number];
 /**
  * Ajuste de carga aplicado durante o treino. `from` e `to` são os alvos de
  * antes e de depois, como [km/h, %]; não existem nos registros mais antigos.
+ * `by` diz quem decidiu: a trava do aparelho (BPM do momento acima do teto), a
+ * IA ou a regra local do app. Também não existe nos registros mais antigos.
  */
 export type Change = {
   second: number;
@@ -137,6 +139,7 @@ export type Change = {
   bpm: number;
   from?: [number, number];
   to?: [number, number];
+  by?: 'trava' | 'ia' | 'app';
 };
 export type Workout = {
   id: string;
