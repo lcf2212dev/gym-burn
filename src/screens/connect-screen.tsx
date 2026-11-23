@@ -94,8 +94,11 @@ export function ConnectScreen() {
     }
   }, [actions, phase, scan]);
 
-  // O dia de abertura da tela, para a linha do treino de hoje no rodapé.
-  const [today] = useState(() => new Date().getDay());
+  // A hora de abertura da tela, para a linha do treino sugerido para hoje no rodapé.
+  const [openedAt] = useState(() => Date.now());
+  const history = useWorkout((s) => s.history);
+  // A sugestão olha só os treinos da esteira de verdade.
+  const real = history.filter((w) => w.source === 'ble');
   const version = Constants.expoConfig?.version ?? null;
   const footnote = (version ? 'versão ' + version : 'gym burn') + ' · somente leitura';
   const scanning = scan !== 'idle';
@@ -215,7 +218,7 @@ export function ConnectScreen() {
       {/* A ação principal fica presa no rodapé, com o treino de hoje embaixo. */}
       <View style={[styles.actions, { borderColor: theme.border }]}>
         <UiButton icon="target" label="Treino do dia" onPress={() => router.push('/treino')} />
-        <Text style={[styles.today, { color: theme.textSecondary }]}>{todayLine(today)}</Text>
+        <Text style={[styles.today, { color: theme.textSecondary }]}>{todayLine(real, openedAt)}</Text>
       </View>
     </SafeAreaView>
   );

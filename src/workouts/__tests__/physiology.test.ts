@@ -26,10 +26,10 @@ import {
   restingBpm,
   restOf,
 } from '../physiology';
-import { sessionPlan, week } from '../week';
+import { sessionPlan, sessions, type SessionKey } from '../week';
 
 const profile = { age: 40, weightKg: 78, heightCm: 175 };
-const plan = sessionPlan(week[1].session!, 5, 1);
+const plan = sessionPlan(sessions.base, 5, 1);
 const pulses = (start: number, values: number[]) =>
   values.map((bpm, i) => ({ at: start + i * 1000, bpm }));
 const session = (restBpm: number | null, maxBpm: number | null): Workout => ({
@@ -95,12 +95,12 @@ it('com 3 ou mais medidas parado entre as 5 últimas, o repouso em uso é a medi
 });
 
 it('a faixa de cada sessão são os percentuais do plano semanal sobre a FC máxima', () => {
-  const zone = (day: number) => dailyTarget(sessionPlan(week[day].session!, 5, 1), profile);
-  expect(zone(1)).toEqual({ objective: 'Base aeróbica', low: 117, high: 135 });
-  expect(zone(2)).toEqual({ objective: 'VO₂máx', low: 162, high: 171 });
-  expect(zone(3)).toEqual({ objective: 'Recuperação', low: 90, high: 108 });
-  expect(zone(5)).toEqual({ objective: 'Limiar', low: 153, high: 162 });
-  expect(zone(6)).toEqual({ objective: 'Base aeróbica', low: 117, high: 135 });
+  const zone = (key: SessionKey) => dailyTarget(sessionPlan(sessions[key], 5, 1), profile);
+  expect(zone('base')).toEqual({ objective: 'Base aeróbica', low: 117, high: 135 });
+  expect(zone('vo2')).toEqual({ objective: 'VO₂máx', low: 162, high: 171 });
+  expect(zone('vo2Long')).toEqual({ objective: 'VO₂máx', low: 162, high: 171 });
+  expect(zone('recovery')).toEqual({ objective: 'Recuperação', low: 90, high: 108 });
+  expect(zone('threshold')).toEqual({ objective: 'Limiar', low: 153, high: 162 });
   // Treino livre: vale a base aeróbica.
   expect(dailyTarget(null, profile)).toEqual({ objective: 'Base aeróbica', low: 117, high: 135 });
   // A máxima prevista move a faixa; o repouso medido, não.
@@ -207,7 +207,7 @@ it('o piso da FC máxima soma 5 bpm ao pico de sessão levada até o fim sem red
 it('um pico seguido de outro bloco concluído, ou de 4 min no mesmo bloco sem alívio, sobe o piso mesmo com redução forçada', () => {
   // O VO₂máx de 22/11: 41 anos, faixa de 161 a 170. A trava cortou o 3º tiro com 178 (redução forçada).
   const age41 = { ...profile, age: 41 };
-  const vo2 = sessionPlan(week[2].session!, 6.6, 1);
+  const vo2 = sessionPlan(sessions.vo2Long, 6.6, 1);
   const stage = (top: number, topAtSeconds: number, seconds: number) => ({
     ...emptyLog(),
     ms: seconds * 1000,
@@ -232,7 +232,7 @@ it('um pico seguido de outro bloco concluído, ou de 4 min no mesmo bloco sem al
   expect(maxFloor([shots(216)])).toBe(184);
   expect(maxFloor([shots(215)])).toBe(179);
   // Um bloco contínuo: pico de 150 aos 10 min e mais 25 min no bloco, com uma redução forçada no meio.
-  const base = sessionPlan(week[1].session!, 5, 1);
+  const base = sessionPlan(sessions.base, 5, 1);
   const { high } = dailyTarget(base, profile);
   const steady = (reliefAfter: number): Workout => {
     const log = [emptyLog(), stage(150, 600, 2100), emptyLog()];

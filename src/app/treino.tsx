@@ -36,11 +36,10 @@ import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { validLoad, type Plan, type Workout } from '@/workouts/model';
 import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
 import { dayKey, efforts, readiness, readinessLock, restToday, stillWait } from '@/workouts/rest';
-import { sessionMinutes, week, zoneIndexes, zones, zoneSpan } from '@/workouts/week';
+import { lastDone, lastDoneText, suggest } from '@/workouts/schedule';
+import { sessionMinutes, sessionOrder, sessions, zoneIndexes, zones, zoneSpan } from '@/workouts/week';
 import { formatDecimal, formatDuration, formatTrimmed } from '@/utils/format';
 
-// A semana começa na segunda; o domingo, de descanso, fecha a lista.
-const DAYS = [1, 2, 3, 4, 5, 6, 0];
 /** Abaixo disto a tela avisa que a bateria da cinta está no fim. */
 const LOW_BATTERY_PERCENT = 15;
 /** A cor do estado da prontidão: verde no normal, ciano acima, âmbar abaixo. */
@@ -63,9 +62,11 @@ export default function Training() {
   const battery = useStrap((s) => (s.phase === 'connected' ? s.battery : null));
   const [batteryDismissed, dismissBattery] = useState(false);
   const active = useWorkout((s) => s.active);
-  const [today] = useState(() => new Date().getDay());
-  // O dia cujo treino será feito: começa em hoje, e a lista da semana deixa trocar.
-  const [day, pick] = useState(today);
+  // A sessão sugerida para hoje sai dos treinos recentes da esteira de verdade
+  // (um dia sem treino conta como descanso); a lista de sessões deixa trocar.
+  const [openedAt] = useState(() => Date.now());
+  const [suggestion] = useState(() => suggest(history.filter((w) => w.source === 'ble'), openedAt));
+  const [picked, pick] = useState(suggestion.key);
   const [plan, setPlan] = useState<Plan | null>(() => {
     // Um plano preparado antes do plano semanal não tem faixa própria, e um com
     // alvo entre o teto da caminhada e o começo da corrida é de antes desse teto:
@@ -85,7 +86,8 @@ export default function Training() {
   const aim = target && aimBand(target, target.objective);
   // Em dia de recuperação a faixa é teto: ninguém busca o alto dela.
   const chasing = !!target && !!aim && aim.low > target.low;
-  const chosen = week[day].session;
+  const chosen = sessions[picked];
+  const done = lastDone(history.filter((w) => w.source === 'ble'), openedAt);
   const work = plan?.stages.filter((s) => !s.measure) ?? [];
   // A faixa de uma intensidade em BPM, pela FC máxima da pessoa.
   const bandOf = (objective: keyof typeof zones) => {
@@ -97,7 +99,7 @@ export default function Training() {
     objective === 'Recuperação' ? 'até ' + zone.high : zone.low + '–' + zone.high;
 
   async function generate() {
-    if (!profile || !chosen) return;
+    if (!profile) return;
     setBusy(true);
     setAttempt(1);
     setError('');
@@ -180,10 +182,10 @@ export default function Training() {
   const easy = plan?.stages.find((s) => s.measure);
   // O plano fala em "tiros" no VO₂máx e em "blocos" no limiar.
   const where = work.length > 1 ? (plan?.goal === 'VO₂máx' ? 'nos tiros' : 'nos blocos') : 'no esforço';
-  const facts = chosen && structureFacts(chosen);
-  const band = chosen && bandOf(chosen.objective);
-  const span = chosen && zoneSpan(chosen.objective);
-  const top = chosen ? ZoneColors[Math.max(...zoneIndexes(chosen.objective))] : Metric.heart;
+  const facts = structureFacts(chosen);
+  const band = bandOf(chosen.objective);
+  const span = zoneSpan(chosen.objective);
+  const top = ZoneColors[Math.max(...zoneIndexes(chosen.objective))];
   // O repouso de hoje sai dos treinos desta origem, o em curso inclusive.
   const rest = (
     <RestCard workouts={active && active.source === source ? [active, ...recent] : recent} />
@@ -297,11 +299,11 @@ export default function Training() {
           <Card hero accent={Metric.heart} style={local.hero}>
             <HeroHead
               icon="target"
-              kicker={(day === today ? 'Hoje · ' : 'No lugar do treino de hoje · ') + week[day].day}
-              title={chosen ? chosen.title : 'Descanso'}
-              minutes={chosen ? sessionMinutes(chosen) : null}
+              kicker={picked === suggestion.key ? 'Hoje · sugerido' : 'No lugar do sugerido para hoje'}
+              title={chosen.title}
+              minutes={sessionMinutes(chosen)}
             />
-            {chosen && facts && band && span ? (
+            {facts && band && span && (
               <>
                 <ZoneGauge max={hr.max} band={band}>
                   <Kicker>{facts.label}</Kicker>
@@ -324,48 +326,53 @@ export default function Training() {
                 </View>
                 <Text style={local.note}>{facts.note}</Text>
               </>
-            ) : (
-              <Text style={styles.body}>
-                Domingo é o dia de descanso do seu plano. Se quiser treinar mesmo assim, toque em
-                um dia da semana abaixo.
-              </Text>
             )}
+            {/* Por que esta é a sessão de hoje: a regra olha os treinos dos últimos dias. */}
+            <Text style={local.note}>{suggestion.reason}</Text>
           </Card>
           {rest}
           <Card padded={false} style={local.week}>
             <View style={[local.between, local.weekHead]}>
-              <Kicker>Plano semanal</Kicker>
+              <Kicker>Sessões</Kicker>
               <Kicker>Zona</Kicker>
             </View>
-            {DAYS.map((index) => {
-              const entry = week[index];
-              const selected = index === day;
+            {sessionOrder.map((key) => {
+              const entry = sessions[key];
+              const selected = key === picked;
               return (
                 <Pressable
-                  key={index}
+                  key={key}
                   accessibilityRole="radio"
-                  accessibilityState={{ checked: selected, disabled: busy || !entry.session }}
-                  disabled={busy || !entry.session}
-                  onPress={() => pick(index)}
+                  accessibilityState={{ checked: selected, disabled: busy }}
+                  accessibilityLabel={
+                    entry.title +
+                    ', ' +
+                    entry.percent +
+                    ', ' +
+                    lastDoneText(done[key]) +
+                    (key === suggestion.key ? ', sugerido para hoje' : '')
+                  }
+                  disabled={busy}
+                  onPress={() => pick(key)}
                   style={[local.day, selected && local.daySelected]}>
-                  <Text style={[local.dayName, selected && local.picked]}>{entry.day.slice(0, 3)}</Text>
-                  <View style={local.grow}>
-                    <Text style={[local.name, local.medium, !entry.session && local.muted]}>
-                      {entry.session?.title ?? 'Descanso'}
-                      {index === today ? ' · hoje' : ''}
-                    </Text>
-                    {!!entry.session && <Text style={local.side}>{entry.session.percent}</Text>}
-                  </View>
-                  <ZoneMeter lit={entry.session ? zoneIndexes(entry.session.objective) : []} />
-                  <Text style={[local.zone, !entry.session && local.muted]}>
-                    {entry.session ? zoneSpan(entry.session.objective).ids.replace('–Z', '–') : '—'}
+                  <Text style={[local.dayName, selected && local.picked]}>
+                    {key === suggestion.key ? 'HOJE' : ''}
                   </Text>
+                  <View style={local.grow}>
+                    <Text style={[local.name, local.medium]}>{entry.title}</Text>
+                    <Text style={local.side}>
+                      {entry.percent} · {lastDoneText(done[key])}
+                    </Text>
+                  </View>
+                  <ZoneMeter lit={zoneIndexes(entry.objective)} />
+                  <Text style={local.zone}>{zoneSpan(entry.objective).ids.replace('–Z', '–')}</Text>
                 </Pressable>
               );
             })}
           </Card>
           <Text style={[styles.body, local.centered]}>
-            Cada treino tem 45 minutos. Para fazer hoje o treino de outro dia, toque nele.
+            Cada treino tem 45 minutos. A sugestão olha os seus últimos treinos, e um dia sem treino
+            conta como descanso. Para fazer outro treino hoje, toque nele.
           </Text>
         </>
       )}

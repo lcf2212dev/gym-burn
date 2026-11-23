@@ -16,7 +16,8 @@ import {
   type ReadinessLock,
 } from './rest';
 import type { GaitView, NextBlockView, RecoveryView } from './session';
-import { describe, heartZones, sessionMinutes, week, type Session } from './week';
+import { suggest } from './schedule';
+import { describe, heartZones, sessionMinutes, type Session } from './week';
 
 /** Etapas iguais do plano numa linha só, como "4 × 4:00 VO₂máx". */
 export type StageGroup = {
@@ -158,12 +159,10 @@ export function scorePercent(correct: number, runs: number) {
   return runs ? Math.round((100 * correct) / runs) : 0;
 }
 
-/** O treino de hoje no plano semanal, em uma linha, para o rodapé da tela inicial. */
-export function todayLine(day: number) {
-  const { day: name, session } = week[day];
-  return (
-    'Hoje · ' + name + ' · ' + (session ? session.goal + ' · ' + sessionMinutes(session) + ' min' : 'descanso')
-  );
+/** A sessão sugerida para hoje, em uma linha, para o rodapé da tela inicial. */
+export function todayLine(history: readonly Workout[], now: number) {
+  const { session } = suggest(history, now);
+  return 'Hoje · ' + session.goal + ' · ' + sessionMinutes(session) + ' min';
 }
 
 /**

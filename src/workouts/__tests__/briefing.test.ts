@@ -23,7 +23,7 @@ import {
 import { FATIGUE_TIP } from '../gait';
 import { emptyLog, makePlan, newWorkout, type Workout } from '../model';
 import type { ReadinessRecord } from '../rest';
-import { week, zoneIndexes } from '../week';
+import { sessionPlan, sessions, zoneIndexes } from '../week';
 
 describe('etapas agrupadas', () => {
   it('junta os tiros e as recuperações repetidos numa linha cada', () => {
@@ -57,7 +57,7 @@ describe('zonas de cada treino', () => {
 
 describe('fatos da sessão', () => {
   it('resume os tiros e os trechos leves de um treino intervalado', () => {
-    expect(structureFacts(week[2].session!)).toEqual({
+    expect(structureFacts(sessions.vo2Long)).toEqual({
       label: 'Faixa nos tiros',
       facts: [
         ['4 × 4 min', 'Tiros na faixa'],
@@ -68,12 +68,12 @@ describe('fatos da sessão', () => {
   });
 
   it('chama de blocos o que o plano chama de blocos', () => {
-    expect(structureFacts(week[5].session!).label).toBe('Faixa nos blocos');
-    expect(structureFacts(week[5].session!).facts[0]).toEqual(['3 × 8 min', 'Blocos na faixa']);
+    expect(structureFacts(sessions.threshold).label).toBe('Faixa nos blocos');
+    expect(structureFacts(sessions.threshold).facts[0]).toEqual(['3 × 8 min', 'Blocos na faixa']);
   });
 
   it('resume o treino contínuo', () => {
-    expect(structureFacts(week[1].session!)).toEqual({
+    expect(structureFacts(sessions.base)).toEqual({
       label: 'Faixa de batimentos',
       facts: [
         ['35 min', 'Na faixa'],
@@ -202,12 +202,17 @@ describe('placar do diagnóstico', () => {
 });
 
 describe('treino de hoje, em uma linha', () => {
-  it('diz o dia, o treino e a duração', () => {
-    expect(todayLine(2)).toBe('Hoje · Terça · VO₂máx · 45 min');
+  const now = new Date(2026, 10, 23, 9, 0).getTime();
+  const done = (daysAgo: number, key: 'vo2' | 'base'): Workout => ({
+    ...newWorkout({ age: 35, weightKg: 75, heightCm: 175 }, 'ble', sessionPlan(sessions[key], 6, 1)),
+    started: now - daysAgo * 86_400_000,
+    totals: { ...newWorkout({ age: 35, weightKg: 75, heightCm: 175 }, 'ble', null).totals, movingMs: 45 * 60_000 },
   });
 
-  it('avisa do descanso no domingo', () => {
-    expect(todayLine(0)).toBe('Hoje · Domingo · descanso');
+  it('diz a sessão sugerida pelos treinos recentes e a duração', () => {
+    expect(todayLine([], now)).toBe('Hoje · VO₂máx · 45 min');
+    // Ontem foi VO₂máx: hoje é dia leve.
+    expect(todayLine([done(1, 'vo2')], now)).toBe('Hoje · Recuperação ativa · 45 min');
   });
 });
 

@@ -15,7 +15,7 @@ import {
 } from './model';
 import { dailyTarget, foxMax, loadLadder } from './physiology';
 import { assessBounds, assessPrompt, parseAssess, parsePlan, planPrompt } from './prompts';
-import { sessionPlan, week, type Session } from './week';
+import { sessionPlan, sessions, type Session } from './week';
 
 export type Outcome = {
   scenario: string;
@@ -33,10 +33,10 @@ const DAY = 86400000;
 const total = (values: number[]) => values.reduce((a, b) => a + b, 0);
 
 // As sessões do plano semanal usadas nos cenários.
-const base = week[1].session!;
-const vo2 = week[2].session!;
-const recovery = week[3].session!;
-const threshold = week[5].session!;
+const base = sessions.base;
+const vo2 = sessions.vo2Long;
+const recovery = sessions.recovery;
+const threshold = sessions.threshold;
 
 // --- Sessões fabricadas ----------------------------------------------------
 
