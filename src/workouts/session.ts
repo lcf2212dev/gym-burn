@@ -82,10 +82,15 @@ import type { ReviewDecision, ReviewReply } from './prompts';
 import {
   addStillBeat,
   dayKey,
+  efforts,
+  readinessLock,
   STILL_GAP_MS,
+  stillHistory,
   stillHrv,
   stillRest,
   stillSeconds,
+  stillWait,
+  type HrvCheck,
   type ReadinessRecord,
   type StillBeat,
 } from './rest';
@@ -199,10 +204,6 @@ const BACKFILL_MAX = 5;
  * recuperação guiada pelo coração voltar ao tempo do plano.
  */
 const LIVE_MISSING_SAMPLES = 5;
-/** Depois de um treino a FC e a HRV ainda são as do esforço por este tempo: a janela parado espera. */
-const POST_EFFORT_MS = 10 * 60_000;
-/** Um treino com tanto tempo em movimento conta como esforço para a medida parado. */
-const EFFORT_MS = 60_000;
 /** Os encerramentos que deixam a trilha incompleta, com a cinta ainda gravando. */
 const BROKEN_ENDINGS = ['App interrompido', 'Esteira desconectada'];
 
@@ -292,8 +293,15 @@ export class WorkoutSession {
      * (veja `still`); `null` sem medida em curso.
      */
     stillSeconds: null as number | null,
-    /** A janela parado em curso já dá o repouso do dia (60 s, com 30 s seguidos de leitura). */
+    /** A janela parado em curso já dá o repouso do dia (60 s, com um trecho de 30 s coerente). */
     stillReady: false,
+    /** O estado da HRV na janela parado em curso (veja `HrvCheck`); `null` sem medida em curso. */
+    stillHrv: null as 'pronta' | NonNullable<HrvCheck['reason']> | null,
+    /**
+     * Por que a última tentativa de prontidão não foi gravada: a leitura da
+     * cinta instável ou sem RR. Vale para o dia dela; some com uma medida gravada.
+     */
+    readinessIssue: null as { day: string; reason: 'instavel' | 'sem-rr' } | null,
     /** As medidas de prontidão dos últimos dias, da mais nova à mais antiga. */
     readiness: loadReadiness(),
     guidance: null as Guidance | null,
@@ -493,7 +501,8 @@ export class WorkoutSession {
       !((machine.samples.at(-1)?.speedKmh ?? 0) > 0) &&
       !this.restDone &&
       !(active && active.totals.movingMs > 0) &&
-      this.sinceEffort(beat.at) >= POST_EFFORT_MS;
+      // Os esforços saem do histórico: valem também com o app reaberto logo depois do treino.
+      stillWait(efforts(this.state.history), beat.at) === 0;
     if (!resting) {
       this.dropStill();
       return;
@@ -502,30 +511,23 @@ export class WorkoutSession {
     if (beat.bpm === null) return;
     this.still = addStillBeat(this.still, { at: beat.at, bpm: beat.bpm, rrMs: beat.rrMs });
     const seconds = stillSeconds(this.still);
-    const ready = stillRest(this.still) !== null;
-    if (seconds !== this.state.stillSeconds || ready !== this.state.stillReady)
-      this.update({ stillSeconds: seconds, stillReady: ready });
+    const ready = stillRest(this.still, this.stillPrevious(machine.mode)) !== null;
+    const check = stillHrv(this.still);
+    const hrv = check.hrv ? 'pronta' : check.reason;
+    const s = this.state;
+    if (seconds !== s.stillSeconds || ready !== s.stillReady || hrv !== s.stillHrv)
+      this.update({ stillSeconds: seconds, stillReady: ready, stillHrv: hrv });
   }
 
   /** Esvazia a janela parado. */
   private dropStill() {
     this.still = [];
-    if (this.state.stillSeconds !== null) this.update({ stillSeconds: null, stillReady: false });
+    if (this.state.stillSeconds !== null) this.update({ stillSeconds: null, stillReady: false, stillHrv: null });
   }
 
-  /**
-   * Os treinos da esteira de verdade com 1 minuto ou mais em movimento: o
-   * esforço que ainda pesa na FC e na HRV de quem fica parado depois. Saem do
-   * histórico, e valem também com o app reaberto logo depois do treino.
-   */
-  private efforts() {
-    return this.state.history.filter((w) => w.source === 'ble' && !!w.ended && w.totals.movingMs >= EFFORT_MS);
-  }
-
-  /** Há quantos ms terminou o último esforço; `Infinity` sem nenhum. */
-  private sinceEffort(now: number) {
-    const ended = Math.max(-Infinity, ...this.efforts().map((w) => w.ended!));
-    return now - ended;
+  /** As medidas parado anteriores da mesma origem: a referência do piso de plausibilidade do repouso. */
+  private stillPrevious(source: Workout['source']) {
+    return stillHistory(this.sameSource(source));
   }
 
   minimizeCue(key: string | null) {
@@ -560,6 +562,8 @@ export class WorkoutSession {
       recovery: null,
       stillSeconds: null,
       stillReady: false,
+      stillHrv: null,
+      readinessIssue: null,
       readiness: [],
       guidance: null,
       minimizedCue: null,
@@ -929,11 +933,11 @@ export class WorkoutSession {
     const beats = this.still;
     this.dropStill();
     if (now - beats[beats.length - 1].at > STILL_GAP_MS) return null;
-    const rest = stillRest(beats);
-    if (rest === null) return null;
-    this.restDone = true;
+    const rest = stillRest(beats, this.stillPrevious(w.source));
     // A esteira simulada não diz se a pessoa estava parada: a medida dela não entra na base.
     if (w.source === 'ble') this.keepReadiness(beats, rest, now);
+    if (rest === null) return null;
+    this.restDone = true;
     return this.rested(w, rest, 'parado');
   }
 
@@ -945,25 +949,35 @@ export class WorkoutSession {
 
   /**
    * Grava a medida de prontidão do dia, se a HRV da janela vale (veja
-   * `stillHrv`). Uma linha por dia: a mais recente vale. Depois de um treino
-   * no mesmo dia a HRV ainda está deprimida por horas: essa medida não
-   * substitui a de antes dele (o repouso parado continua valendo para o
-   * treino). Uma falha ao gravar não para o treino: a prontidão é só uma
-   * sugestão na tela.
+   * `stillHrv`), com 2 minutos ou mais parado. Uma linha por dia: a mais
+   * recente vale. Não grava nada com um treino terminado há menos de 3 horas
+   * (a HRV ainda está deprimida) nem por cima da medida de hoje feita antes de
+   * um treino de hoje (veja `readinessLock`); o repouso parado segue valendo
+   * para o treino. Uma janela sem repouso coerente, com 2 minutos ou mais, é
+   * leitura instável. O motivo de uma recusa fica em `readinessIssue`, para a
+   * tela. Uma falha ao gravar não para o treino: a prontidão é só uma sugestão.
    */
-  private keepReadiness(beats: StillBeat[], rest: number, now: number) {
-    const today = dayKey(now);
-    if (this.efforts().some((e) => dayKey(e.started) === today || dayKey(e.ended!) === today)) return;
-    const hrv = stillHrv(beats);
-    if (!hrv) return;
-    const at = Date.now();
-    const record: ReadinessRecord = { ...hrv, day: dayKey(at), at, restBpm: rest };
+  private keepReadiness(beats: StillBeat[], rest: number | null, now: number) {
+    // Menos de 2 minutos parado: não foi uma tentativa de prontidão.
+    const tried = stillHrv(beats);
+    if (tried.reason === 'curta') return;
+    if (readinessLock(efforts(this.state.history), this.state.readiness, now)) return;
+    const day = dayKey(now);
+    const check: HrvCheck = rest === null ? { hrv: null, reason: 'instavel' } : tried;
+    if (!check.hrv) {
+      if (check.reason !== 'curta') this.update({ readinessIssue: { day, reason: check.reason } });
+      return;
+    }
+    const record: ReadinessRecord = { ...check.hrv, day, at: now, restBpm: rest };
     try {
       saveReadiness(record);
     } catch {
       return;
     }
-    this.update({ readiness: [record, ...this.state.readiness.filter((r) => r.day !== record.day)] });
+    this.update({
+      readiness: [record, ...this.state.readiness.filter((r) => r.day !== record.day)],
+      readinessIssue: null,
+    });
   }
 
   private load(plan: Plan, cue: Cue, g: Guidance, now: number): Load {

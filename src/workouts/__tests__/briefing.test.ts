@@ -14,7 +14,8 @@ import {
   restLabel,
   scorePercent,
   stageNote,
-  stillProgress,
+  stillGoals,
+  stillWaitText,
   structureFacts,
   todayLine,
   zoneOf,
@@ -234,7 +235,12 @@ describe('painel com a cadência, a recuperação e o próximo tiro', () => {
       tone: 'warn',
     });
     // A dica tem lugar próprio: o texto do guia não a troca.
-    expect(stageNote({ ...base, index: 3, into: 60, tip: FATIGUE_TIP })).toEqual({ text: FATIGUE_TIP, tone: 'warn' });
+    // No cartão o texto é o curto, que cabe ao lado do botão; o leitor de tela ouve o inteiro.
+    expect(stageNote({ ...base, index: 3, into: 60, tip: FATIGUE_TIP })).toEqual({
+      text: 'Cadência caindo · passos curtos e rápidos',
+      tone: 'warn',
+      spoken: FATIGUE_TIP,
+    });
     // Na recuperação, a carga do próximo tiro e se mudou.
     const next = { index: 5, speed: 9.1, incline: 1, predictedBpm: 168, verdict: 'reduzir' as const, changed: true };
     expect(stageNote({ ...base, index: 4, into: 20, nextBlock: next })).toEqual({
@@ -314,24 +320,85 @@ describe('repouso e prontidão no treino do dia', () => {
     rejectedShare: 0,
   };
 
-  it('o andamento da medida parado, de 0 a 60 s', () => {
-    expect(stillProgress(0, false)).toEqual({ share: 0, text: 'Medindo parado · 0 de 60 s' });
-    expect(stillProgress(45, false)).toEqual({ share: 0.75, text: 'Medindo parado · 45 de 60 s' });
-    expect(stillProgress(84, true)).toEqual({ share: 1, text: 'Medida pronta · 1:24 parado' });
-    // O minuto coberto, mas sem 30 s seguidos de leitura: ainda não está pronta.
-    expect(stillProgress(80, false)).toEqual({
+  it('as duas metas da medida parado: o repouso com 60 s e a prontidão com 2 minutos', () => {
+    const free = { hrv: null, lock: null };
+    expect(stillGoals({ seconds: 0, restReady: false, ...free })).toEqual([
+      { label: 'Repouso · 60 s', text: '0 de 60 s', share: 0, done: false },
+      { label: 'Prontidão · 2 min', text: '0:00 de 2:00', share: 0, done: false },
+    ]);
+    expect(stillGoals({ seconds: 45, restReady: false, ...free })).toEqual([
+      { label: 'Repouso · 60 s', text: '45 de 60 s', share: 0.75, done: false },
+      { label: 'Prontidão · 2 min', text: '0:45 de 2:00', share: 0.375, done: false },
+    ]);
+    // O repouso sai antes: a prontidão ainda pede o segundo minuto.
+    expect(stillGoals({ seconds: 84, restReady: true, ...free })).toEqual([
+      { label: 'Repouso · 60 s', text: 'pronto', share: 1, done: true },
+      { label: 'Prontidão · 2 min', text: '1:24 de 2:00', share: 0.7, done: false },
+    ]);
+    expect(stillGoals({ seconds: 130, restReady: true, hrv: 'pronta', lock: null })[1]).toEqual({
+      label: 'Prontidão · 2 min',
+      text: 'pronta',
       share: 1,
-      text: 'Medindo parado · a leitura falhou em trechos; fique mais 30 s',
+      done: true,
     });
+    // O minuto coberto, mas sem um trecho de 30 s coerente: o repouso ainda não está pronto.
+    expect(stillGoals({ seconds: 80, restReady: false, ...free })[0]).toEqual({
+      label: 'Repouso · 60 s',
+      text: 'leitura instável; fique parado mais um pouco',
+      share: 1,
+      done: false,
+    });
+  });
+
+  it('a meta da prontidão diz por que ela não vai sair: leitura instável, sem RR ou depois de um treino', () => {
+    const at = { seconds: 150, restReady: true };
+    expect(stillGoals({ ...at, hrv: 'instavel', lock: null })[1]).toMatchObject({
+      text: 'leitura instável: umedeça os eletrodos e repita',
+      done: false,
+    });
+    expect(stillGoals({ ...at, hrv: 'sem-rr', lock: null })[1]).toMatchObject({
+      text: 'a cinta não manda os intervalos entre batimentos',
+      share: null,
+    });
+    // Travada, a meta não mostra andamento: o que se medir agora não será gravado.
+    expect(stillGoals({ ...at, hrv: 'pronta', lock: { reason: 'antes-do-treino' } })[1]).toEqual({
+      label: 'Prontidão · 2 min',
+      text: 'A prontidão de hoje só vale antes do treino',
+      share: null,
+      done: false,
+    });
+    expect(stillGoals({ ...at, hrv: null, lock: { reason: 'depois-do-treino', until: 0 } })[1]).toMatchObject({
+      text: 'Prontidão de novo 3 h depois do treino',
+      share: null,
+    });
+  });
+
+  it('nos 10 minutos depois de um treino o cartão explica a espera', () => {
+    expect(stillWaitText(9.5 * 60_000)).toBe(
+      'Medida parado em espera: a FC ainda é a do treino. Volta a medir em 10 minutos.',
+    );
+    expect(stillWaitText(20_000)).toMatch(/Volta a medir em 1 minuto\.$/);
   });
 
   it('diz o estado da prontidão, como medir e, abaixo do normal, sugere uma sessão leve', () => {
     expect(readinessCopy({ state: 'sem-medida', days: 0 })).toEqual({
       title: 'Sem medida hoje',
-      detail: 'Para medir, vista a cinta no peito, suba na esteira e fique parado por 1 minuto antes de ligar a lona.',
+      detail:
+        'Para medir, vista a cinta no peito, suba na esteira e fique parado por 2 minutos antes de ligar a lona (o repouso sai com 1 minuto).',
       tone: 'pending',
     });
     expect(readinessCopy({ state: 'sem-medida', days: 1 }).detail).toMatch(/Sua base tem 1 dia medido nas últimas 4 semanas\.$/);
+    // Sem medida hoje, o detalhe diz por que ela não vai sair agora ou por que foi recusada.
+    const none = { state: 'sem-medida' as const, days: 3 };
+    expect(readinessCopy(none, { lock: { reason: 'antes-do-treino' } }).detail).toBe(
+      'A prontidão de hoje só vale antes do treino.',
+    );
+    const until = new Date(2026, 10, 22, 20, 47).getTime();
+    expect(readinessCopy(none, { lock: { reason: 'depois-do-treino', until } }).detail).toMatch(
+      /^Prontidão de novo 3 h depois do treino, a partir das 20:47/,
+    );
+    expect(readinessCopy(none, { issue: 'instavel' }).detail).toMatch(/Umedeça os eletrodos, ajuste a cinta e repita/);
+    expect(readinessCopy(none, { issue: 'sem-rr' }).detail).toMatch(/não mandou os intervalos entre batimentos/);
     expect(readinessCopy({ state: 'coletando', days: 2, today })).toMatchObject({
       title: 'Coletando (2 de 5 dias)',
       tone: 'pending',

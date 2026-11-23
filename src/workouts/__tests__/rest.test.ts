@@ -4,12 +4,16 @@ import {
   BASELINE_MIN_DAYS,
   coveredMs,
   dayKey,
+  efforts,
   readiness,
+  readinessLock,
   READINESS_SD_FLOOR,
   restToday,
+  stillHistory,
   stillHrv,
   stillRest,
   stillSeconds,
+  stillWait,
   STILL_WINDOW_MS,
   type ReadinessRecord,
   type StillBeat,
@@ -18,45 +22,90 @@ import {
 /** 22/11/2026, 9 h da manhã, no fuso do aparelho. */
 const NOW = new Date(2026, 10, 22, 9, 0).getTime();
 const daysAgo = (days: number, hour = 8) => new Date(2026, 10, 22 - days, hour, 0).getTime();
+const MIN = 60_000;
+
+/** Os RR de um coração no BPM dado, 20 ms acima e abaixo alternadamente: RMSSD de 40 ms. */
+const steady = (second: number, bpm: number) => [Math.round(60000 / bpm) + (second % 2 ? -20 : 20)];
 
 /** Uma notificação por segundo, a partir de `start`, com o BPM de cada segundo e os RR dele. */
 function series(
   seconds: number,
   bpm: number | ((second: number) => number),
-  rr: (second: number) => number[] = (s) => [s % 2 ? 980 : 1020],
+  rr: (second: number, bpm: number) => number[] = steady,
   start = 0,
 ): StillBeat[] {
-  return Array.from({ length: seconds }, (_, s) => ({
-    at: start + s * 1000,
-    bpm: typeof bpm === 'number' ? bpm : bpm(s),
-    rrMs: rr(s),
-  }));
+  return Array.from({ length: seconds }, (_, s) => {
+    const value = typeof bpm === 'number' ? bpm : bpm(s);
+    return { at: start + s * 1000, bpm: value, rrMs: rr(s, value) };
+  });
 }
 
 describe('repouso medido parado', () => {
-  it('é a menor mediana de 30 s seguidos da janela', () => {
+  it('é a menor mediana entre trechos de 30 s coerentes', () => {
     // 40 s a 72, 40 s a 61 e 40 s a 66: a menor mediana de 30 s é 61.
-    const beats = series(120, (s) => (s < 40 ? 72 : s < 80 ? 61 : 66));
-    expect(stillRest(beats)).toBe(61);
-    // Uma leitura solta lá embaixo não é o repouso: a mediana a ignora.
-    const spike = series(90, (s) => (s === 50 ? 40 : 64));
-    expect(stillRest(spike)).toBe(64);
+    expect(stillRest(series(120, (s) => (s < 40 ? 72 : s < 80 ? 61 : 66)))).toBe(61);
     // Uma descida aos poucos: o fim da janela, mais calmo, é que vale.
     expect(stillRest(series(90, (s) => 80 - Math.floor(s / 6)))).toBe(68);
   });
 
-  it('com menos de 60 s de leitura não há repouso parado', () => {
+  it('os trechos de 30 s não se sobrepõem: uma queda de 20 s não puxa o repouso para baixo', () => {
+    // A 64, com 20 s a 50 no meio. Com trechos sobrepostos, o que pega 20 s da queda daria 50.
+    const dip = series(120, (s) => (s >= 80 && s < 100 ? 50 : 64));
+    expect(stillRest(dip)).toBe(64);
+  });
+
+  it('um trecho de leitura baixa que os RR não confirmam (cinta mal assentada) não é candidato', () => {
+    // 90 s a 64 e depois 32 s em que a cinta manda 40, com os RR ainda de quem está a 64.
+    const stuck = [...series(90, 64), ...series(32, 40, (s) => steady(s, 64), 90_000)];
+    expect(stillRest(stuck)).toBe(64);
+    // Os RR acompanham a queda (batimentos perdidos, 1500 ms): o filtro se re-semeia no trecho.
+    const missed = [...series(90, 64), ...series(32, 40, steady, 90_000)];
+    expect(stillRest(missed)).toBe(64);
+    // 26 bpm: RR fora da faixa do filtro, nenhum aceito no trecho.
+    const dead = [...series(90, 64), ...series(32, 26, steady, 90_000)];
+    expect(stillRest(dead)).toBe(64);
+  });
+
+  it('um trecho com o BPM variando mais de 15 bpm não é candidato', () => {
+    expect(stillRest(series(90, (s) => (s % 2 ? 56 : 74)))).toBeNull();
+    expect(stillRest(series(90, (s) => (s % 2 ? 58 : 72)))).toBe(65);
+  });
+
+  it('abaixo de 40 bpm, ou mais de 12 bpm abaixo da mediana de 3 medidas parado, não vale', () => {
+    expect(stillRest(series(90, 38))).toBeNull();
+    expect(stillRest(series(90, 40))).toBe(40);
+    // Mediana de 65: 52 ainda vale, 52 − 1 não.
+    expect(stillRest(series(90, 53), [64, 65, 66])).toBe(53);
+    expect(stillRest(series(90, 52), [64, 65, 66])).toBeNull();
+    // Com só duas medidas parado ainda não há referência.
+    expect(stillRest(series(90, 50), [64, 65])).toBe(50);
+  });
+
+  it('a referência são as 5 últimas medidas parado do histórico', () => {
+    const profile = { age: 36, weightKg: 75, heightCm: 175 };
+    const w = (restBpm: number | null, restSource?: Workout['restSource']): Workout => ({
+      ...newWorkout(profile, 'ble', null),
+      restBpm,
+      restSource,
+    });
+    const history = [w(60, 'parado'), w(90, 'andando'), w(null), w(61, 'parado'), w(62, 'parado'), w(63, 'parado'), w(64, 'parado'), w(65, 'parado')];
+    expect(stillHistory(history)).toEqual([60, 61, 62, 63, 64]);
+  });
+
+  it('com menos de 60 s de leitura, ou sem RR, não há repouso parado', () => {
     expect(stillRest(series(60, 62))).toBeNull(); // 59 s cobertos
     expect(stillSeconds(series(60, 62))).toBe(59);
     expect(stillRest(series(61, 62))).toBe(62);
     // Lacunas de mais de 5 s não contam como tempo medido.
-    const gapped = [...series(35, 62), ...series(35, 62, undefined, 45_000)];
+    const gapped = [...series(35, 62), ...series(35, 62, steady, 45_000)];
     expect(coveredMs(gapped)).toBe(68_000);
     expect(stillRest(gapped)).toBe(62);
     // Pedaços de 20 s somam 60 s, mas nenhum trecho de 30 s seguidos: sem repouso.
-    const pieces = [0, 1, 2, 3].flatMap((k) => series(21, 62, undefined, k * 30_000));
+    const pieces = [0, 1, 2, 3].flatMap((k) => series(21, 62, steady, k * 30_000));
     expect(coveredMs(pieces)).toBe(80_000);
     expect(stillRest(pieces)).toBeNull();
+    // Sem RR não há como conferir o BPM da cinta.
+    expect(stillRest(series(70, 60, () => []))).toBeNull();
   });
 
   it('a janela guarda só os últimos 5 minutos', () => {
@@ -68,33 +117,110 @@ describe('repouso medido parado', () => {
 });
 
 describe('HRV da janela parado', () => {
-  it('é o RMSSD dos RR aceitos e o ln dele', () => {
-    // RR alternando entre 980 e 1020 ms: toda diferença tem 40 ms.
-    expect(stillHrv(series(70, 60))).toEqual({ rmssd: 40, lnRmssd: 3.689, beats: 70, rejectedShare: 0 });
-    // Diferenças de 30, 50 e 20 ms em sequência: a raiz da média dos quadrados.
-    const rr = Array.from({ length: 80 }, (_, s) => [1000, 970, 1020][s % 3]);
-    const expected = Math.sqrt(rr.slice(1).reduce((n, v, i) => n + (v - rr[i]) ** 2, 0) / 79);
-    const mixed = stillHrv(series(80, 60, (s) => [rr[s]]));
-    expect(mixed).toMatchObject({ rmssd: Math.round(expected * 10) / 10, beats: 80, rejectedShare: 0 });
-    expect(mixed!.lnRmssd).toBe(Math.round(Math.log(expected) * 1000) / 1000);
+  it('é o RMSSD dos últimos 60 s, com 2 minutos parado', () => {
+    expect(stillHrv(series(130, 60))).toEqual({
+      hrv: { rmssd: 40, lnRmssd: 3.689, beats: 60, rejectedShare: 0 },
+      reason: null,
+    });
+    // Menos de 2 minutos parado: o primeiro minuto é de acomodação.
+    expect(stillHrv(series(110, 60))).toEqual({ hrv: null, reason: 'curta' });
   });
 
-  it('com mais de 10% de batimentos descartados pelo filtro de artefatos não há HRV', () => {
-    // A cada 5 s, um batimento perdido (1500 ms, 50% acima da mediana): 14 de 70 RR saem, 20%.
-    const noisy = series(70, 60, (s) => (s % 5 === 3 ? [1500] : [s % 2 ? 980 : 1020]));
-    expect(stillHrv(noisy)).toBeNull();
-    // A cada 12 s: 6 de 70, 8,6%. A HRV vale, sem os descartados.
-    const some = stillHrv(series(70, 60, (s) => (s % 12 === 6 ? [1500] : [s % 2 ? 980 : 1020])));
-    expect(some).toMatchObject({ beats: 70, rejectedShare: 0.086 });
+  it('usa só o último minuto: a FC caindo no começo não entra', () => {
+    // 70 s a 70 com muita variação (80 e 160 ms) e 60 s estáveis a 60 (20 ms).
+    const settling = [
+      ...series(70, 70, (s) => [[857, 777, 937][s % 3]]),
+      ...series(60, 60, (s) => [1000 + (s % 2 ? -10 : 10)], 70_000),
+    ];
+    expect(stillHrv(settling).hrv).toMatchObject({ rmssd: 20, lnRmssd: 2.996 });
   });
 
-  it('precisa de 60 s de leitura e de RR que cubram o minuto', () => {
-    expect(stillHrv(series(50, 60))).toBeNull();
-    // Uma cinta que não manda RR mede o repouso, mas não a HRV.
-    expect(stillHrv(series(70, 60, () => []))).toBeNull();
-    expect(stillRest(series(70, 60, () => []))).toBe(60);
-    // RR em só metade dos pacotes: 35 s de RR em 69 s de leitura.
-    expect(stillHrv(series(70, 60, (s) => (s % 2 ? [] : [1000 + (s % 4) * 10])))).toBeNull();
+  it('só soma diferenças entre RR aceitos e seguidos: o par recomeça a cada descarte', () => {
+    // No último minuto, 5 batimentos perdidos (1500 ms) entre RR de 980 e 1020: 8% descartados.
+    // Somando o par que pula o descarte (980 com 980), o RMSSD cairia abaixo de 40.
+    const sparse = series(130, 60, (s) => (s % 12 === 6 ? [1500] : [s % 2 ? 980 : 1020]));
+    expect(stillHrv(sparse).hrv).toEqual({ rmssd: 40, lnRmssd: 3.689, beats: 60, rejectedShare: 0.083 });
+    // Um pacote sem RR também recomeça o par.
+    const empty = series(130, 60, (s) => (s % 12 === 6 ? [] : [s % 2 ? 980 : 1020]));
+    expect(stillHrv(empty).hrv?.rmssd).toBe(40);
+  });
+
+  it('com mais de 10% dos RR descartados, a leitura é instável', () => {
+    const noisy = series(130, 60, (s) => (s % 5 === 3 ? [1500] : [s % 2 ? 980 : 1020]));
+    expect(stillHrv(noisy)).toEqual({ hrv: null, reason: 'instavel' });
+  });
+
+  it('um artefato sustentado, que re-semeia o filtro, é instável mesmo abaixo de 10% de descartes', () => {
+    // Nos 10 s finais, RR de 700 ms (um batimento a mais contado): 4 descartes (7%) e a re-semeadura.
+    const sustained = [...series(120, 60), ...series(10, 60, (s) => [700 + (s % 2) * 10], 120_000)];
+    expect(stillHrv(sustained)).toEqual({ hrv: null, reason: 'instavel' });
+  });
+
+  it('RR que não batem com o BPM da cinta são instáveis', () => {
+    // A cinta diz 60, os RR dizem 75.
+    expect(stillHrv(series(130, 60, (s) => steady(s, 75)))).toEqual({ hrv: null, reason: 'instavel' });
+    expect(stillHrv(series(130, 60, (s) => steady(s, 64))).hrv).not.toBeNull();
+  });
+
+  it('sem RR não há HRV; com RR em só metade dos pacotes, a leitura é instável', () => {
+    expect(stillHrv(series(130, 60, () => []))).toEqual({ hrv: null, reason: 'sem-rr' });
+    expect(stillHrv(series(130, 60, (s) => (s % 2 ? [] : [1000 + (s % 4) * 10])))).toEqual({
+      hrv: null,
+      reason: 'instavel',
+    });
+  });
+});
+
+describe('trava da prontidão depois de um treino', () => {
+  const profile = { age: 36, weightKg: 75, heightCm: 175 };
+  const workout = (started: number, ended: number | null, movingMs: number, source: Workout['source'] = 'ble'): Workout => {
+    const base = newWorkout(profile, source, null);
+    return { ...base, started, ended, totals: { ...base.totals, movingMs } };
+  };
+  const record = (at: number): ReadinessRecord => ({
+    day: dayKey(at),
+    at,
+    lnRmssd: 3.7,
+    rmssd: 40,
+    restBpm: 60,
+    beats: 60,
+    rejectedShare: 0,
+  });
+
+  it('esforço é um treino encerrado da esteira de verdade com 1 minuto ou mais', () => {
+    const list = efforts([
+      workout(NOW - 50 * MIN, NOW - 10 * MIN, 40 * MIN),
+      workout(NOW - 5 * MIN, NOW - 4 * MIN, 50_000),
+      workout(NOW - 5 * MIN, null, 5 * MIN),
+      workout(NOW - 50 * MIN, NOW - 10 * MIN, 40 * MIN, 'demo'),
+    ]);
+    expect(list).toEqual([{ started: NOW - 50 * MIN, ended: NOW - 10 * MIN }]);
+  });
+
+  it('a janela parado espera 10 minutos depois do esforço', () => {
+    const list = [{ started: NOW - 50 * MIN, ended: NOW - 4 * MIN }];
+    expect(stillWait(list, NOW)).toBe(6 * MIN);
+    expect(stillWait(list, NOW + 6 * MIN)).toBe(0);
+    expect(stillWait([], NOW)).toBe(0);
+  });
+
+  it('a prontidão volta 3 horas depois do treino, mesmo na virada do dia', () => {
+    const midnight = new Date(2026, 10, 23, 0, 0).getTime();
+    const late = [{ started: midnight - 60 * MIN, ended: midnight - 20 * MIN }];
+    expect(readinessLock(late, [], midnight)).toEqual({ reason: 'depois-do-treino', until: midnight + 160 * MIN });
+    expect(readinessLock(late, [], midnight + 160 * MIN)).toBeNull();
+  });
+
+  it('a medida de hoje feita antes de um treino de hoje não é trocada', () => {
+    const morning = record(daysAgo(0, 6));
+    const training = [{ started: daysAgo(0, 7), ended: daysAgo(0, 7) + 40 * MIN }];
+    // Às 15 h já passaram as 3 horas, mas a medida das 6 h foi antes do treino das 7 h.
+    const afternoon = new Date(2026, 10, 22, 15, 0).getTime();
+    expect(readinessLock(training, [morning], afternoon)).toEqual({ reason: 'antes-do-treino' });
+    // Sem medida hoje, passadas as 3 horas, pode medir.
+    expect(readinessLock(training, [], afternoon)).toBeNull();
+    // Medida de hoje depois do treino (e das 3 horas): pode trocar por outra.
+    expect(readinessLock(training, [record(daysAgo(0, 11))], afternoon)).toBeNull();
   });
 });
 

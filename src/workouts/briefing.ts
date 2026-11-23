@@ -6,7 +6,15 @@ import { formatDecimal, formatDuration, formatTrimmed } from '@/utils/format';
 import { SHORT_BLOCK_SECONDS } from './adaptive';
 import { betweenBlocks } from './intervals';
 import { levels, validBpm, type MinuteBeats, type Plan, type Stage, type Workout, type Zone } from './model';
-import { BASELINE_MIN_DAYS, STILL_MIN_MS, type Readiness } from './rest';
+import { FATIGUE_TIP } from './gait';
+import {
+  BASELINE_MIN_DAYS,
+  HRV_STILL_MS,
+  STILL_MIN_MS,
+  type HrvCheck,
+  type Readiness,
+  type ReadinessLock,
+} from './rest';
 import type { GaitView, NextBlockView, RecoveryView } from './session';
 import { describe, heartZones, sessionMinutes, week, type Session } from './week';
 
@@ -178,8 +186,18 @@ export function gaitSpoken(gait: Pick<GaitView, 'cadenceSpm' | 'strideM'> | null
 /** Nos primeiros segundos do bloco, a linha de baixo diz como terminou a recuperação antes dele. */
 const ENDED_NOTE_SECONDS = 30;
 
-/** A linha de baixo do cartão da etapa, quando há algo mais importante que "A seguir". */
-export type StageNote = { text: string; tone: 'warn' | 'info' };
+/**
+ * A linha de baixo do cartão da etapa, quando há algo mais importante que "A
+ * seguir". `spoken` é o texto inteiro para o leitor de tela, quando o da linha
+ * vai encurtado.
+ */
+export type StageNote = { text: string; tone: 'warn' | 'info'; spoken?: string };
+
+/**
+ * A dica no cartão, curta: a linha divide o espaço com "Ver aviso", e a
+ * reticência cortaria justamente o que fazer. A regra e o texto da sessão não mudam.
+ */
+const SHORT_TIPS: Record<string, string> = { [FATIGUE_TIP]: 'Cadência caindo · passos curtos e rápidos' };
 
 /**
  * O que o cartão da etapa mostra no lugar de "A seguir", nesta ordem: a pessoa
@@ -206,7 +224,7 @@ export function stageNote({
   nextBlock: NextBlockView | null;
 }): StageNote | null {
   if (gait?.offBelt) return { text: 'Fora da lona · a carga não sobe', tone: 'warn' };
-  if (tip) return { text: tip, tone: 'warn' };
+  if (tip) return { text: SHORT_TIPS[tip] ?? tip, tone: 'warn', spoken: tip };
   if (nextBlock && nextBlock.index > index) {
     const stage = plan.stages[nextBlock.index];
     const name = stage && stage.seconds <= SHORT_BLOCK_SECONDS ? 'Próximo tiro' : 'Próximo bloco';
@@ -279,32 +297,110 @@ export function averageCadence(w: Workout) {
 }
 
 /**
- * O andamento da medida parado em curso: a fração do minuto e o texto. `ready`
- * diz se a janela já dá o repouso (60 s com um trecho de 30 s seguidos de
- * leitura): com o minuto cheio de falhas da cinta, ela ainda não está pronta.
+ * Uma das duas metas da medida parado em curso, para o cartão: o rótulo, o
+ * andamento em texto e a fração (`null` sem barra, quando a meta não vai ser
+ * cumprida agora).
  */
-export function stillProgress(seconds: number, ready: boolean) {
-  const target = STILL_MIN_MS / 1000;
-  if (ready) return { share: 1, text: 'Medida pronta · ' + formatDuration(seconds) + ' parado' };
-  if (seconds >= target)
-    return { share: 1, text: 'Medindo parado · a leitura falhou em trechos; fique mais 30 s' };
-  return { share: seconds / target, text: 'Medindo parado · ' + seconds + ' de ' + target + ' s' };
+export type StillGoal = { label: string; text: string; share: number | null; done: boolean };
+
+/** Hora e minuto locais, "14:05". */
+function clock(ms: number) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+/** Por que a prontidão não vai ser gravada agora, em poucas palavras (veja `readinessLock`). */
+function lockText(lock: NonNullable<ReadinessLock>) {
+  return lock.reason === 'antes-do-treino'
+    ? 'A prontidão de hoje só vale antes do treino'
+    : 'Prontidão de novo 3 h depois do treino';
+}
+
+/**
+ * As duas metas da medida parado em curso: o repouso, com 60 s, e a
+ * prontidão, com 2 minutos. `restReady` diz se a janela já dá o repouso (um
+ * trecho de 30 s coerente); `hrv`, o estado da HRV nela. Com a prontidão
+ * travada (`lock`), a meta dela diz por quê, sem andamento.
+ */
+export function stillGoals({
+  seconds,
+  restReady,
+  hrv,
+  lock,
+}: {
+  seconds: number;
+  restReady: boolean;
+  hrv: 'pronta' | NonNullable<HrvCheck['reason']> | null;
+  lock: ReadinessLock;
+}): StillGoal[] {
+  const restTarget = STILL_MIN_MS / 1000;
+  const hrvTarget = HRV_STILL_MS / 1000;
+  const rest: StillGoal = restReady
+    ? { label: 'Repouso · 60 s', text: 'pronto', share: 1, done: true }
+    : seconds >= restTarget
+      ? { label: 'Repouso · 60 s', text: 'leitura instável; fique parado mais um pouco', share: 1, done: false }
+      : { label: 'Repouso · 60 s', text: seconds + ' de ' + restTarget + ' s', share: seconds / restTarget, done: false };
+  const label = 'Prontidão · 2 min';
+  const readiness: StillGoal = lock
+    ? { label, text: lockText(lock), share: null, done: false }
+    : hrv === 'pronta'
+      ? { label, text: 'pronta', share: 1, done: true }
+      : hrv === 'instavel'
+        ? { label, text: 'leitura instável: umedeça os eletrodos e repita', share: 1, done: false }
+        : hrv === 'sem-rr'
+          ? { label, text: 'a cinta não manda os intervalos entre batimentos', share: null, done: false }
+          : seconds >= hrvTarget
+            ? { label, text: 'fique parado mais um pouco', share: 1, done: false }
+            : {
+                label,
+                text: formatDuration(seconds) + ' de ' + formatDuration(hrvTarget),
+                share: seconds / hrvTarget,
+                done: false,
+              };
+  return [rest, readiness];
+}
+
+/** Nos 10 minutos depois de um treino a janela parado não coleta: o cartão diz quanto falta. */
+export function stillWaitText(waitMs: number) {
+  const minutes = Math.max(1, Math.ceil(waitMs / 60_000));
+  return (
+    'Medida parado em espera: a FC ainda é a do treino. Volta a medir em ' +
+    minutes +
+    (minutes === 1 ? ' minuto.' : ' minutos.')
+  );
 }
 
 /** `normal`, `up` e `down` comparam com a própria pessoa; `pending` ainda não compara. */
 export type ReadinessTone = 'normal' | 'up' | 'down' | 'pending';
 
-/** O que o cartão de prontidão diz: o estado, o detalhe e a cor. */
-export function readinessCopy(r: Readiness): { title: string; detail: string; tone: ReadinessTone } {
+/**
+ * O que o cartão de prontidão diz: o estado, o detalhe e a cor. Sem medida
+ * hoje, o detalhe diz por que ela não vai sair agora (`lock`: depois de um
+ * treino) ou por que a última tentativa foi recusada (`issue`: a leitura da
+ * cinta instável, ou sem RR); senão, como medir.
+ */
+export function readinessCopy(
+  r: Readiness,
+  { lock = null, issue = null }: { lock?: ReadinessLock; issue?: 'instavel' | 'sem-rr' | null } = {},
+): { title: string; detail: string; tone: ReadinessTone } {
   const days = (n: number) => n + (n === 1 ? ' dia medido' : ' dias medidos');
-  if (r.state === 'sem-medida')
-    return {
-      title: 'Sem medida hoje',
-      detail:
-        'Para medir, vista a cinta no peito, suba na esteira e fique parado por 1 minuto antes de ligar a lona.' +
-        (r.days ? ' Sua base tem ' + days(r.days) + ' nas últimas 4 semanas.' : ''),
-      tone: 'pending',
-    };
+  if (r.state === 'sem-medida') {
+    const base = r.days ? ' Sua base tem ' + days(r.days) + ' nas últimas 4 semanas.' : '';
+    const detail =
+      lock?.reason === 'depois-do-treino'
+        ? 'Prontidão de novo 3 h depois do treino, a partir das ' +
+          clock(lock.until) +
+          ': logo depois do esforço a variabilidade sai deprimida.'
+        : lock?.reason === 'antes-do-treino'
+          ? 'A prontidão de hoje só vale antes do treino.'
+          : issue === 'instavel'
+            ? 'A leitura da cinta estava instável e a prontidão não foi gravada. Umedeça os eletrodos, ajuste a cinta e repita: 2 minutos parado na esteira antes de ligar a lona.'
+            : issue === 'sem-rr'
+              ? 'A cinta não mandou os intervalos entre batimentos (RR), e sem eles não há prontidão.'
+              : 'Para medir, vista a cinta no peito, suba na esteira e fique parado por 2 minutos antes de ligar a lona (o repouso sai com 1 minuto).' +
+                base;
+    return { title: 'Sem medida hoje', detail, tone: 'pending' };
+  }
   const rmssd = 'RMSSD de ' + Math.round(r.today.rmssd) + ' ms hoje';
   if (r.state === 'coletando')
     return {

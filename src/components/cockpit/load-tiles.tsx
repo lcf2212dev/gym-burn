@@ -104,7 +104,7 @@ export function LoadTiles({ metrics }: { metrics: TreadmillMetrics }) {
                 <Text style={styles.unit}>{tile.unit}</Text>
               </View>
               {!!tile.footer && (
-                <Text style={styles.footer} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+                <Text style={styles.footer} numberOfLines={1}>
                   {tile.footer}
                 </Text>
               )}

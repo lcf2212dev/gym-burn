@@ -145,17 +145,40 @@ Qual é "a carga da última sessão" depende de como ela foi gravada. O app guar
 
 ### Frequência cardíaca
 
-Sem cinta no peito, os batimentos vêm do sensor de mão da esteira, que só lê com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando, e por isso perde 15 bpm na conta. O repouso em uso é a menor das 5 últimas medidas, cada uma pela sua origem: as feitas parado (abaixo) valem como estão, e as lidas andando, inclusive as dos registros antigos, que não guardam a origem, perdem os 15 bpm.
+Sem cinta no peito, os batimentos vêm do sensor de mão da esteira, que só lê com a lona andando. Por isso o guia pede a primeira leitura logo no início, ainda na velocidade mínima: é a FC de repouso do dia. Essa leitura fica acima do repouso real, porque a pessoa já está em pé e andando, e por isso perde 15 bpm na conta. O repouso em uso sai das 5 últimas medidas. Com 3 ou mais delas feitas parado (abaixo), é a mediana das paradas, sem desconto: a medida direta não precisa da folga, e a menor de várias só propagaria uma leitura ruim. Com menos de 3, vale a regra antiga, que compensa leituras enviesadas para cima: a menor das 5, cada uma pela sua origem, com as lidas andando (e as dos registros antigos, que não guardam a origem) perdendo os 15 bpm.
 
 #### Repouso medido parado
 
-A cinta lê com a lona parada, e a esteira não. Com a cinta lendo, a esteira conectada e a lona parada (ou sem leitura de velocidade ainda), antes de um treino, o app junta os batimentos da cinta numa janela que vai até os últimos 5 minutos. Basta subir na esteira e ficar parado 1 minuto antes de ligar a lona; o cartão **Repouso e prontidão** do **Treino do dia** mostra o andamento. Quando a lona começa a andar (o treino começa), com 60 segundos ou mais de leitura na janela, o repouso do dia é a menor mediana de 30 segundos seguidos dela, sem desconto, e fica marcado como medido **parado**. Uma lacuna de mais de 5 segundos sem leitura (contato ou link) não conta como tempo medido, e uma janela que parou de receber leituras mais de 5 segundos antes de a lona andar (cinta sem contato ou desligada) não vale. Com menos de 60 segundos vale o caminho de sempre: o primeiro minuto e meio andando, marcado como **andando**. Quem já vinha andando num registro livre continua com a medida daquele registro.
+A cinta lê com a lona parada, e a esteira não. Com a cinta lendo, a esteira conectada e a lona parada (ou sem leitura de velocidade ainda), antes de um treino, o app junta os batimentos da cinta numa janela que vai até os últimos 5 minutos. Basta subir na esteira e ficar parado 1 minuto antes de ligar a lona (2 minutos para sair também a prontidão); o cartão **Repouso e prontidão** do **Treino do dia** mostra o andamento das duas metas, **Repouso · 60 s** e **Prontidão · 2 min**.
 
-A janela recomeça sempre que a lona anda, e não coleta nos 10 minutos depois de um treino de 1 minuto ou mais em movimento (contados pelo histórico, então valem também com o app reaberto): a FC e a variabilidade ainda são as do esforço. O cartão só diz **Medida pronta** quando a janela já dá o repouso (60 segundos, com um trecho de 30 seguidos); com o minuto cheio de falhas da cinta, ele pede mais 30 segundos.
+Quando a lona começa a andar (o treino começa), com 60 segundos ou mais de leitura na janela, o repouso do dia sai de trechos de 30 segundos que não se sobrepõem: é a menor mediana entre os trechos coerentes, sem desconto, e fica marcado como medido **parado**. Um trecho só é coerente se:
+
+- a mediana do BPM da cinta e a dos intervalos entre batimentos (60000/RR) diferem em até 5 bpm;
+- o BPM varia no máximo 15 bpm dentro dele;
+- o filtro de artefatos não precisou se readaptar nele.
+
+Assim, meio minuto de cinta mal assentada lendo 40 bpm não vira o repouso do dia. Há ainda dois limites de plausibilidade: abaixo de 40 bpm o valor não vale, e, havendo 3 ou mais medidas parado no histórico, um valor mais de 12 bpm abaixo da mediana delas é descartado. Sem trecho coerente, com o valor descartado ou com menos de 60 segundos, vale o caminho de sempre: o primeiro minuto e meio andando, marcado como **andando**. Quem já vinha andando num registro livre continua com a medida daquele registro.
+
+Uma lacuna de mais de 5 segundos sem leitura (contato ou link) não conta como tempo medido, e uma janela que parou de receber leituras mais de 5 segundos antes de a lona andar (cinta sem contato ou desligada) não vale. A janela recomeça sempre que a lona anda, e não coleta nos 10 minutos depois de um treino de 1 minuto ou mais em movimento (contados pelo histórico, então valem também com o app reaberto): a FC ainda é a do esforço. Nesse intervalo o cartão diz quanto falta para voltar a medir.
 
 #### Prontidão do dia
 
-Na mesma janela parado, com 60 segundos ou mais de leitura, o app calcula a variabilidade da frequência cardíaca (HRV) pelos intervalos entre batimentos (RR): o RMSSD dos RR que passam no filtro de artefatos (`src/heart/rr.ts`) e o ln dele. A medida só vale com no máximo 10% dos RR descartados pelo filtro e com os aceitos cobrindo o minuto (54 s ou mais). Ela fica na tabela `readiness`, uma linha por dia (a mais recente vale), com o ln(RMSSD), o RMSSD, o repouso, a quantidade de RR e a parcela descartada. As medidas da esteira simulada não entram, nem as feitas depois de um treino (1 minuto ou mais em movimento) no mesmo dia: a HRV ainda está deprimida por horas, e a medida trocaria a da manhã. Nesses casos o repouso parado continua valendo para o treino. A HRV sai da janela inteira (de 1 a 5 minutos parado); para comparar um dia com o outro, vale ficar parado sempre o mesmo tempo.
+Na mesma janela parado, o app calcula a variabilidade da frequência cardíaca (HRV) pelos intervalos entre batimentos (RR): o RMSSD e o ln dele. A conta usa sempre os últimos 60 segundos antes de a lona andar e exige 2 minutos parado no total, porque o primeiro minuto é de acomodação: a FC ainda vem caindo de quem acabou de subir na esteira, e uma janela de tamanho variável não se compara de um dia para o outro. O RMSSD só soma diferenças entre RR aceitos e seguidos; depois de um RR descartado, de uma lacuna ou de um pacote sem RR, o par recomeça.
+
+A medida só vale com a leitura estável:
+
+- no máximo 10% dos RR do trecho descartados pelo filtro de artefatos (`src/heart/rr.ts`);
+- nenhuma readaptação do filtro no trecho (um artefato longo, que o filtro acabaria aceitando como patamar novo, invalida a medida);
+- a mediana de 60000/RR batendo com a do BPM da cinta em até 5 bpm.
+
+Recusada, o cartão diz que a leitura estava instável e sugere umedecer os eletrodos e repetir. Aceita, ela fica na tabela `readiness`, uma linha por dia, com o ln(RMSSD), o RMSSD, o repouso, a quantidade de RR e a parcela descartada.
+
+Depois de um treino a variabilidade fica deprimida por horas, então a prontidão não é gravada:
+
+- nas 3 horas depois de um treino de 1 minuto ou mais em movimento, inclusive na virada do dia (treino às 23h40, medida à meia-noite);
+- quando a medida de hoje já foi feita antes de um treino de hoje: ela não é trocada.
+
+Nesses casos o cartão diz por quê, em vez de pedir uma medida que não seria gravada, e o repouso parado continua valendo para o treino. As medidas da esteira simulada também não entram.
 
 Com 5 ou mais dias medidos nos últimos 28 (sem contar hoje), o ln(RMSSD) de hoje é comparado com a média e o desvio-padrão desses dias, com piso de 0,1 no desvio (cerca de 10% de RMSSD), para uma base muito regular não acusar qualquer oscilação: dentro de ±1 desvio é **No seu normal**, fora disso **Acima do seu normal** ou **Abaixo do seu normal**. Antes de ter a base, o cartão diz **Coletando (n de 5 dias)**; sem medida hoje, explica como medir. Abaixo do normal, ele sugere uma sessão leve.
 

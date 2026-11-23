@@ -37,26 +37,33 @@ function median(values: readonly number[]): number {
 }
 
 /**
- * Diz se um RR é batimento de verdade e atualiza o filtro. Fora de 300 a 2000
- * ms ele é sempre recusado (e não conta para a re-semeadura: não é mudança de
- * FC, é ruído). Dentro da faixa, um salto de mais de 20% sobre a mediana dos
- * últimos aceitos é recusado; na quinta recusa seguida a referência passa a ser
- * as recusadas, e o RR atual é aceito.
+ * O que o filtro fez com um RR: `aceito`; `recusado`; ou `resemeado`, aceito
+ * na quinta recusa seguida, quando a referência passou a ser as recusadas.
  */
-export function acceptRr(filter: RrFilter, rrMs: number): boolean {
+export type RrVerdict = 'aceito' | 'recusado' | 'resemeado';
+
+/**
+ * Classifica um RR e atualiza o filtro. Fora de 300 a 2000 ms ele é sempre
+ * recusado (e não conta para a re-semeadura: não é mudança de FC, é ruído).
+ * Dentro da faixa, um salto de mais de 20% sobre a mediana dos últimos aceitos
+ * é recusado; na quinta recusa seguida a referência passa a ser as recusadas,
+ * e o RR atual é aceito (`resemeado`). Quem mede o repouso e a HRV parado
+ * precisa saber da re-semeadura: um artefato sustentado vira o novo patamar.
+ */
+export function classifyRr(filter: RrFilter, rrMs: number): RrVerdict {
   if (!Number.isFinite(rrMs) || rrMs < RR_MIN_MS || rrMs > RR_MAX_MS) {
-    return false;
+    return 'recusado';
   }
   if (filter.recent.length > 0) {
     const reference = median(filter.recent);
     if (Math.abs(rrMs - reference) > RR_MAX_JUMP * reference) {
       filter.rejected.push(rrMs);
       if (filter.rejected.length < RR_RESEED_AFTER) {
-        return false;
+        return 'recusado';
       }
       filter.recent = filter.rejected.slice(-RECENT_SIZE);
       filter.rejected = [];
-      return true;
+      return 'resemeado';
     }
   }
   filter.rejected = [];
@@ -64,7 +71,15 @@ export function acceptRr(filter: RrFilter, rrMs: number): boolean {
   if (filter.recent.length > RECENT_SIZE) {
     filter.recent.shift();
   }
-  return true;
+  return 'aceito';
+}
+
+/**
+ * Diz se um RR é batimento de verdade e atualiza o filtro: o RR `aceito` ou
+ * `resemeado` por `classifyRr`. É o que a leitura do momento da trava usa.
+ */
+export function acceptRr(filter: RrFilter, rrMs: number): boolean {
+  return classifyRr(filter, rrMs) !== 'recusado';
 }
 
 /** BPM médio de uma série de RR (60000 / RR médio), inteiro; `null` sem RR. */
