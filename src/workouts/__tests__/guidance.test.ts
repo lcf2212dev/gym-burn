@@ -11,11 +11,11 @@ import {
   raiseRoom,
 } from '../adaptive';
 import { currentCue, metabolicCost, PULSE_INTERVAL_SECONDS, type Stage } from '../model';
-import { sessionPlan, week } from '../week';
+import { sessionPlan, sessions } from '../week';
 import type { TreadmillSample } from '@/treadmill/types';
 
 // Base aeróbica a 5 km/h e 1,5%: aquecimento a 4 km/h e o bloco de esforço na etapa 1.
-const plan = sessionPlan(week[1].session!, 5, 1.5);
+const plan = sessionPlan(sessions.base, 5, 1.5);
 // A primeira etapa pede a FC de repouso logo de início; os testes de ajuste usam a etapa sem esse pedido.
 const cue = { ...currentCue(plan, 0)!, measure: false };
 const sample = (

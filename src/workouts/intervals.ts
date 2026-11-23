@@ -39,6 +39,12 @@ export const END_STRAP_READINGS = 10;
 const END_MIN_BLOCK_SECONDS = 60;
 /** O acúmulo de um bloco para o outro quando ainda não há dois blocos para medir. */
 export const DEFAULT_CARRY_BPM = 2;
+/**
+ * O mesmo, quando a recuperação planejada é curta (menos de 2 min): a pausa não
+ * deixa o coração baixar, e cada tiro termina bem acima do anterior. É assim
+ * que a série de tiros de 2 min com 1 min leve chega à faixa.
+ */
+export const SHORT_RECOVERY_CARRY_BPM = 5;
 /** O maior corte da decisão, em METs: a carga do próximo bloco não muda mais que isto de uma vez. */
 const NEXT_BLOCK_MAX_METS = 1;
 /**
@@ -96,8 +102,9 @@ export function blockEnd(samples: TreadmillSample[], until: number, stage: Stage
 
 /**
  * O acúmulo de um bloco para o outro, em bpm: a média das diferenças de BPM do
- * fim entre blocos de esforço seguidos, descontado o que a mudança de carga
- * entre eles explica pela reta de bpm por MET. Sem nenhum par, 2 bpm. Nunca
+ * fim entre blocos de esforço seguidos (os dois pares mais recentes), descontado o que a mudança de carga
+ * entre eles explica pela reta de bpm por MET. Sem nenhum par, 2 bpm (5 quando a
+ * recuperação planejada é curta). Nunca
  * negativo: na mesma carga a FC não cai de um tiro para o outro, e um acúmulo
  * negativo (ruído da correção) só serviria para subir a carga. Um par em que
  * um bloco terminou andando e o outro correndo (pela velocidade medida no fim
@@ -106,7 +113,7 @@ export function blockEnd(samples: TreadmillSample[], until: number, stage: Stage
  * (para quem corre devagar a corrida custa menos do que a equação diz), e
  * viraria um acúmulo falso de até 15 bpm.
  */
-export function carryBpm(plan: Plan, ends: BlockEnd[], rest: number | null) {
+export function carryBpm(plan: Plan, ends: BlockEnd[], rest: number | null, fallback = DEFAULT_CARRY_BPM) {
   const efforts = effortIndexes(plan);
   const running = (e: BlockEnd) => e.speed >= RUN_FROM_KMH;
   const diffs: number[] = [];
@@ -116,8 +123,12 @@ export function carryBpm(plan: Plan, ends: BlockEnd[], rest: number | null) {
     const slope = bpmPerMet(b.bpm, cost(b), rest);
     diffs.push(b.bpm - a.bpm - slope * (cost(b) - cost(a)));
   }
-  if (!diffs.length) return DEFAULT_CARRY_BPM;
-  return Math.max(0, diffs.reduce((n, d) => n + d, 0) / diffs.length);
+  if (!diffs.length) return fallback;
+  // Os dois pares mais recentes: o acúmulo perde força ao longo da série (o
+  // coração se aproxima do patamar), e a média de todos os pares carregaria os
+  // saltos grandes do começo para os últimos tiros.
+  const recent = diffs.slice(-2);
+  return Math.max(0, recent.reduce((n, d) => n + d, 0) / recent.length);
 }
 
 /** O alívio baixou a carga (o nome não basta: o aumento de uma corrida com rampa antiga baixa a rampa). */
@@ -168,7 +179,9 @@ export type NextBlock = {
  * A referência é a carga em que o bloco terminou e o BPM do fim (a mediana do
  * `tail`). A previsão para o fim do próximo bloco na mesma carga é esse BPM
  * mais o acúmulo (`carryBpm`). Acima de teto − 1, a carga desce o bastante
- * para a previsão voltar a teto − 3, até 1 MET. Mais de 3 bpm abaixo do teto,
+ * para a previsão voltar a teto − 3, até 1 MET. Para subir, a previsão é a do
+ * fim do último bloco (o BPM do fim mais o acúmulo vezes os blocos que
+ * faltam): mais de 3 bpm abaixo do teto,
  * ela sobe o que couber com a margem de `raiseMargin`, até 1 MET, se o bloco
  * (e o começo da recuperação) não teve leitura acima do teto, nenhum bloco da
  * sessão teve corte da trava e a pessoa não saiu da lona; é o único caminho de
@@ -204,8 +217,16 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   const current = plan.stages[next];
   const reference: Stage = { ...current, speed: end.speed, incline: end.incline };
   const slope = bpmPerMet(end.bpm, cost(reference), rest);
-  const carry = carryBpm(plan, ends, rest);
+  // Com a pausa planejada curta, o acúmulo esperado sem medida ainda é maior.
+  const shortRest = plan.stages[index].seconds < RECOVERY_MIN_SECONDS;
+  const carry = carryBpm(plan, ends, rest, shortRest ? SHORT_RECOVERY_CARRY_BPM : DEFAULT_CARRY_BPM);
   const predicted = Math.round(end.bpm + carry);
+  // Para subir a carga vale o fim do ÚLTIMO bloco, e não só o do próximo: o
+  // acúmulo se repete a cada bloco que falta, e uma carga que cabe no próximo
+  // pode passar do teto três tiros depois. A reta superestima (o acúmulo perde
+  // força perto do teto), o que só deixa o aumento mais raro.
+  const blocksLeft = effortIndexes(plan).filter((i) => i > index).length;
+  const predictedLast = Math.round(end.bpm + carry * blocksLeft);
   const block = input.log[index - 1];
   const since = startOf(plan, index) - RELIEF_SETTLE_SECONDS;
   const settling = input.changes.some(
@@ -238,8 +259,8 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   } else if (predicted > zone.high - CUT_ABOVE_BPM) {
     kind = 'aliviar';
     mets = Math.min(NEXT_BLOCK_MAX_METS, (predicted - (zone.high - AIM_SPAN_BPM)) / slope);
-  } else if (predicted < zone.high - AIM_SPAN_BPM && raisable) {
-    const room = raiseMargin(zone.high - predicted);
+  } else if (predictedLast < zone.high - AIM_SPAN_BPM && raisable) {
+    const room = raiseMargin(zone.high - predictedLast);
     if (room > 0) [kind, mets] = ['subir', Math.min(MAX_RAISE_METS, room / slope)];
   }
   // A conta de `correctedStage` parte da carga medida quando ela está abaixo
@@ -322,6 +343,10 @@ export type Pace = {
  * min. O tempo que ela pode emprestar (a duração dela menos 3 min) é dividido
  * pelas recuperações que ainda faltam, para a primeira não gastar tudo.
  * Devolve `null` quando nada muda; a soma das etapas continua a mesma.
+ *
+ * Uma recuperação planejada com menos de 2 minutos fica no tempo do plano: a
+ * pausa curta é o formato do treino (tiros de 2 min com 1 min leve), em que o
+ * coração não deve chegar a baixar. Esperar os 65% desfaria o efeito.
  */
 export function paceRecovery({ plan, index, into, planned, bpm, maxBpm }: PaceInput): Pace | null {
   const stages = plan.stages;
@@ -329,6 +354,7 @@ export function paceRecovery({ plan, index, into, planned, bpm, maxBpm }: PaceIn
   const efforts = effortIndexes(plan);
   if (!betweenBlocks(plan, index) || !stages[cooldown].measure || cooldown <= efforts[efforts.length - 1])
     return null;
+  if (planned < RECOVERY_MIN_SECONDS) return null;
   const current = stages[index].seconds;
   // A volta à calma como estava no começo desta recuperação, e quanto dela pode ir para cada uma.
   const budget = Math.max(0, stages[cooldown].seconds + (current - planned) - COOLDOWN_MIN_SECONDS);

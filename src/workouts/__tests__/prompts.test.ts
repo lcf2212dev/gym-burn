@@ -34,14 +34,14 @@ import {
   summarize,
   type ReviewDecision,
 } from '../prompts';
-import { sessionPlan, week, zones, type Session } from '../week';
+import { sessionPlan, sessions, zones, type Session } from '../week';
 
 // 40 anos: FC máxima estimada de 180. Base aeróbica de 117 a 135 BPM, VO₂máx de 162 a 171.
 const profile: Profile = { age: 40, weightKg: 78, heightCm: 175 };
 const DAY = 86400000;
 const NOW = 1_800_000_000_000;
-const base = week[1].session!;
-const vo2 = week[2].session!;
+const base = sessions.base;
+const vo2 = sessions.vo2Long;
 
 // Passa um plano inteiro pelas mesmas funções que a sessão usa, um segundo por amostra.
 function simulate(
@@ -167,7 +167,7 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
     aim: { bpm: 171, low: 168, high: 171 },
   });
   // Em recuperação a faixa é um teto: a conta busca o terço de baixo, e a faixa inteira serve.
-  expect(data(week[3].session!, []).session).toMatchObject({
+  expect(data(sessions.recovery, []).session).toMatchObject({
     zone: { objective: 'Recuperação', low: 90, high: 108 },
     aim: { bpm: 96, low: 90, high: 108 },
   });
@@ -223,7 +223,7 @@ it('a conta do plano repete a carga que ficou junto do teto da faixa e recalcula
   expect(planProcedure(data(base, [old, done(2, 133)]))).toEqual({ pace: 5.2, grade: 3, repeat: true });
   // Em recuperação a faixa inteira serve: 100 BPM, dentro de 90–108, repete a carga.
   const easy = done(2, 100, 92, { ...planAt(4.5, 0), goal: 'Recuperação ativa', objective: 'Recuperação', zone: zones['Recuperação'] });
-  expect(planProcedure(data(week[3].session!, [easy]))).toEqual({ pace: 4.5, grade: 0, repeat: true });
+  expect(planProcedure(data(sessions.recovery, [easy]))).toEqual({ pace: 4.5, grade: 0, repeat: true });
 });
 
 it('uma referência que terminou entre 5,2 e 6 km/h não é repetida: a carga sai da reta', () => {

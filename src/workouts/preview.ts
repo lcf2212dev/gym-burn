@@ -17,7 +17,7 @@ import {
   type Workout,
 } from './model';
 import { dailyTarget } from './physiology';
-import { sessionPlan, week } from './week';
+import { sessionPlan, sessions } from './week';
 
 /** Onde a prévia para: 18:36 de treino, com 2:24 por fazer no segundo tiro. */
 export const PREVIEW_SECONDS = 18 * 60 + 36;
@@ -35,7 +35,7 @@ const KEPT_SAMPLES = 300;
  */
 export function previewWorkout(profile: Profile, hr: HeartProfile, now: number) {
   // A terça do plano semanal, com a carga escolhida aqui no lugar da IA.
-  const plan = sessionPlan(week[2].session!, PACE_KMH, GRADE_PERCENT);
+  const plan = sessionPlan(sessions.vo2Long, PACE_KMH, GRADE_PERCENT);
   const target = dailyTarget(plan, profile, hr);
   const started = now - PREVIEW_SECONDS * 1000;
   let active: Workout = { ...newWorkout(profile, 'demo', plan, hr), id: 'previa', started };

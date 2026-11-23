@@ -1,11 +1,16 @@
-// O plano semanal: a sessão de cada dia, com a estrutura e a faixa de
-// frequência cardíaca. A IA escolhe só a carga (velocidade e inclinação) que
-// leva a pessoa a essa faixa.
+// As sessões do plano: cada uma com a estrutura e a faixa de frequência
+// cardíaca. A IA escolhe só a carga (velocidade e inclinação) que leva a pessoa
+// a essa faixa. Qual delas é a de hoje não sai mais do dia da semana: sai dos
+// treinos recentes, em `schedule.ts`.
 
 import type { Objective } from './adaptive';
 import { makePlan, type Goal, type Plan, type Structure } from './model';
 
+/** As sessões que a pessoa pode fazer. */
+export type SessionKey = 'base' | 'vo2' | 'vo2Long' | 'threshold' | 'recovery';
+
 export type Session = {
+  key: SessionKey;
   goal: Goal;
   objective: Objective;
   structure: Structure;
@@ -56,56 +61,64 @@ export function zoneSpan(objective: Objective) {
 
 // Nos dias contínuos os 45 minutos incluem uma entrada e uma saída leves.
 const continuous: Structure = { warmup: 5, reps: 1, work: 35, recovery: 0, cooldown: 5 };
-const base: Session = {
-  goal: 'Base aeróbica',
-  objective: 'Base aeróbica',
-  structure: continuous,
-  title: 'Base aeróbica',
-  percent: '65–75%',
-};
 
 /**
- * A semana no índice de `Date.getDay()`: um treino de 45 minutos de segunda a
- * sábado e o domingo de descanso, como no plano da pessoa. Onde ele escreve
- * "ou caminhada inclinada" o treino é um só: a rampa entra pela escada de
- * cargas quando a faixa pede mais do que a caminhada plana oferece.
+ * As sessões, todas de 45 minutos. Onde o plano da pessoa escreve "ou
+ * caminhada inclinada" o treino é um só: a rampa entra pela escada de cargas
+ * quando a faixa pede mais do que a caminhada plana oferece.
+ *
+ * O VO₂máx tem dois formatos, com os mesmos 16 minutos de esforço:
+ * - `vo2`, tiros curtos: 8 × 2 min com 1 min leve. A pausa é curta de
+ *   propósito: o coração não chega a baixar, cada tiro começa mais alto que o
+ *   anterior e a faixa é atingida da metade da série em diante.
+ * - `vo2Long`, tiros longos: 4 × 4 min com 3 min leves. Cada tiro tem tempo de
+ *   levar a FC à faixa sozinho.
  */
-export const week: { day: string; session: Session | null }[] = [
-  { day: 'Domingo', session: null },
-  { day: 'Segunda', session: base },
-  {
-    day: 'Terça',
-    session: {
-      goal: 'VO₂máx',
-      objective: 'VO₂máx',
-      structure: { warmup: 10, reps: 4, work: 4, recovery: 3, cooldown: 7 },
-      title: 'VO₂máx',
-      percent: '90–95% nos tiros',
-    },
+export const sessions: Record<SessionKey, Session> = {
+  base: {
+    key: 'base',
+    goal: 'Base aeróbica',
+    objective: 'Base aeróbica',
+    structure: continuous,
+    title: 'Base aeróbica',
+    percent: '65–75%',
   },
-  {
-    day: 'Quarta',
-    session: {
-      goal: 'Recuperação ativa',
-      objective: 'Recuperação',
-      structure: continuous,
-      title: 'Recuperação ativa ou caminhada inclinada',
-      percent: 'abaixo de 60–65%',
-    },
+  vo2: {
+    key: 'vo2',
+    goal: 'VO₂máx',
+    objective: 'VO₂máx',
+    structure: { warmup: 10, reps: 8, work: 2, recovery: 1, cooldown: 11 },
+    title: 'VO₂máx · tiros de 2 min',
+    percent: '90–95% nos tiros',
   },
-  { day: 'Quinta', session: base },
-  {
-    day: 'Sexta',
-    session: {
-      goal: 'Limiar',
-      objective: 'Limiar',
-      structure: { warmup: 10, reps: 3, work: 8, recovery: 2, cooldown: 5 },
-      title: 'Limiar',
-      percent: '85–90% nos blocos',
-    },
+  vo2Long: {
+    key: 'vo2Long',
+    goal: 'VO₂máx',
+    objective: 'VO₂máx',
+    structure: { warmup: 10, reps: 4, work: 4, recovery: 3, cooldown: 7 },
+    title: 'VO₂máx · tiros de 4 min',
+    percent: '90–95% nos tiros',
   },
-  { day: 'Sábado', session: { ...base, title: 'Base aeróbica ou caminhada inclinada' } },
-];
+  threshold: {
+    key: 'threshold',
+    goal: 'Limiar',
+    objective: 'Limiar',
+    structure: { warmup: 10, reps: 3, work: 8, recovery: 2, cooldown: 5 },
+    title: 'Limiar',
+    percent: '85–90% nos blocos',
+  },
+  recovery: {
+    key: 'recovery',
+    goal: 'Recuperação ativa',
+    objective: 'Recuperação',
+    structure: continuous,
+    title: 'Recuperação ativa ou caminhada inclinada',
+    percent: 'abaixo de 60–65%',
+  },
+};
+
+/** A ordem em que as sessões aparecem na tela, da mais leve à mais forte. */
+export const sessionOrder: SessionKey[] = ['recovery', 'base', 'threshold', 'vo2', 'vo2Long'];
 
 export const sessionMinutes = ({ structure: s }: Session) =>
   s.warmup + s.reps * (s.work + s.recovery) + s.cooldown;

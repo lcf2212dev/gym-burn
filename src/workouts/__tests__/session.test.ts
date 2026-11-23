@@ -451,7 +451,8 @@ it('um alívio de etapa leve não segura a trava do bloco seguinte', async () =>
   const { session, strap } = setup();
   session.start(intervals());
   await strap(120, 4, 80);
-  await strap(120, 5, 115, 1);
+  // 112 no fim do tiro: com a pausa curta a previsão é 117, e a decisão entre tiros não mexe na carga.
+  await strap(120, 5, 112, 1);
   // A recuperação, ainda acima do teto, é aliviada pela regra do app pouco antes do 2º tiro.
   await strap(58, 4, 126);
   expect(changes(session)).toEqual([expect.objectContaining({ stage: 2, by: 'app' })]);
@@ -640,7 +641,8 @@ it('no começo de um tiro a trava espera a lona chegar aos alvos por até 30 s',
     const t = setup();
     t.session.start(intervals());
     await t.strap(120, 4, 80);
-    await t.strap(120, 5, 115, 1);
+    // 112 no fim do tiro: a decisão entre tiros não mexe na carga do seguinte.
+    await t.strap(120, 5, 112, 1);
     await t.strap(61, 4, 118);
     expect(t.session.snapshot().guidance?.index).toBe(3);
     return t;
@@ -970,15 +972,16 @@ it('a decisão do próximo tiro sobe a carga só dele quando o anterior termina 
   below.session.start(vo2(3));
   const steady = (work: number) => (stage: Stage) => (stage.name === 'Aquecimento' ? 100 : stage.measure ? 130 : work);
   await follow(below, 120 + 240 + 16, steady(158));
-  // 158 no fim, previsão de 160: cabem 8 bpm, a 11 bpm por MET (repouso de 85): 0,72 MET, 7,3 km/h.
+  // 158 no fim. Para subir vale o fim do último tiro, 158 + 2 × 2 = 162: cabem 6 bpm, a 11 bpm por MET
+  // (repouso de 85): 0,5 MET, 7,1 km/h.
   expect(changes(below.session)).toEqual([
-    expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6.6, 1], to: [7.3, 1], bpm: 158 }),
+    expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6.6, 1], to: [7.1, 1], bpm: 158 }),
   ]);
   // Como todo aumento, vale só para o próximo tiro.
   expect(loads(below.session.snapshot().active?.plan)).toEqual([
-    [4, 0], [6.6, 1], [4, 0], [7.3, 1], [4, 0], [6.6, 1], [4, 0], [4, 0],
+    [4, 0], [6.6, 1], [4, 0], [7.1, 1], [4, 0], [6.6, 1], [4, 0], [4, 0],
   ]);
-  expect(coach(below.session)).toBe('Próximo tiro: 7,3 km/h');
+  expect(coach(below.session)).toBe('Próximo tiro: 7,1 km/h');
   // Um corte da trava no começo do 1º tiro: com o fim bem abaixo, a carga não sobe em nenhuma recuperação.
   const cut = setup(vo2Profile);
   cut.session.start(vo2(3));
@@ -1024,12 +1027,13 @@ it('um corte a 6 km/h não derruba o resto do treino de tiros para a caminhada',
 
 it('um aumento que deu certo segue nos tiros seguintes: sobe, mantém, mantém, sem voltar à carga do plano', async () => {
   const t = setup(vo2Profile);
-  // Quatro tiros planejados a 6,0 km/h; o 1º termina em 161 e os outros, na carga nova, em 167, no alvo.
+  // Quatro tiros planejados a 6,0 km/h. O 1º termina em 152, bem abaixo: o 2º sobe. Na carga nova os
+  // tiros terminam em 163, 165 e 167, com pouco acúmulo: no alvo, sem previsão acima do teto.
   const plan = vo2(4);
   plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 6 }));
   t.session.start(plan);
   const bpm = (stage: Stage, _: number, index: number) =>
-    stage.name === 'Aquecimento' ? 100 : stage.measure ? 125 : index === 1 ? 161 : 167;
+    stage.name === 'Aquecimento' ? 100 : stage.measure ? 125 : ({ 1: 152, 3: 163, 5: 165 } as Record<number, number>)[index] ?? 167;
   const seen: string[] = [];
   const verdicts: string[] = [];
   const each = () => {
@@ -1041,17 +1045,17 @@ it('um aumento que deu certo segue nos tiros seguintes: sobe, mantém, mantém, 
   await follow(t, 120 + 4 * 240 + 3 * 180 + 20, bpm, each);
   const ahead = changes(t.session)!;
   expect(ahead).toEqual([
-    expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 161 }),
+    expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.8, 1], bpm: 152 }),
     // A carga do fim passada adiante tem nome próprio: não conta como aumento na avaliação.
-    expect.objectContaining({ stage: 5, by: 'bloco', decision: 'manter carga', from: [6, 1], to: [6.4, 1], bpm: 167 }),
-    expect.objectContaining({ stage: 7, by: 'bloco', decision: 'manter carga', from: [6, 1], to: [6.4, 1], bpm: 167 }),
+    expect.objectContaining({ stage: 5, by: 'bloco', decision: 'manter carga', from: [6, 1], to: [6.8, 1], bpm: 163 }),
+    expect.objectContaining({ stage: 7, by: 'bloco', decision: 'manter carga', from: [6, 1], to: [6.8, 1], bpm: 165 }),
   ]);
   expect(loads(t.session.snapshot().active?.plan)).toEqual([
-    [4, 0], [6, 1], [4, 0], [6.4, 1], [4, 0], [6.4, 1], [4, 0], [6.4, 1], [4, 0], [4, 0],
+    [4, 0], [6, 1], [4, 0], [6.8, 1], [4, 0], [6.8, 1], [4, 0], [6.8, 1], [4, 0], [4, 0],
   ]);
-  expect(seen).toEqual(['Próximo tiro: 6,4 km/h']);
+  expect(seen).toEqual(['Próximo tiro: 6,8 km/h']);
   // As duas últimas decisões são "manter": a carga é a do fim do tiro anterior, que terminou no alvo.
-  expect(verdicts).toEqual(['aumentar 6.4', 'manter 6.4', 'manter 6.4']);
+  expect(verdicts).toEqual(['aumentar 6.8', 'manter 6.8', 'manter 6.8']);
 });
 
 it('sem a cinta a carga do próximo tiro não é decidida na recuperação', async () => {

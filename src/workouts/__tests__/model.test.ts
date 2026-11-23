@@ -17,9 +17,11 @@ import {
   describe as structureText,
   heartZones,
   sessionMinutes,
+  sessionOrder,
   sessionPlan,
-  week,
+  sessions,
   zoneSpan,
+  type SessionKey,
 } from '../week';
 import type { TreadmillSample } from '@/treadmill/types';
 
@@ -33,22 +35,23 @@ const sample = (at: number, speedKmh: number, heartRateBpm: number | null): Trea
   inclinationPercent: 2,
 });
 
-const options = week.flatMap((entry) => (entry.session ? [[entry.day, entry.session] as const] : []));
+const options = sessionOrder.map((key) => [sessions[key].title, sessions[key]] as const);
 
-it('a semana tem um treino de 45 minutos de segunda a sábado e o domingo de descanso', () => {
-  expect(week.map((entry) => entry.session?.goal ?? null)).toEqual([
-    null,
-    'Base aeróbica',
-    'VO₂máx',
+it('há cinco sessões de 45 minutos, com o VO₂máx em dois formatos de 16 minutos de esforço', () => {
+  expect(sessionOrder.map((key) => sessions[key].goal)).toEqual([
     'Recuperação ativa',
     'Base aeróbica',
     'Limiar',
-    'Base aeróbica',
+    'VO₂máx',
+    'VO₂máx',
   ]);
-  expect(options).toHaveLength(6);
+  expect(options).toHaveLength(5);
   for (const [, option] of options) expect(sessionMinutes(option)).toBe(45);
-  expect(structureText(week[1].session!)).toBe('Contínuo: 5 min aquecendo, 35 min na faixa, 5 min desaquecendo');
-  expect(structureText(week[2].session!)).toBe('10 min aquecendo, 4 × 4 min com 3 min leves, 7 min desaquecendo');
+  for (const key of sessionOrder) expect(sessions[key].key).toBe(key);
+  expect(structureText(sessions.vo2)).toBe('10 min aquecendo, 8 × 2 min com 1 min leves, 11 min desaquecendo');
+  for (const { structure } of [sessions.vo2, sessions.vo2Long]) expect(structure.reps * structure.work).toBe(16);
+  expect(structureText(sessions.base)).toBe('Contínuo: 5 min aquecendo, 35 min na faixa, 5 min desaquecendo');
+  expect(structureText(sessions.vo2Long)).toBe('10 min aquecendo, 4 × 4 min com 3 min leves, 7 min desaquecendo');
 });
 
 it('cada treino tem o alvo dentro das cinco zonas de frequência', () => {
@@ -67,14 +70,14 @@ it('cada treino tem o alvo dentro das cinco zonas de frequência', () => {
 });
 
 it('monta as etapas de cada sessão com a estrutura do plano semanal', () => {
-  const shape = (day: number) =>
-    sessionPlan(week[day].session!, 9, 1).stages.map((s) => [s.name, s.seconds, s.speed, s.incline]);
-  expect(shape(1)).toEqual([
+  const shape = (key: SessionKey) =>
+    sessionPlan(sessions[key], 9, 1).stages.map((s) => [s.name, s.seconds, s.speed, s.incline]);
+  expect(shape('base')).toEqual([
     ['Aquecimento', 300, 4, 0],
     ['Base aeróbica', 2100, 9, 1],
     ['Volta à calma', 300, 4, 0],
   ]);
-  expect(shape(2)).toEqual([
+  expect(shape('vo2Long')).toEqual([
     ['Aquecimento', 600, 4, 0],
     ['VO₂máx 1/4', 240, 9, 1],
     ['Recuperação', 180, 4, 0],
@@ -86,10 +89,10 @@ it('monta as etapas de cada sessão com a estrutura do plano semanal', () => {
     ['Recuperação', 180, 4, 0],
     ['Volta à calma', 420, 4, 0],
   ]);
-  expect(shape(5).map((s) => s[1])).toEqual([600, 480, 120, 480, 120, 480, 120, 300]);
+  expect(shape('threshold').map((s) => s[1])).toEqual([600, 480, 120, 480, 120, 480, 120, 300]);
   // Em carga de caminhada lenta o trecho leve fica em 80% da velocidade.
-  expect(sessionPlan(week[3].session!, 3.5, 0).stages[0].speed).toBe(2.8);
-  expect(sessionPlan(week[5].session!, 9, 1)).toMatchObject({
+  expect(sessionPlan(sessions.recovery, 3.5, 0).stages[0].speed).toBe(2.8);
+  expect(sessionPlan(sessions.threshold, 9, 1)).toMatchObject({
     goal: 'Limiar',
     objective: 'Limiar',
     zone: [85, 90],
@@ -131,7 +134,7 @@ it.each(options)('pede BPM a cada 3 minutos de treino, num relógio fixo, em %s'
 });
 
 it('ignora pausa e lacuna BLE e calcula apenas o esforço observado', () => {
-  const w = newWorkout(profile, 'ble', sessionPlan(week[2].session!, 8, 4));
+  const w = newWorkout(profile, 'ble', sessionPlan(sessions.vo2Long, 8, 4));
   const samples = [
     sample(0, 3.6, 110),
     sample(1000, 3.6, null),
