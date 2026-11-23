@@ -71,12 +71,27 @@ it('desconta os 15 bpm só das medidas andando: a feita parado vale como está',
   });
   // Parado 62 contra um registro antigo de 80 (65): vale o 62 parado, sem desconto.
   expect(heartProfile(profile, [at(62, 'parado'), at(80)])).toMatchObject({ rest: 62, restSource: 'parado' });
-  // Só medidas paradas: a menor delas, como está.
+  // Só duas medidas paradas: a menor delas, como está.
   expect(heartProfile(profile, [at(64, 'parado'), at(61, 'parado')])).toMatchObject({ rest: 61, restSource: 'parado' });
   expect(restOf(at(70, 'parado'))).toBe(70);
   expect(restOf(at(70, 'andando'))).toBe(55);
   expect(restOf(at(70))).toBe(55);
   expect(restOf({ restBpm: null })).toBeNull();
+});
+
+it('com 3 ou mais medidas parado entre as 5 últimas, o repouso em uso é a mediana delas', () => {
+  const at = (restBpm: number, restSource?: Workout['restSource']) => ({ ...session(restBpm, null), restSource });
+  // Uma leitura falsa de 40 (cinta mal assentada) não manda no perfil pelos próximos 5 treinos.
+  expect(heartProfile(profile, [at(40, 'parado'), at(64, 'parado'), at(62, 'parado')])).toMatchObject({
+    rest: 62,
+    restSource: 'parado',
+  });
+  // As andando ficam de fora da mediana, mesmo com o desconto as deixando mais baixas.
+  const mixed = [at(63, 'parado'), at(70, 'andando'), at(61, 'parado'), at(72), at(65, 'parado')];
+  expect(heartProfile(profile, mixed)).toMatchObject({ rest: 63, restSource: 'parado' });
+  // Só contam as 5 últimas: a terceira medida parado, sexta da lista, fica de fora.
+  const old = [at(63, 'parado'), at(70, 'andando'), at(61, 'parado'), at(72), at(80), at(65, 'parado')];
+  expect(heartProfile(profile, old)).toMatchObject({ rest: 55, restSource: 'andando' });
 });
 
 it('a faixa de cada sessão são os percentuais do plano semanal sobre a FC máxima', () => {

@@ -7,7 +7,7 @@
 // A prontidão é só uma sugestão na tela: não entra em nenhuma regra de carga,
 // não bloqueia nada e não vai para a IA.
 
-import { acceptRr, createRrFilter, rmssd } from '@/heart/rr';
+import { classifyRr, createRrFilter, type RrVerdict } from '@/heart/rr';
 import { median, validBpm, type Workout } from './model';
 
 /** Uma notificação da cinta com a lona parada: o BPM dela e os RR crus do pacote. */
@@ -17,20 +17,47 @@ export type StillBeat = { at: number; bpm: number; rrMs: number[] };
 export const STILL_WINDOW_MS = 5 * 60_000;
 /** Com menos que isto de leitura parado vale o caminho de sempre: o primeiro minuto e meio andando. */
 export const STILL_MIN_MS = 60_000;
-/** O repouso é a menor mediana de 30 s da janela. */
+/** O repouso sai de trechos de 30 s, sem sobreposição. */
 export const STILL_MEDIAN_MS = 30_000;
+/**
+ * A prontidão pede 2 minutos parado no total: o primeiro é de acomodação (a
+ * pessoa acabou de subir na esteira), e a HRV sai do último.
+ */
+export const HRV_STILL_MS = 120_000;
+/** A HRV sai sempre dos últimos 60 s antes de a lona andar: a mesma duração todo dia. */
+export const HRV_SPAN_MS = 60_000;
 /**
  * Duas leituras mais distantes que isto não cobrem o tempo entre elas: a cinta
  * perdeu o contato ou o link (é o mesmo prazo em que a leitura dela deixa de
  * valer no treino).
  */
 export const STILL_GAP_MS = 5000;
-/** Uma janela de 30 s conta como cheia com esta folga: as notificações não chegam no milissegundo. */
-const MEDIAN_SLACK_MS = 2000;
+/** Um trecho conta como cheio com esta folga: as notificações não chegam no milissegundo. */
+const SLACK_MS = 2000;
+/**
+ * Num trecho coerente, a mediana do BPM da cinta e a de 60000/RR dos RR
+ * aceitos diferem no máximo isto: uma cinta mal assentada manda um BPM que os
+ * RR não confirmam.
+ */
+export const COHERENT_BPM = 5;
+/** Num trecho de 30 s parado, o BPM não varia mais que isto. */
+export const STILL_RANGE_BPM = 15;
+/** Quantos RR aceitos, no mínimo, um trecho de 30 s precisa para a conferência. */
+const SEGMENT_MIN_RR = 10;
+/** Abaixo disto não é repouso de quem está em pé: é leitura falsa. */
+export const REST_FLOOR_BPM = 40;
+/**
+ * Com 3 ou mais medidas parado no histórico, um repouso mais de 12 bpm abaixo
+ * da mediana delas é descartado.
+ */
+export const REST_DROP_BPM = 12;
+export const REST_HISTORY_MIN = 3;
 /** Acima desta parcela de RR descartados pelo filtro de artefatos, a medida da HRV não vale. */
 export const MAX_REJECTED_SHARE = 0.1;
-/** Os RR aceitos precisam cobrir o minuto, menos a parcela que pode ser descartada. */
-const HRV_MIN_RR_MS = STILL_MIN_MS * (1 - MAX_REJECTED_SHARE);
+/** Os RR aceitos precisam cobrir o minuto da HRV, menos a parcela que pode ser descartada. */
+const HRV_MIN_RR_MS = HRV_SPAN_MS * (1 - MAX_REJECTED_SHARE);
+/** Pares de RR seguidos, no mínimo, para o RMSSD. */
+const HRV_MIN_PAIRS = 20;
 
 /** A base da prontidão: os dias medidos nas últimas 4 semanas, sem contar hoje. */
 export const BASELINE_DAYS = 28;
@@ -42,6 +69,13 @@ export const BASELINE_MIN_DAYS = 5;
  * 0,1 em ln são cerca de 10% de RMSSD.
  */
 export const READINESS_SD_FLOOR = 0.1;
+
+/** Um treino com tanto tempo em movimento conta como esforço para a medida parado. */
+export const EFFORT_MS = 60_000;
+/** Depois de um esforço a FC ainda é a dele por este tempo: a janela parado não coleta. */
+export const POST_EFFORT_MS = 10 * 60_000;
+/** Depois de um esforço a HRV fica deprimida por horas: a prontidão só volta a ser gravada depois disto. */
+export const READINESS_AFTER_EFFORT_MS = 3 * 3_600_000;
 
 const DAY_MS = 86_400_000;
 const round = (n: number, digits: number) => Math.round(n * 10 ** digits) / 10 ** digits;
@@ -68,21 +102,91 @@ export function coveredMs(beats: readonly StillBeat[]): number {
 export const stillSeconds = (beats: readonly StillBeat[]) => Math.floor(coveredMs(beats) / 1000);
 
 /**
- * O repouso do dia, medido parado: a menor mediana de 30 s seguidos de leitura
- * na janela. `null` com menos de 60 s de leitura, ou sem nenhum trecho de 30 s
- * sem lacuna.
+ * Um RR da janela, depois do filtro de artefatos: de que leitura veio, o que o
+ * filtro fez com ele e se ele vem logo depois do RR anterior da lista (no
+ * mesmo pacote, ou no pacote seguinte sem lacuna e sem pacote vazio no meio).
  */
-export function stillRest(beats: readonly StillBeat[]): number | null {
-  if (coveredMs(beats) < STILL_MIN_MS) return null;
+type ScoredRr = { beat: number; rr: number; verdict: RrVerdict; follows: boolean };
+
+/** Passa os RR da janela inteira pelo filtro, na ordem, para a referência estar assentada. */
+function scoreRr(beats: readonly StillBeat[]): ScoredRr[] {
+  const filter = createRrFilter();
+  const out: ScoredRr[] = [];
+  beats.forEach((beat, i) => {
+    const before = beats[i - 1];
+    const linked = !!before && beat.at - before.at <= STILL_GAP_MS && before.rrMs.length > 0;
+    beat.rrMs.forEach((rr, k) =>
+      out.push({ beat: i, rr, verdict: classifyRr(filter, rr), follows: k > 0 || linked }),
+    );
+  });
+  return out;
+}
+
+/** O que um trecho da janela diz: o BPM da cinta e o dos RR aceitos, e se o filtro se re-semeou nele. */
+function segment(beats: readonly StillBeat[], scored: readonly ScoredRr[], from: number, to: number) {
+  const slice = beats.slice(from, to);
+  const bpms = slice.map((b) => b.bpm);
+  const rrs = scored.filter((s) => s.beat >= from && s.beat < to);
+  const kept = rrs.filter((s) => s.verdict !== 'recusado');
+  return {
+    covered: coveredMs(slice),
+    bpm: bpms.length ? median(bpms) : null,
+    range: bpms.length ? Math.max(...bpms) - Math.min(...bpms) : 0,
+    rrs,
+    kept,
+    rrBpm: kept.length ? median(kept.map((s) => 60000 / s.rr)) : null,
+    reseeded: rrs.some((s) => s.verdict === 'resemeado'),
+  };
+}
+
+/** O primeiro índice da janela com a leitura depois de `at`. */
+const firstAfter = (beats: readonly StillBeat[], at: number) => {
+  const i = beats.findIndex((b) => b.at > at);
+  return i < 0 ? beats.length : i;
+};
+
+/**
+ * As medidas parado anteriores, das mais novas para as mais antigas (até 5):
+ * a referência do piso de plausibilidade.
+ */
+export function stillHistory(history: readonly Workout[]): number[] {
+  return history
+    .filter((w) => w.restSource === 'parado' && validBpm(w.restBpm))
+    .slice(0, 5)
+    .map((w) => w.restBpm!);
+}
+
+/**
+ * O repouso do dia, medido parado. A janela é cortada em trechos de 30 s sem
+ * sobreposição, do fim para o começo (a menor entre centenas de medianas
+ * sobrepostas puxa para baixo mesmo sem artefato). Um trecho só é candidato se
+ * é coerente: cheio (sem lacuna), com o BPM variando 15 bpm ou menos, com a
+ * mediana do BPM da cinta a 5 bpm ou menos da de 60000/RR dos RR aceitos (pelo
+ * menos 10) e sem re-semeadura do filtro de artefatos dentro dele. O repouso é
+ * a menor mediana entre os candidatos. Não vale abaixo de 40 bpm nem, com 3 ou
+ * mais medidas parado em `previous`, mais de 12 bpm abaixo da mediana delas.
+ * `null` com menos de 60 s de leitura, sem candidato ou fora do plausível: aí
+ * vale o caminho andando.
+ */
+export function stillRest(beats: readonly StillBeat[], previous: readonly number[] = []): number | null {
+  if (!beats.length || coveredMs(beats) < STILL_MIN_MS) return null;
+  const scored = scoreRr(beats);
+  const end = beats[beats.length - 1].at;
   let lowest: number | null = null;
-  let start = 0;
-  for (let end = 0; end < beats.length; end++) {
-    while (beats[end].at - beats[start].at > STILL_MEDIAN_MS) start++;
-    const slice = beats.slice(start, end + 1);
-    if (coveredMs(slice) < STILL_MEDIAN_MS - MEDIAN_SLACK_MS) continue;
-    const value = median(slice.map((b) => b.bpm));
-    if (validBpm(value) && (lowest === null || value < lowest)) lowest = value;
+  for (let top = end; top - STILL_MEDIAN_MS >= beats[0].at - SLACK_MS; top -= STILL_MEDIAN_MS) {
+    const s = segment(beats, scored, firstAfter(beats, top - STILL_MEDIAN_MS), firstAfter(beats, top));
+    const coherent =
+      s.bpm !== null &&
+      s.covered >= STILL_MEDIAN_MS - SLACK_MS &&
+      s.range <= STILL_RANGE_BPM &&
+      s.kept.length >= SEGMENT_MIN_RR &&
+      s.rrBpm !== null &&
+      Math.abs(s.bpm - s.rrBpm) <= COHERENT_BPM &&
+      !s.reseeded;
+    if (coherent && (lowest === null || s.bpm! < lowest)) lowest = s.bpm;
   }
+  if (lowest === null || !validBpm(lowest) || lowest < REST_FLOOR_BPM) return null;
+  if (previous.length >= REST_HISTORY_MIN && lowest < median([...previous]) - REST_DROP_BPM) return null;
   return lowest;
 }
 
@@ -90,32 +194,57 @@ export function stillRest(beats: readonly StillBeat[]): number | null {
 export type StillHrv = { rmssd: number; lnRmssd: number; beats: number; rejectedShare: number };
 
 /**
- * A HRV da janela parado: o RMSSD dos RR aceitos pelo filtro de artefatos
- * (`acceptRr`) e o ln dele. `null` com menos de 60 s de leitura, sem RR, com
- * mais de 10% dos RR descartados ou com os aceitos cobrindo menos de 54 s.
+ * A HRV da janela, ou por que não há: `curta` (menos de 2 minutos parado, ou o
+ * último minuto com lacuna), `sem-rr` (a cinta não mandou RR) ou `instavel`
+ * (artefatos: RR descartados demais, re-semeadura do filtro, RR que não batem
+ * com o BPM da cinta).
  */
-export function stillHrv(beats: readonly StillBeat[]): StillHrv | null {
-  if (coveredMs(beats) < STILL_MIN_MS) return null;
-  const filter = createRrFilter();
-  const kept: number[] = [];
-  let total = 0;
-  for (const beat of beats) {
-    for (const rr of beat.rrMs) {
-      total++;
-      if (acceptRr(filter, rr)) kept.push(rr);
+export type HrvCheck =
+  | { hrv: StillHrv; reason: null }
+  | { hrv: null; reason: 'curta' | 'sem-rr' | 'instavel' };
+
+/**
+ * A HRV da janela parado: o RMSSD dos últimos 60 s antes de a lona andar, com
+ * 2 minutos parado ou mais no total (o primeiro é de acomodação), e o ln dele.
+ * Só valem as diferenças entre RR aceitos e seguidos: o par recomeça a cada
+ * descarte, lacuna ou pacote sem RR. A medida é recusada com mais de 10% dos RR
+ * descartados, com os aceitos cobrindo menos de 54 s, com alguma re-semeadura
+ * do filtro no último minuto (um artefato sustentado vira o novo patamar e
+ * passaria pelos 10%) ou com a mediana de 60000/RR a mais de 5 bpm da do BPM
+ * da cinta.
+ */
+export function stillHrv(beats: readonly StillBeat[]): HrvCheck {
+  if (!beats.length || coveredMs(beats) < HRV_STILL_MS - SLACK_MS) return { hrv: null, reason: 'curta' };
+  const scored = scoreRr(beats);
+  const end = beats[beats.length - 1].at;
+  const from = firstAfter(beats, end - HRV_SPAN_MS);
+  const s = segment(beats, scored, from, beats.length);
+  if (s.covered < HRV_SPAN_MS - SLACK_MS) return { hrv: null, reason: 'curta' };
+  if (!s.rrs.length) return { hrv: null, reason: 'sem-rr' };
+  const rejectedShare = (s.rrs.length - s.kept.length) / s.rrs.length;
+  const span = s.kept.reduce((sum, r) => sum + r.rr, 0);
+  const coherent = s.bpm !== null && s.rrBpm !== null && Math.abs(s.bpm - s.rrBpm) <= COHERENT_BPM;
+  if (rejectedShare > MAX_REJECTED_SHARE || span < HRV_MIN_RR_MS || s.reseeded || !coherent)
+    return { hrv: null, reason: 'instavel' };
+  let sum = 0;
+  let pairs = 0;
+  for (let j = 1; j < s.rrs.length; j++) {
+    const [a, b] = [s.rrs[j - 1], s.rrs[j]];
+    if (b.follows && a.verdict === 'aceito' && b.verdict === 'aceito') {
+      sum += (b.rr - a.rr) ** 2;
+      pairs++;
     }
   }
-  if (!total) return null;
-  const rejectedShare = (total - kept.length) / total;
-  const span = kept.reduce((sum, rr) => sum + rr, 0);
-  if (rejectedShare > MAX_REJECTED_SHARE || span < HRV_MIN_RR_MS) return null;
-  const value = rmssd(kept);
-  if (value === null || !(value > 0)) return null;
+  if (pairs < HRV_MIN_PAIRS || !(sum > 0)) return { hrv: null, reason: 'instavel' };
+  const value = Math.sqrt(sum / pairs);
   return {
-    rmssd: round(value, 1),
-    lnRmssd: round(Math.log(value), 3),
-    beats: total,
-    rejectedShare: round(rejectedShare, 3),
+    hrv: {
+      rmssd: round(value, 1),
+      lnRmssd: round(Math.log(value), 3),
+      beats: s.rrs.length,
+      rejectedShare: round(rejectedShare, 3),
+    },
+    reason: null,
   };
 }
 
@@ -204,4 +333,46 @@ export function restToday(workouts: readonly Workout[], now: number) {
   const w = measured.find((h) => h.restSource === 'parado') ?? measured[0];
   if (!w || !validBpm(w.restBpm)) return null;
   return { bpm: w.restBpm, source: w.restSource ?? ('andando' as const) };
+}
+
+/** Um treino de 1 minuto ou mais em movimento na esteira de verdade: quando começou e terminou. */
+export type Effort = { started: number; ended: number };
+
+/** Os esforços do histórico: treinos encerrados da esteira de verdade com 1 minuto ou mais em movimento. */
+export function efforts(history: readonly Workout[]): Effort[] {
+  return history.flatMap((w) =>
+    w.source === 'ble' && w.ended && w.totals.movingMs >= EFFORT_MS ? [{ started: w.started, ended: w.ended }] : [],
+  );
+}
+
+/** Quanto falta, em ms, para a janela parado voltar a coletar depois do último esforço; 0 sem espera. */
+export function stillWait(list: readonly Effort[], now: number): number {
+  const ended = Math.max(-Infinity, ...list.map((e) => e.ended));
+  return Math.max(0, ended + POST_EFFORT_MS - now);
+}
+
+/**
+ * Por que a prontidão de hoje não seria gravada agora: `antes-do-treino`, já
+ * há a medida de hoje e um treino começou depois dela (a prontidão de hoje só
+ * vale antes do treino); `depois-do-treino`, um treino terminou há menos de 3
+ * horas (a HRV ainda está deprimida), até `until`. `null` sem trava. A janela
+ * de 3 horas, e não o dia de calendário, vale também na virada do dia.
+ */
+export type ReadinessLock =
+  | { reason: 'antes-do-treino' }
+  | { reason: 'depois-do-treino'; until: number }
+  | null;
+
+export function readinessLock(
+  list: readonly Effort[],
+  records: readonly ReadinessRecord[],
+  now: number,
+): ReadinessLock {
+  const today = dayKey(now);
+  const measured = records.filter((r) => r.day === today);
+  const first = measured.length ? Math.min(...measured.map((r) => r.at)) : null;
+  if (first !== null && list.some((e) => e.started > first && e.started <= now)) return { reason: 'antes-do-treino' };
+  const ended = Math.max(-Infinity, ...list.map((e) => e.ended));
+  if (now - ended < READINESS_AFTER_EFFORT_MS) return { reason: 'depois-do-treino', until: ended + READINESS_AFTER_EFFORT_MS };
+  return null;
 }

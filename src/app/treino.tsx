@@ -27,14 +27,15 @@ import { generatePlan } from '@/workouts/ai';
 import {
   groupStages,
   readinessCopy,
-  stillProgress,
+  stillGoals,
+  stillWaitText,
   structureFacts,
   type ReadinessTone,
 } from '@/workouts/briefing';
 import { useWorkout, useWorkoutSession } from '@/workouts/context';
 import { validLoad, type Plan, type Workout } from '@/workouts/model';
 import { aimBand, dailyTarget, heartProfile } from '@/workouts/physiology';
-import { readiness, restToday } from '@/workouts/rest';
+import { dayKey, efforts, readiness, readinessLock, restToday, stillWait } from '@/workouts/rest';
 import { sessionMinutes, week, zoneIndexes, zones, zoneSpan } from '@/workouts/week';
 import { formatDecimal, formatDuration, formatTrimmed } from '@/utils/format';
 
@@ -383,17 +384,29 @@ export default function Training() {
  */
 function RestCard({ workouts }: { workouts: Workout[] }) {
   const records = useWorkout((s) => s.readiness);
+  const history = useWorkout((s) => s.history);
+  const issue = useWorkout((s) => s.readinessIssue);
   const seconds = useWorkout((s) => s.stillSeconds);
-  const ready = useWorkout((s) => s.stillReady);
+  const restReady = useWorkout((s) => s.stillReady);
+  const hrv = useWorkout((s) => s.stillHrv);
   const strapReading = useStrap((s) => s.phase === 'connected' && s.bpm !== null);
   const stopped = useTreadmill((s) => s.phase === 'connected' && !((s.samples.at(-1)?.speedKmh ?? 0) > 0));
   // O "hoje" sai da hora de abertura da tela e acompanha o relógio, de minuto em minuto.
   const [opened] = useState(() => Date.now());
   const now = useNow(60_000) ?? opened;
   const rest = restToday(workouts, now);
-  const copy = readinessCopy(readiness(records, now));
+  const done = efforts(history);
+  const lock = readinessLock(done, records, now);
+  const copy = readinessCopy(readiness(records, now), {
+    lock,
+    issue: issue?.day === dayKey(now) ? issue.reason : null,
+  });
   const color = READINESS_COLORS[copy.tone];
-  const progress = strapReading && stopped && seconds !== null ? stillProgress(seconds, ready) : null;
+  // O andamento só aparece com a cinta lendo, a esteira conectada e a lona parada.
+  const live = strapReading && stopped;
+  const wait = live ? stillWait(done, now) : 0;
+  const goals =
+    live && !wait && seconds !== null ? stillGoals({ seconds, restReady, hrv, lock }) : [];
   const origin = !rest
     ? 'Ainda não medido hoje'
     : rest.source === 'parado'
@@ -425,19 +438,34 @@ function RestCard({ workouts }: { workouts: Workout[] }) {
         <Text style={[local.readinessTitle, { color }]}>{copy.title}</Text>
         <Text style={local.note}>{copy.detail}</Text>
       </View>
-      {progress && (
-        <View
-          style={local.readiness}
-          accessible
-          accessibilityRole="progressbar"
-          accessibilityLabel={progress.text}
-          accessibilityValue={{ min: 0, max: 60, now: Math.min(60, seconds ?? 0) }}>
-          <Text style={[local.side, local.strong]}>{progress.text}</Text>
-          <View style={local.bar}>
-            <View style={[local.barFill, { width: `${progress.share * 100}%` }]} />
-          </View>
-        </View>
+      {wait > 0 && (
+        <Text style={[local.side, local.strong]} accessibilityLiveRegion="polite">
+          {stillWaitText(wait)}
+        </Text>
       )}
+      {goals.map((goal) => (
+        <View
+          key={goal.label}
+          style={local.goal}
+          accessible
+          accessibilityRole={goal.share === null ? undefined : 'progressbar'}
+          accessibilityLabel={goal.label + ': ' + goal.text}
+          accessibilityValue={
+            goal.share === null ? undefined : { min: 0, max: 100, now: Math.round(goal.share * 100) }
+          }>
+          <View style={[local.between, local.goalHead]}>
+            <Text style={[local.side, local.strong]}>{goal.label}</Text>
+            <Text style={[local.side, local.goalText, goal.done && local.goalDone]}>{goal.text}</Text>
+          </View>
+          {goal.share !== null && (
+            <View style={local.bar}>
+              <View
+                style={[local.barFill, goal.done && local.barDone, { width: `${goal.share * 100}%` }]}
+              />
+            </View>
+          )}
+        </View>
+      ))}
       <Text style={local.side}>É só uma sugestão: não muda a carga do treino nem vai para a IA.</Text>
     </Card>
   );
@@ -602,4 +630,9 @@ const local = StyleSheet.create({
   readinessTitle: { ...TitleType, fontSize: 24, lineHeight: 28 },
   bar: { height: 4, borderRadius: 2, backgroundColor: Colors.dark.border },
   barFill: { height: 4, borderRadius: 2, backgroundColor: Metric.heart },
+  barDone: { backgroundColor: Neon.mint },
+  goal: { gap: 6 },
+  goalHead: { gap: 12 },
+  goalText: { flexShrink: 1, textAlign: 'right' },
+  goalDone: { color: Neon.mint },
 });

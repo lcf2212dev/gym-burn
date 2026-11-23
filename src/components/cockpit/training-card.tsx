@@ -97,7 +97,7 @@ export function TrainingCard() {
                 style={[styles.flex, styles.note]}
                 accessible
                 accessibilityLiveRegion="polite"
-                accessibilityLabel={note.text}>
+                accessibilityLabel={note.spoken ?? note.text}>
                 {note.tone === 'warn' && <Lucide name="triangle-alert" size={13} color={noteColor} />}
                 <Text style={[styles.small, styles.flex, styles.flush, { color: noteColor }]} numberOfLines={1}>
                   {note.text}

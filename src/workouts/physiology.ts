@@ -181,15 +181,25 @@ export function restOf(w: Pick<Workout, 'restBpm' | 'restSource'>): number | nul
   return w.restSource === 'parado' ? w.restBpm : w.restBpm - WALKING_OFFSET_BPM;
 }
 
+/** Com tantas medidas parado entre as 5 últimas, o repouso em uso é a mediana delas. */
+const STILL_RESTS_FOR_MEDIAN = 3;
+
 /**
  * Repouso e máxima em uso, a partir do histórico da mesma origem (mais novo
- * primeiro). O repouso é a menor das 5 últimas medidas de repouso, cada uma
- * pela sua origem (`restOf`), e serve de ponto de partida para a relação entre
- * carga e frequência cardíaca. A máxima é a mediana das 3 últimas previsões
- * da IA, para uma resposta ruim não deslocar a faixa sozinha.
+ * primeiro). O repouso serve de ponto de partida para a relação entre carga e
+ * frequência cardíaca, e sai das 5 últimas medidas de repouso:
+ * - com 3 ou mais delas medidas parado, é a mediana das paradas, sem desconto.
+ *   Uma medida parado é direta: a menor delas só propagaria o erro de uma
+ *   leitura falsa para baixo (cinta mal assentada) por 5 treinos;
+ * - senão, é a menor das 5, cada uma pela sua origem (`restOf`). A menor fazia
+ *   sentido para as leituras andando, que são enviesadas para cima: a mais
+ *   baixa é a que chegou mais perto do repouso.
+ * A máxima é a mediana das 3 últimas previsões da IA, para uma resposta ruim
+ * não deslocar a faixa sozinha.
  */
 export function heartProfile(profile: Profile, history: Workout[]): HeartProfile {
   const rests = history.filter((w) => validBpm(w.restBpm)).slice(0, 5);
+  const still = rests.filter((w) => w.restSource === 'parado').map((w) => w.restBpm!);
   // Num empate vale a mais nova.
   const lowest = rests.reduce<Workout | null>(
     (best, w) => (best === null || restOf(w)! < restOf(best)! ? w : best),
@@ -199,9 +209,14 @@ export function heartProfile(profile: Profile, history: Workout[]): HeartProfile
     .map((w) => w.estimate?.maxBpm)
     .filter(validBpm)
     .slice(0, 3);
+  const rest =
+    still.length >= STILL_RESTS_FOR_MEDIAN
+      ? { rest: median(still), restSource: 'parado' as const }
+      : lowest
+        ? { rest: restOf(lowest), restSource: lowest.restSource ?? ('andando' as const) }
+        : { rest: null };
   return {
-    rest: lowest ? restOf(lowest) : null,
-    ...(lowest && { restSource: lowest.restSource ?? 'andando' }),
+    ...rest,
     max: predicted.length ? median(predicted) : foxMax(profile.age),
     maxSource: predicted.length ? 'IA' : 'idade',
   };
