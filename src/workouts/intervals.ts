@@ -8,7 +8,13 @@
 // do bloco já fechado e antes de a pessoa voltar ao esforço.
 
 import type { TreadmillSample } from '@/treadmill/types';
-import { correctedStage, MAX_RAISE_METS, raiseMargin, RELIEF_SETTLE_SECONDS, type Correction } from './adaptive';
+import {
+  correctedStage,
+  MAX_RAISE_METS,
+  raiseMargin,
+  RELIEF_SETTLE_SECONDS,
+  type Correction,
+} from './adaptive';
 import {
   median,
   metabolicCost,
@@ -94,14 +100,15 @@ export function blockEnd(samples: TreadmillSample[], until: number, stage: Stage
  * entre eles explica pela reta de bpm por MET. Sem nenhum par, 2 bpm. Nunca
  * negativo: na mesma carga a FC não cai de um tiro para o outro, e um acúmulo
  * negativo (ruído da correção) só serviria para subir a carga. Um par em que
- * um bloco foi de caminhada e o outro de corrida (pela velocidade alvo) não
+ * um bloco terminou andando e o outro correndo (pela velocidade medida no fim
+ * dele: quem não seguiu um corte e continuou correndo conta como correndo) não
  * entra: a diferença de METs entre as duas equações não diz o esforço real
  * (para quem corre devagar a corrida custa menos do que a equação diz), e
  * viraria um acúmulo falso de até 15 bpm.
  */
 export function carryBpm(plan: Plan, ends: BlockEnd[], rest: number | null) {
   const efforts = effortIndexes(plan);
-  const running = (e: BlockEnd) => plan.stages[e.index].speed >= RUN_FROM_KMH;
+  const running = (e: BlockEnd) => e.speed >= RUN_FROM_KMH;
   const diffs: number[] = [];
   for (let k = 1; k < ends.length; k++) {
     const [a, b] = [ends[k - 1], ends[k]];
@@ -172,12 +179,18 @@ export type NextBlock = {
  * herdada pelo próximo bloco não é somada de novo.
  *
  * A carga decidida vale para o próximo bloco quando custa menos que a dele (e
- * para os seguintes que custam mais, como toda redução). Acima da dele, ela
- * vale só para o próximo, como todo aumento, e só quando a previsão pediu
- * aumento ou, num "manter", quando o bloco que acabou não teve leitura acima
- * do teto, corte da trava nem tempo fora da lona: a carga em que ele terminou
- * no alvo passa ao seguinte. Um corte nunca sobe o próximo bloco, mesmo
- * partindo de uma carga de fim acima do plano. Um bloco de menos de 1 min não decide
+ * para os seguintes que custam mais, como toda redução), mas um próximo bloco
+ * de corrida não desce abaixo do piso da corrida (6 km/h plano): a troca para
+ * a caminhada só vale dentro do bloco em que é feita. Depois de um bloco que
+ * terminou andando por causa dessa troca, a decisão não reduz de novo: o
+ * próximo já começa no piso da corrida. Acima da carga dele, ela vale só para
+ * o próximo, como todo aumento, até 1 MET acima da carga planejada dele, e só
+ * quando a previsão pediu aumento ou, num "manter", com as mesmas condições do
+ * aumento (nada acima do teto no bloco nem no começo da recuperação, pela
+ * cinta ou pelo BPM do momento; nenhum corte da trava na sessão; ninguém fora
+ * da lona): a carga em que ele terminou no alvo passa ao seguinte. Um corte
+ * nunca sobe o próximo bloco, mesmo partindo de uma carga de fim acima do
+ * plano. Um bloco de menos de 1 min não decide
  * nada: nos últimos 20 s dele a lona ainda pode estar acelerando, e a
  * referência ficaria abaixo do que a pessoa fez.
  */
@@ -199,18 +212,24 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
     (c) => c.stage === index - 1 && c.by !== 'bloco' && eased(c) && c.second >= since,
   );
   const trava = input.changes.some((c) => c.by === 'trava');
-  // O bloco que acabou foi limpo: sem leitura acima do teto, sem corte da trava
-  // nele e sem tempo fora da lona. Só assim a carga do fim dele pode passar ao
-  // próximo num "manter".
-  const clean =
-    !block?.zone[2] &&
-    !block?.offBeltMs &&
-    !input.offBelt &&
-    !input.changes.some((c) => c.by === 'trava' && c.stage === index - 1);
-  // Num tiro a FC ainda sobe depois do fim: uma leitura acima do teto nos
-  // primeiros segundos da recuperação também diz que a carga não pode subir.
+  // Acima do teto: uma leitura da cinta ou o BPM do momento, o que a trava usa
+  // (com os RR ele pode passar do teto sem nenhuma leitura da cinta passar).
+  const above = (l: StageLog | undefined) => !!l && (l.zone[2] > 0 || (l.liveTop ?? 0) > zone.high);
+  // Num tiro a FC ainda sobe depois do fim: acima do teto nos primeiros
+  // segundos da recuperação também diz que a carga não pode subir.
   const recovery = input.log[index];
-  const raisable = clean && !settling && !trava && !recovery?.zone[2];
+  // As condições de todo caminho que sobe a carga do próximo bloco: o aumento e
+  // o "manter" que passa a carga do fim adiante.
+  const raisable =
+    !above(block) && !above(recovery) && !block?.offBeltMs && !input.offBelt && !settling && !trava;
+  // O tiro terminou andando porque um alívio nele tirou a pessoa da corrida: o
+  // próximo já começa no piso da corrida (a troca vale só para a etapa em que
+  // foi feita), e a decisão não reduz de novo a partir da caminhada.
+  const walkedOff =
+    end.speed < RUN_FROM_KMH &&
+    input.changes.some(
+      (c) => c.stage === index - 1 && c.by !== 'bloco' && !!c.from && !!c.to && c.from[0] >= RUN_FROM_KMH && c.to[0] < RUN_FROM_KMH,
+    );
   let kind: Correction | null = null;
   let mets = 0;
   if (settling) {
@@ -233,17 +252,30 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
     energyKcal: null,
     distanceM: null,
   };
-  const decided = kind ? correctedStage(reference, kind, mets, at, kind === 'subir') : reference;
+  let decided = kind ? correctedStage(reference, kind, mets, at, kind === 'subir') : reference;
+  // Um próximo bloco de corrida não herda caminhada: o corte mais fundo que ele
+  // recebe é o piso da corrida, 6 km/h plano. O que faltar fica para a trava,
+  // dentro dele.
+  if (current.speed >= RUN_FROM_KMH && decided.speed < RUN_FROM_KMH)
+    decided = { ...decided, speed: RUN_FROM_KMH, incline: 0 };
+  // Para cima, no máximo 1 MET acima da carga planejada do próximo bloco, por
+  // qualquer caminho: quem terminou a 7,6 km/h num alvo de 6,0 não leva o
+  // próximo tiro a 7,6.
+  if (cost(decided) > cost(current) + NEXT_BLOCK_MAX_METS) {
+    const from = { ...at, speedKmh: current.speed, inclinationPercent: current.incline };
+    decided = correctedStage(current, 'subir', NEXT_BLOCK_MAX_METS, from, true);
+  }
   const verdict = kind === 'aliviar' ? 'reduzir' : kind === 'subir' ? 'aumentar' : 'manter';
   let stages: number[] = [];
-  if (cost(decided) < cost(current) - EPSILON)
-    stages = effortIndexes(plan).filter((i) => i >= next && cost(plan.stages[i]) > cost(decided) + EPSILON);
+  if (cost(decided) < cost(current) - EPSILON) {
+    if (!walkedOff)
+      stages = effortIndexes(plan).filter((i) => i >= next && cost(plan.stages[i]) > cost(decided) + EPSILON);
+  }
   // Acima da carga do próximo bloco, ela só vai a ele quando a previsão pediu
-  // aumento ou, num "manter", quando o bloco que acabou foi limpo: sem isso, um
+  // aumento ou, num "manter", com as mesmas condições do aumento: sem isso, um
   // aumento do bloco anterior que deu certo (terminou no alvo) voltaria à carga
   // do plano sem aviso no bloco seguinte.
-  else if (cost(decided) > cost(current) + EPSILON && (kind === 'subir' || (verdict === 'manter' && clean)))
-    stages = [next];
+  else if (cost(decided) > cost(current) + EPSILON && raisable && kind !== 'aliviar') stages = [next];
   const to = stages.length ? { ...current, speed: decided.speed, incline: decided.incline } : current;
   return { index: next, predictedBpm: predicted, carryBpm: carry, verdict, from: current, to, stages };
 }

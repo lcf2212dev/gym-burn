@@ -12,6 +12,7 @@ import {
   pulseFeatures,
   pulseWindow,
   raiseRoom,
+  runFloor,
   RELIEF_SETTLE_SECONDS,
   SHORT_BLOCK_SECONDS,
   STEADY_SECONDS,
@@ -57,6 +58,7 @@ import {
   median,
   metabolicCost,
   newWorkout,
+  RUN_FROM_KMH,
   REST_WINDOW_SECONDS,
   validBpm,
   type Change,
@@ -152,12 +154,25 @@ const CHANGE_COOLDOWN = 60_000;
 /** Idade máxima da velocidade e da inclinação medidas para valerem num ajuste. */
 const TELEMETRY_MAX_AGE = 5000;
 /**
- * Depois de um alívio a trava espera 30 s: a pessoa ainda está mexendo no
- * painel, e a FC sobe mais um pouco antes de responder. É também por quanto
+ * Depois de um alívio a trava espera 30 s para reabrir o aviso de um corte que
+ * não chegou ao painel (para cortar de novo, 1 minuto: `RELIEF_RESPONSE_WAIT`):
+ * a pessoa ainda está mexendo no painel, e a FC sobe mais um pouco antes de
+ * responder. É também por quanto
  * ela segura o aviso de carga já no mínimo, em vez de refazer a conta a cada
  * segundo, e o intervalo entre dois avisos de um corte que não chegou ao painel.
  */
 const GUARD_WAIT = 30_000;
+/**
+ * Depois de um alívio feito com o BPM acima do teto, a trava só corta de novo
+ * passado 1 minuto: a FC segue subindo uns 25 s depois do corte (o atraso
+ * normal do coração), e dois cortes em 30 s derrubavam a carga muito abaixo do
+ * alvo. A regra local tem a mesma espera (`CHANGE_COOLDOWN`), e as duas não se
+ * somam: as duas contam do último ajuste. O aviso de um corte que não chegou
+ * ao painel continua a cada 30 s.
+ */
+const RELIEF_RESPONSE_WAIT = 60_000;
+/** O nome, no registro, da carga do fim de um bloco passada ao seguinte num "manter". */
+const KEEP_LOAD = 'manter carga';
 /**
  * No começo de um bloco a lona ainda está acelerando e o BPM é o da etapa
  * anterior: até a esteira chegar aos alvos, a trava espera os primeiros 30 s.
@@ -691,6 +706,10 @@ export class WorkoutSession {
           (_, i) => next.log?.[i] ?? emptyLog(),
         );
         log[index] = logStage(log[index], sample, this.previous, zone, cue ? cue.into : elapsed, offBelt);
+        // O BPM do momento mais alto da etapa: com os RR ele passa do teto antes
+        // das leituras da cinta, e a decisão do bloco seguinte precisa saber disso.
+        const live = w.plan && moving && !offBelt ? livePulse(s.samples, sample.at) : null;
+        if (live && live.bpm > (log[index].liveTop ?? 0)) log[index] = { ...log[index], liveTop: live.bpm };
         next = { ...next, log };
       }
       const drop = trackCadence(this.cadence, gaitInput);
@@ -804,10 +823,14 @@ export class WorkoutSession {
     // e aqui a carga é de um bloco que ainda vai começar.
     const elapsed = Math.floor(active.totals.movingMs / 1000);
     const { from, to } = decision;
+    // O "manter" que leva ao próximo bloco a carga em que o anterior terminou no
+    // alvo tem nome próprio: não é aumento nem redução, e não conta como nenhum
+    // dos dois na avaliação.
+    const carried = decision.verdict === 'manter' && metabolicCost(to.speed, to.incline) > metabolicCost(from.speed, from.incline);
     const change: Change = {
       second: elapsed,
       stage: decision.index,
-      decision: changeLabel(from, to),
+      decision: carried ? KEEP_LOAD : changeLabel(from, to),
       bpm: this.ends[this.ends.length - 1].bpm,
       from: [from.speed, from.incline],
       to: [to.speed, to.incline],
@@ -1012,10 +1035,15 @@ export class WorkoutSession {
     if (Math.abs((sample.inclinationPercent ?? 0) - stage.incline) > INCLINE_TOLERANCE_PERCENT)
       parts.push(formatDecimal(stage.incline, Number.isInteger(stage.incline) ? 0 : 1) + '%');
     const target = parts.length ? parts.join(' e ') : formatDecimal(stage.speed, 1) + ' km/h';
+    // "Reduza" só quando os dois descem; se um deles sobe (a rampa de 0 para 1%,
+    // por exemplo), o painel diz "ajuste".
+    const up =
+      stage.speed > (sample.speedKmh ?? 0) + SPEED_TOLERANCE_KMH ||
+      stage.incline > (sample.inclinationPercent ?? 0) + INCLINE_TOLERANCE_PERCENT;
     // O aviso reabre como num ajuste novo: os alvos em vigor passam a valer de agora.
     const guidance = advanceGuidance({ ...g, adjusted: false, targetsSince: sample.at }, cue, sample, sample.at);
     this.lastRealert = sample.at;
-    this.update({ guidance, minimizedCue: null, coach: head + ' · reduza para ' + target });
+    this.update({ guidance, minimizedCue: null, coach: head + (up ? ' · ajuste para ' : ' · reduza para ') + target });
     return true;
   }
 
@@ -1090,8 +1118,9 @@ export class WorkoutSession {
    * chegou ao painel, o aviso reaberto. Nas etapas leves a trava não age: nelas
    * o BPM vem caindo sozinho do bloco anterior. No começo do bloco ela espera a
    * esteira chegar aos alvos, por até 30 s. Depois de um alívio de excesso
-   * nesta etapa, de quem for, ela espera 30 s, e até 3 minutos depois dele só
-   * corta de novo com 3 bpm ou mais de excesso e o BPM sem cair. O corte parte
+   * nesta etapa, de quem for, ela espera 30 s para reabrir o aviso de um corte
+   * que não chegou ao painel e 1 minuto para cortar de novo, e até 3 minutos
+   * depois dele só corta com 3 bpm ou mais de excesso e o BPM sem cair. O corte parte
    * da carga medida, quando ela está abaixo do alvo, leva o BPM a 3 abaixo do
    * teto e tira também a subida dos últimos 30 s (até 10 bpm), que ainda vai
    * chegar. Devolve `true` quando agiu.
@@ -1115,6 +1144,10 @@ export class WorkoutSession {
     if (sinceRelief < GUARD_WAIT) return false;
     const text = 'Acima do teto · ' + live.bpm + ' BPM';
     if (this.realert(index, g, sample, text)) return true;
+    // Com o corte no painel, o coração ainda sobe uns 25 s antes de responder:
+    // um corte novo antes de 1 minuto somaria os dois sem a FC ter respondido ao
+    // primeiro.
+    if (sinceRelief < RELIEF_RESPONSE_WAIT) return false;
     const settling =
       sinceRelief < RELIEF_SETTLE_SECONDS * 1000 &&
       (live.bpm - zone.high < URGENT_EXCESS_BPM || live.rise <= FALLING_RISE_BPM);
@@ -1403,12 +1436,26 @@ export class WorkoutSession {
     // aumento vale só para a etapa em curso: ele sai do BPM deste bloco, e num
     // treino de tiros a FC parte de mais alto a cada tiro.
     const relief = kind === 'aliviar';
-    const cost = metabolicCost(revised.speed, revised.incline);
+    // Um alívio que tirou a pessoa da corrida vale só para este bloco: os
+    // seguintes herdam no máximo o piso da corrida, 6 km/h com a menor rampa de
+    // corrida que este bloco já teve. Sem isso um corte a 6 km/h derrubava o
+    // resto do treino de tiros para a caminhada, e nada a trazia de volta.
+    const history = (active.changes ?? []).filter((c) => c.stage === index && c.by !== 'bloco');
+    const floor =
+      relief && revised.speed < RUN_FROM_KMH
+        ? runFloor([
+            stage,
+            ...history.flatMap((c) => [c.from, c.to].flatMap((l) => (l ? [{ speed: l[0], incline: l[1] }] : []))),
+          ])
+        : null;
+    const heir = floor ?? revised;
+    const cost = metabolicCost(heir.speed, heir.incline);
     const stages = plan.stages.map((s, i) =>
-      i === index ||
-      (relief && i > index && !stage.measure && !s.measure && metabolicCost(s.speed, s.incline) > cost)
+      i === index
         ? { ...s, speed: revised.speed, incline: revised.incline }
-        : s,
+        : relief && i > index && !stage.measure && !s.measure && metabolicCost(s.speed, s.incline) > cost
+          ? { ...s, speed: heir.speed, incline: heir.incline }
+          : s,
     );
     const change: Change = {
       second: elapsed,

@@ -454,10 +454,13 @@ const cheapest = (points: Point[]) =>
  * Ao aliviar, o custo cai `mets`, ou 0,03 MET a menos que isso, com o corte
  * que chegar mais perto, e nem a velocidade nem a rampa sobem, sem exceção. A
  * caminhada combina rampa e velocidade (veja `walkSteps`). A corrida perde
- * velocidade até 6 km/h e, se ainda não bastar, passa a andar a 5,2 km/h com a
- * mesma rampa (a do alvo, ou a medida, se menor). Essa troca já é o alívio: a
- * carga não desce mais pela caminhada no mesmo ajuste, porque a queda real é
- * grande e a equação de corrida superestima o custo da corrida lenta.
+ * velocidade até 6 km/h, depois rampa, de meio em meio ponto até 0, e, se nem
+ * 6 km/h plano bastar, passa a andar a 5,2 km/h com a rampa de antes (a do
+ * alvo, ou a medida, se menor). Essa troca já é o alívio: a carga não desce
+ * mais pela caminhada no mesmo ajuste, porque a queda real é grande e a
+ * equação de corrida superestima o custo da corrida lenta. Ela vale só para a
+ * etapa em curso: os blocos seguintes herdam no máximo o piso da corrida
+ * (veja `commit`, em `session.ts`).
  *
  * Ao subir, o custo cresce no máximo `mets`, e nunca mais que 1 MET por
  * ajuste. A caminhada ganha velocidade até o teto e daí rampa; correndo, só a
@@ -492,13 +495,17 @@ export function correctedStage(
       // fica 0,0005 MET aquém em 6 km/h e a carga pula para a caminhada.
       const over = () => acsm(speed, incline, true) > target + RELIEF_TOLERANCE_METS;
       while (speed > RUN_FROM_KMH && over()) speed = round1(speed - 0.1);
+      // A 6 km/h ainda há um degrau antes de sair da corrida: a rampa, de meio
+      // em meio ponto até 0. Sem ele, 1 bpm pedido a 6 km/h e 1% já mandava a
+      // pessoa andar.
+      while (incline > 0 && over()) incline = Math.max(0, incline - 0.5);
       if (over()) {
-        // Nem o começo da corrida basta: a pessoa passa a andar a 5,2 km/h com
-        // a rampa que já tinha, e o alívio para aí. Pela equação, 5,2 km/h com
-        // 7,5% custa menos que correr a 6 km/h, mas nos dados de quem corre
-        // devagar é o contrário (a equação de corrida superestima a corrida
-        // lenta): um alívio nunca sobe a velocidade nem a rampa. A queda real
-        // dessa troca é grande; o que faltar vem na revisão seguinte.
+        // Nem o começo da corrida, plano, basta: a pessoa passa a andar a 5,2
+        // km/h com a rampa que já tinha, e o alívio para aí. Pela equação, 5,2
+        // km/h com 7,5% custa menos que correr a 6 km/h, mas nos dados de quem
+        // corre devagar é o contrário (a equação de corrida superestima a
+        // corrida lenta): um alívio nunca sobe a velocidade nem a rampa. A
+        // queda real dessa troca é grande; o que faltar vem na revisão seguinte.
         speed = WALK_TOP_KMH;
         incline = ramp;
       }
@@ -532,6 +539,22 @@ export function correctedStage(
   speed = Math.min(MAX_SPEED_KMH, Math.max(1, speed));
   incline = Math.min(MAX_INCLINE_PERCENT, Math.max(0, incline));
   return speed === stage.speed && incline === stage.incline ? stage : { ...stage, speed, incline };
+}
+
+type Load2 = { speed: number; incline: number };
+
+/**
+ * O piso da corrida: 6 km/h com a menor das rampas de corrida dadas (no máximo
+ * 2%). A troca de corrida para caminhada de um alívio vale só para a etapa em
+ * curso; os blocos de esforço seguintes herdam no máximo este piso, nunca a
+ * caminhada, para um corte no fim de um tiro não derrubar o resto do treino.
+ * `null` sem rampa de corrida nenhuma (o bloco nunca foi de corrida).
+ */
+export function runFloor(loads: Load2[]): Load2 | null {
+  const inclines = loads.filter((l) => l.speed >= RUN_FROM_KMH).map((l) => l.incline);
+  return inclines.length
+    ? { speed: RUN_FROM_KMH, incline: Math.min(RUN_MAX_INCLINE_PERCENT, ...inclines) }
+    : null;
 }
 
 /** O nome do ajuste que levou a etapa de `before` a `after`, como fica no registro do treino. */

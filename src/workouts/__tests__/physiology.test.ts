@@ -264,6 +264,14 @@ it('um pico seguido de outro bloco concluído, ou de 4 min no mesmo bloco sem al
   expect(maxFloor([capped])).toBe(189);
   capped.log![5] = { ...capped.log![5], top: 192 };
   expect(maxFloor([capped])).toBe(192);
+  // Até 10 bpm além desse limite (199 aos 41 anos) o pico vale; acima disso é artefato e fica de fora,
+  // senão viraria piso da FC máxima para sempre.
+  capped.log![5] = { ...capped.log![5], top: 199 };
+  expect(maxFloor([capped])).toBe(199);
+  // Com o 205 de fora, sobra o 176 do 4º tiro, sem tiro depois dele: sem folga.
+  capped.log![5] = { ...capped.log![5], top: 205 };
+  expect(maxFloor([capped])).toBe(176);
+  expect(maxFloor([{ ...capped, log: [emptyLog(), { ...emptyLog(), top: 205 }] }])).toBeNull();
 });
 
 it('o alvo dos blocos de esforço é o alto da faixa; em recuperação, a faixa inteira', () => {

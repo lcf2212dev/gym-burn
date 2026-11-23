@@ -658,14 +658,24 @@ it('aliviar uma corrida nunca deixa o alvo entre 5,2 e 6 km/h, nem sobe a veloci
   expect(ease(stageAt(7, 1), 0.99)).toEqual(stageAt(6, 1));
   // 6,1 km/h com um corte de 0,1 MET: 6 km/h fica 0,0005 MET aquém, dentro da folga, e a pessoa segue correndo.
   expect(ease(stageAt(6.1, 1), 0.1)).toEqual(stageAt(6, 1));
-  // Passou disso, a pessoa passa a andar a 5,2 km/h com a mesma rampa, e o alívio para aí, por maior
-  // que seja o pedido: pela equação 5,2 km/h com 7,5% custa menos que correr a 6, mas não para quem
-  // corre devagar, e a queda real da troca é grande. O resto vem na revisão seguinte.
-  for (const mets of [0.1, 0.3, 1, 3]) expect(ease(stageAt(6, 1), mets)).toEqual(stageAt(5.2, 1));
+  // A 6 km/h ainda há um degrau antes de sair da corrida: a rampa, de meio em meio ponto até 0. Um corte
+  // pequeno (1 bpm pedido pela IA ou pela regra local) não manda mais a pessoa andar.
+  expect(ease(stageAt(6, 1), 0.1)).toEqual(stageAt(6, 0.5));
+  expect(ease(stageAt(6, 1), 0.2)).toEqual(stageAt(6, 0));
+  // Só quando nem 6 km/h plano basta (0,26 MET a menos que 6 km/h com 1%) a pessoa passa a andar a 5,2
+  // km/h com a rampa de antes, e o alívio para aí, por maior que seja o pedido: pela equação 5,2 km/h
+  // com 7,5% custa menos que correr a 6, mas não para quem corre devagar, e a queda real da troca é
+  // grande. O resto vem na revisão seguinte.
+  for (const mets of [0.3, 1, 3]) expect(ease(stageAt(6, 1), mets)).toEqual(stageAt(5.2, 1));
+  // A 6 km/h plano, qualquer corte é a troca para a caminhada, plana.
+  for (const mets of [0.1, 0.5, 2]) expect(ease(stageAt(6, 0), mets)).toEqual(stageAt(5.2, 0));
   expect(ease(stageAt(7, 1), 1.4)).toEqual(stageAt(5.2, 1));
-  // Um alvo antigo de corrida com 3% de rampa: andando ela fica nos 3%; com a esteira medindo menos, na medida.
-  expect(ease(stageAt(6.6, 3), 1)).toEqual(stageAt(5.2, 3));
-  expect(correctedStage(stageAt(6.6, 3), 'aliviar', 1, sample(0, 6.6, 2))).toEqual(stageAt(5.2, 2));
+  // Um alvo antigo de corrida com 3% de rampa: a corrida volta a 2% e desce a 6 km/h; só um corte grande
+  // a tira da corrida, e andando ela fica nos 3% (com a esteira medindo menos, na medida).
+  expect(ease(stageAt(6.6, 3), 1)).toEqual(stageAt(6, 1.5));
+  expect(correctedStage(stageAt(6.6, 3), 'aliviar', 1, sample(0, 6.6, 2))).toEqual(stageAt(6, 0.5));
+  expect(ease(stageAt(6.6, 3), 3)).toEqual(stageAt(5.2, 3));
+  expect(correctedStage(stageAt(6.6, 3), 'aliviar', 3, sample(0, 6.6, 2))).toEqual(stageAt(5.2, 2));
   // Já andando, a revisão seguinte desce pela caminhada, como sempre.
   expect(ease(stageAt(5.2, 1), 0.3)).toEqual(stageAt(5.1, 0.5));
   // Quem já baixou a esteira para andar num bloco de corrida está caminhando: a conta parte da

@@ -393,7 +393,7 @@ it('nas etapas leves a trava não age, e segundos acima do teto não mudam a med
   expect(changes(session)).toEqual([expect.objectContaining({ stage: 0, bpm: 123, by: 'app' })]);
 });
 
-it('depois de um alívio a trava espera 30 s, e até 3 minutos só age com 3 bpm de excesso e o BPM sem cair', async () => {
+it('depois de um alívio a trava espera 1 minuto, e até 3 minutos só age com 3 bpm de excesso e o BPM sem cair', async () => {
   const { session, strap } = setup();
   session.start(continuous());
   await strap(120, 4, 80);
@@ -411,9 +411,13 @@ it('depois de um alívio a trava espera 30 s, e até 3 minutos só age com 3 bpm
   // 4 bpm acima, mas caindo em relação a 30 s atrás (127): também espera.
   await strap(5, speed, 124, incline);
   expect(changes(session)).toHaveLength(1);
-  // Quando o BPM de 30 s atrás já é o 121, os mesmos 124 são subida: a trava age de novo.
+  // Quando o BPM de 30 s atrás já é o 121, os mesmos 124 são subida, mas o coração ainda está
+  // respondendo ao corte: a trava só corta de novo 1 minuto depois dele.
   await strap(15, speed, 124, incline);
+  expect(changes(session)).toHaveLength(1);
+  await strap(6, speed, 124, incline);
   expect(changes(session)).toHaveLength(2);
+  expect(changes(session)![1].second - changes(session)![0].second).toBe(60);
   expect(changes(session)![1]).toMatchObject({ bpm: 124, by: 'trava', from: to });
   expect(coach(session)).toBe('Acima do teto · 124 BPM · carga reduzida');
 });
@@ -748,7 +752,8 @@ it('quando a esteira difere do alvo na velocidade e na rampa, o aviso reaberto d
   await strap(240 - firstOver - 3, 6.6, (t) => shot(t + firstOver + 3), 0, alerts.each);
   // O alvo pede 6 km/h e 1%, e a esteira está a 6,6 km/h e 0%: o painel não esconde a rampa.
   expect(alerts.seen.length).toBeGreaterThan(0);
-  expect(alerts.seen.at(-1)!.coach).toMatch(/· reduza para 6,0 km\/h e 1%$/);
+  // A rampa precisa subir de 0 para 1%: o painel diz "ajuste", e não "reduza".
+  expect(alerts.seen.at(-1)!.coach).toMatch(/· ajuste para 6,0 km\/h e 1%$/);
 });
 
 it('o tiro de 22/11 a 6,5 km/h num alvo de 6,6: abaixo do alvo a trava também age, a partir da carga medida', async () => {
@@ -901,12 +906,12 @@ it('quem ignora o corte recebe o aviso de novo em cada tiro, e os tiros seguinte
   const target = all[0].to!;
   // Na 1ª recuperação o fim do tiro ainda responde ao corte, e a decisão do próximo bloco, que parte
   // da carga feita (6,6 km/h) e tira só até meio MET, não fica abaixo da que ele já herdou. Na 2ª, com
-  // dois tiros a 6,6 km/h terminando em 179, a previsão é 179: o corte de 0,8 MET não cabe na corrida,
-  // e os dois tiros que faltam passam a andar a 5,2 km/h com a mesma rampa.
+  // dois tiros a 6,6 km/h terminando em 179, a previsão é 179: o corte de 0,8 MET não cabe na corrida, e
+  // os dois tiros que faltam ficam no piso dela, 6 km/h plano: um tiro de corrida nunca herda caminhada.
   const blocks = all.filter((c) => c.by === 'bloco');
-  expect(blocks).toEqual([expect.objectContaining({ stage: 5, bpm: 179, from: target, decision: 'reduzir velocidade' })]);
+  expect(blocks).toEqual([expect.objectContaining({ stage: 5, bpm: 179, from: target, decision: 'reduzir inclinação' })]);
   const eased = blocks[0].to!;
-  expect(eased).toEqual([5.2, 1]);
+  expect(eased).toEqual([6, 0]);
   expect(loads(session.snapshot().active?.plan)).toEqual([
     [4, 0], target, [4, 0], target, [4, 0], eased, [4, 0], eased, [4, 0], [4, 0],
   ]);
@@ -919,13 +924,17 @@ it('quem ignora o corte recebe o aviso de novo em cada tiro, e os tiros seguinte
 
 it('o tiro que termina 2 acima do teto depois de um corte da trava reduz o seguinte, sem somar de novo a herança', async () => {
   const t = setup(vo2Profile);
-  t.session.start(vo2(3));
+  // Tiros a 7,5 km/h: o corte da trava fica na corrida.
+  const plan = vo2(3);
+  plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 7.5 }));
+  t.session.start(plan);
   // O BPM sobe até 172 e fica nele até o fim do tiro, mesmo com o corte, que a pessoa segue no painel.
   const bpm = (stage: Stage, into: number) =>
     stage.name === 'Aquecimento' ? 100 : stage.measure ? 130 : Math.min(172, 140 + Math.floor(into / 4));
   await follow(t, 120 + 240 + 15, bpm);
   const [cut] = changes(t.session)!;
   expect(changes(t.session)).toEqual([expect.objectContaining({ stage: 1, by: 'trava' })]);
+  expect(cut.to![0]).toBeGreaterThanOrEqual(6);
   // A trava não corta de novo com 2 bpm de excesso: o primeiro corte ainda faz efeito.
   expect(loads(t.session.snapshot().active?.plan)![3]).toEqual(cut.to);
   // Aos 15 s da recuperação, o fim de 172 ainda responde ao corte feito a 2 min do fim do tiro: sai só o
@@ -977,9 +986,40 @@ it('a decisão do próximo tiro sobe a carga só dele quando o anterior termina 
     stage.name === 'Aquecimento' ? 100 : stage.measure ? 130 : stage.name.endsWith('1/3') && into < 8 ? 175 : 150;
   await follow(cut, 120 + 240 + 180 + 240 + 20, after);
   const all = changes(cut.session)!;
-  expect(all).toEqual([expect.objectContaining({ stage: 1, by: 'trava' })]);
-  expect(loads(cut.session.snapshot().active?.plan)![5]).toEqual(all[0].to);
+  expect(all).toEqual([expect.objectContaining({ stage: 1, by: 'trava', to: [5.2, 1] })]);
+  // O corte levou o 1º tiro a andar; os seguintes herdam só o piso da corrida (6 km/h, com a rampa de 1%).
+  expect(loads(cut.session.snapshot().active?.plan)![3]).toEqual([6, 1]);
+  expect(loads(cut.session.snapshot().active?.plan)![5]).toEqual([6, 1]);
   expect(cut.session.snapshot().nextBlock).toMatchObject({ index: 5, verdict: 'manter', changed: false });
+});
+
+it('um corte a 6 km/h não derruba o resto do treino de tiros para a caminhada', async () => {
+  const t = setup(vo2Profile);
+  // VO₂máx a 6,0 km/h e 1%. No 1º tiro a FC passa de 170 aos 98 s e ainda sobe uns 25 s (o atraso normal
+  // do coração) até 176, e só então cai; nos outros tiros ela fica em 165.
+  const plan = vo2(4);
+  plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 6 }));
+  t.session.start(plan);
+  const first = (into: number) =>
+    into < 100 ? Math.round(150 + (21 * into) / 100) : into < 125 ? Math.round(171 + (into - 100) / 5) : Math.max(160, Math.round(176 - (into - 125) / 3));
+  const bpm = (stage: Stage, into: number, index: number) =>
+    stage.name === 'Aquecimento' ? 100 : stage.measure ? 125 : index === 1 ? first(into) : 165;
+  await follow(t, 120 + 240 + 20, bpm);
+  const over = 120 + Array.from({ length: 240 }, (_, s) => s).find((s) => first(s) > 170)!;
+  // No máximo um corte no primeiro minuto acima do teto: o segundo, 30 s depois com 176, somaria os dois
+  // sem o coração ter respondido ao primeiro. Este a FC não pede mais: ela já cai antes de 1 minuto.
+  const cuts = changes(t.session)!.filter((c) => c.by !== 'bloco');
+  expect(cuts.filter((c) => c.second - over <= 60)).toHaveLength(1);
+  expect(cuts).toEqual([expect.objectContaining({ stage: 1, by: 'trava', from: [6, 1], to: [5.2, 1] })]);
+  // O 1º tiro termina andando; o 2º começa correndo a 6,0 km/h, e nenhum tiro herda a caminhada.
+  const efforts = (p: Plan) => p.stages.flatMap((s, i) => (s.measure ? [] : [[i, s.speed, s.incline]]));
+  expect(efforts(t.session.snapshot().active!.plan!)).toEqual([[1, 5.2, 1], [3, 6, 1], [5, 6, 1], [7, 6, 1]]);
+  // Na recuperação a decisão não reduz de novo a partir da caminhada; o veredito e a previsão aparecem.
+  expect(changes(t.session)!.filter((c) => c.by === 'bloco')).toEqual([]);
+  expect(t.session.snapshot().nextBlock).toMatchObject({ index: 3, speed: 6, incline: 1, changed: false });
+  await follow(t, 170, bpm);
+  expect(t.session.snapshot().guidance?.index).toBe(3);
+  expect(t.snapshot.samples.at(-1)!.speedKmh).toBe(6);
 });
 
 it('um aumento que deu certo segue nos tiros seguintes: sobe, mantém, mantém, sem voltar à carga do plano', async () => {
@@ -1002,8 +1042,9 @@ it('um aumento que deu certo segue nos tiros seguintes: sobe, mantém, mantém, 
   const ahead = changes(t.session)!;
   expect(ahead).toEqual([
     expect.objectContaining({ stage: 3, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 161 }),
-    expect.objectContaining({ stage: 5, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 167 }),
-    expect.objectContaining({ stage: 7, by: 'bloco', decision: 'aumentar velocidade', from: [6, 1], to: [6.4, 1], bpm: 167 }),
+    // A carga do fim passada adiante tem nome próprio: não conta como aumento na avaliação.
+    expect.objectContaining({ stage: 5, by: 'bloco', decision: 'manter carga', from: [6, 1], to: [6.4, 1], bpm: 167 }),
+    expect.objectContaining({ stage: 7, by: 'bloco', decision: 'manter carga', from: [6, 1], to: [6.4, 1], bpm: 167 }),
   ]);
   expect(loads(t.session.snapshot().active?.plan)).toEqual([
     [4, 0], [6, 1], [4, 0], [6.4, 1], [4, 0], [6.4, 1], [4, 0], [6.4, 1], [4, 0], [4, 0],

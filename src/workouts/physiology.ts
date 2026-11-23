@@ -123,15 +123,25 @@ function heldPeaks(w: Workout): number[] {
  * pessoa seguiu depois do pico (veja `heldPeaks`), ela não estava no máximo: o
  * piso fica 5 bpm acima dele, sem passar do limite alto das estimativas pela
  * idade (`maxBounds`, a maior delas + 10). A folga é uma suposição; o pico
- * observado em si é medida, e vale como piso mesmo acima desse limite.
+ * observado em si é medida, e vale como piso mesmo acima desse limite, até 10
+ * bpm além dele (199 aos 41 anos). Mais alto que isso é artefato (10 leituras
+ * seguidas a 205 de uma cinta mal encostada, por exemplo): o pico é
+ * descartado, senão viraria piso da FC máxima para sempre.
  */
 export function maxFloor(sessions: Workout[]) {
-  const held = sessions.flatMap((w) =>
-    heldPeaks(w).map((top) => Math.min(top + SUSTAINED_MARGIN_BPM, maxBounds(w.profile.age, null).high)),
-  );
-  const floor = Math.max(observedPeak(sessions) ?? 0, ...held);
+  const floors = sessions.flatMap((w) => {
+    const { high } = maxBounds(w.profile.age, null);
+    const plausible = (top: number) => top > 0 && top <= high + ARTIFACT_MARGIN_BPM;
+    const observed = (w.log ?? []).map((l) => l?.top ?? 0).filter(plausible);
+    const held = heldPeaks(w).filter(plausible).map((top) => Math.min(top + SUSTAINED_MARGIN_BPM, high));
+    return [...observed, ...held];
+  });
+  const floor = Math.max(0, ...floors);
   return floor || null;
 }
+
+/** Quanto um pico pode passar do limite alto das estimativas pela idade antes de ser tratado como artefato. */
+const ARTIFACT_MARGIN_BPM = 10;
 
 /**
  * Leitura de repouso do dia andando. A esteira só lê batimentos com a lona
