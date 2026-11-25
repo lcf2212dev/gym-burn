@@ -1,5 +1,6 @@
 import { advanceGuidance, cueKey, pendingAction, PULSE_READINGS, type Guidance } from '../guidance';
 import {
+  adoptedLoad,
   changeLabel,
   correctedStage,
   correction,
@@ -540,14 +541,15 @@ it('a correção anda pela escada de cargas, proporcional à distância, sem exi
   // 9 km/h tira 0,995 MET de um pedido de 1: dentro da folga de 0,03, como na caminhada.
   expect(fix(stageAt(10, 1), 'aliviar', 15)).toEqual(stageAt(9, 1));
   expect(fix(stageAt(10, 1), 'subir', 15)).toEqual(stageAt(11, 1));
-  // Quanto mais longe da faixa, maior o degrau: abaixo de 4,9 km/h a caminhada é plana.
+  // Quanto mais longe da faixa, maior o degrau: abaixo de 4,9 km/h a caminhada é plana, e o bloco
+  // não desce de 3 km/h (33 bpm pediriam 1,3 km/h).
   expect([8, 13, 33].map((bpm) => fix(stageAt(5, 1), 'aliviar', bpm))).toEqual([
     stageAt(4.8, 0),
     stageAt(4.1, 0),
-    stageAt(1.3, 0),
+    stageAt(3, 0),
   ]);
-  // O corte fica o mais perto possível do pedido: no máximo 0,03 MET aquém, e nunca um degrau além.
-  for (const bpm of [8, 13, 33]) {
+  // Acima do piso, o corte fica o mais perto possível do pedido: no máximo 0,03 MET aquém, e nunca um degrau além.
+  for (const bpm of [8, 13]) {
     const mets = bpm / 15;
     const after = fix(stageAt(5, 1), 'aliviar', bpm);
     const cut = metabolicCost(5, 1) - metabolicCost(after.speed, after.incline);
@@ -598,6 +600,61 @@ it('a correção anda pela escada de cargas, proporcional à distância, sem exi
   expect(correctedStage(walk, 'subir', NaN, sample(0, 5.2, 3))).toBe(walk);
 });
 
+it('o treino de 24/11: quem não seguiu o corte não leva outro por cima, e o bloco não desce de 3 km/h', () => {
+  // A 15 bpm por MET, cada pedido de 15 bpm tira 1 MET.
+  const ease = (stage: Stage, speedKmh: number, incline: number) =>
+    correctedStage(stage, 'aliviar', 1, sample(0, speedKmh, incline));
+  // O primeiro corte parte de 5,2 km/h e 2,5%, com a esteira nos alvos.
+  const first = ease(stageAt(5.2, 2.5), 5.2, 2.5);
+  expect(metabolicCost(5.2, 2.5) - metabolicCost(first.speed, first.incline)).toBeGreaterThanOrEqual(1 - 0.03);
+  // A pessoa não segue: a esteira continua a 5,2 km/h e 2,5%, ou sobe a rampa para 5%. Cada pedido
+  // seguinte parte da carga medida, e o alvo já é mais leve que ele: nada muda. Antes cada um partia
+  // do alvo já cortado, e em 24/11 o alvo desceu de 4,4 km/h plano para 2 e depois para 1 km/h.
+  for (const [speed, incline] of [[5.2, 2.5], [5.2, 5]]) {
+    let target = first;
+    for (let k = 0; k < 4; k++) target = ease(target, speed, incline);
+    expect(target).toBe(first);
+  }
+  // Os números de 24/11: alvo de 4,4 km/h plano, esteira a 5,2 km/h e 2,5%, 15 bpm a menos (0,8 MET).
+  const flat = stageAt(4.4, 0);
+  expect(correctedStage(flat, 'aliviar', 0.8, sample(0, 5.2, 2.5))).toBe(flat);
+  // Na rampa acima do alvo e na velocidade abaixo dele, mais leve que o alvo no todo: o corte sai da
+  // carga medida e não sobe nenhum dos dois.
+  const mixed = correctedStage(stageAt(5, 1), 'aliviar', 0.3, sample(0, 4, 2));
+  expect(mixed.speed).toBeLessThanOrEqual(4);
+  expect(mixed.incline).toBeLessThanOrEqual(1);
+  expect(metabolicCost(4, 2) - metabolicCost(mixed.speed, mixed.incline)).toBeGreaterThanOrEqual(0.3 - 0.03);
+  // Um componente acima do alvo e o outro abaixo, mais pesada que o alvo no todo: se o alvo já é mais
+  // leve que o corte pedido a partir da carga medida, ele fica como está, mesmo que a escada parta
+  // de um degrau mais baixo que ele num dos dois.
+  const flatWalk = stageAt(5.2, 0);
+  expect(correctedStage(flatWalk, 'aliviar', 0.5, sample(0, 4, 5))).toBe(flatWalk);
+  const ramp = stageAt(5.2, 2.5);
+  expect(correctedStage(ramp, 'aliviar', 5 / 15, sample(0, 6.5, 0))).toBe(ramp);
+  // Correndo também, com um alvo antigo acima de 2% de rampa.
+  const steepRun = stageAt(8, 3);
+  expect(correctedStage(steepRun, 'aliviar', 0.3, sample(0, 9, 3))).toBe(steepRun);
+  // Com a esteira já abaixo de 3 km/h e plana não há corte: a velocidade não desce do piso, e acima
+  // do que a esteira mede o alívio não vai. Antes o alvo virava 2 km/h e passava aos blocos seguintes.
+  const block = stageAt(5, 1);
+  expect(correctedStage(block, 'aliviar', 1, sample(0, 2, 0))).toBe(block);
+  // Com rampa, o corte é na rampa, na velocidade medida: sem subir a velocidade e sem descer dela.
+  const hill = stageAt(5.2, 5);
+  const slow = correctedStage(hill, 'aliviar', 0.3, sample(0, 2.8, 5));
+  expect(slow.speed).toBe(2.8);
+  expect(slow.incline).toBeLessThan(5);
+  expect(metabolicCost(2.8, 5) - metabolicCost(slow.speed, slow.incline)).toBeGreaterThanOrEqual(0.3 - 0.03);
+  // Mesmo um pedido pequeno tira meio ponto: com a esteira abaixo do piso, o alvo não desce só até ela.
+  expect(correctedStage(hill, 'aliviar', 0.05, sample(0, 2.8, 5))).toEqual(stageAt(2.8, 4.5));
+  expect(correctedStage(hill, 'aliviar', 5, sample(0, 2.8, 5))).toEqual(stageAt(2.8, 0));
+  // Abaixo do alvo a conta continua partindo da carga medida.
+  expect(correctedStage(stageAt(5.2, 2.5), 'aliviar', 0.5, sample(0, 5, 0))).toEqual(stageAt(4, 0));
+  // O bloco de esforço não desce de 3 km/h, como as etapas leves: o corte para no piso.
+  expect(ease(stageAt(3.4, 0), 3.4, 0)).toEqual(stageAt(3, 0));
+  const floor = stageAt(3, 0);
+  expect(ease(floor, 3, 0)).toBe(floor);
+});
+
 it('com rampa o ajuste fino é a velocidade, de 4,9 a 5,2 km/h: 0,1 km/h vale bem menos que meio ponto de rampa', () => {
   const at = (stage: Stage) => sample(0, stage.speed, stage.incline);
   const ease = (stage: Stage, mets: number) => correctedStage(stage, 'aliviar', mets, at(stage));
@@ -645,7 +702,10 @@ it('com rampa o ajuste fino é a velocidade, de 4,9 a 5,2 km/h: 0,1 km/h vale be
         const down = ease(from, mets);
         expect(down.speed).toBeLessThanOrEqual(speed);
         expect(down.incline).toBeLessThanOrEqual(incline);
-        expect(metabolicCost(speed, incline) - metabolicCost(down.speed, down.incline)).toBeGreaterThanOrEqual(mets - 0.03 - 1e-9);
+        // Só o piso de 3 km/h plano deixa o corte aquém do pedido.
+        const floor = down.speed === 3 && down.incline === 0;
+        if (!floor)
+          expect(metabolicCost(speed, incline) - metabolicCost(down.speed, down.incline)).toBeGreaterThanOrEqual(mets - 0.03 - 1e-9);
       }
 });
 
@@ -685,9 +745,12 @@ it('aliviar uma corrida nunca deixa o alvo entre 5,2 e 6 km/h, nem sobe a veloci
   for (const speed of [6, 8, 10])
     for (const walking of [1.5, 3, 4.5, 5, 5.2, 5.5, 5.9])
       for (const mets of [0.1, 0.5, 1, 2]) {
-        const eased = correctedStage(stageAt(speed, 1), 'aliviar', mets, sample(0, walking, 1));
-        expect(eased.speed).toBeLessThanOrEqual(Math.min(walking, 5.2));
-        expect(eased.incline).toBeLessThanOrEqual(1);
+        const stage = stageAt(speed, 1);
+        const eased = correctedStage(stage, 'aliviar', mets, sample(0, walking, 1));
+        // Abaixo de 3 km/h, o piso, a velocidade fica na medida e só a rampa desce.
+        if (walking < 3) expect(eased).toEqual({ ...stage, speed: walking, incline: eased.incline });
+        else expect(eased.speed).toBeLessThanOrEqual(Math.min(walking, 5.2));
+        expect(eased.incline).toBeLessThanOrEqual(walking < 3 ? 0.5 : 1);
       }
   // Um alvo antigo de caminhada acima de 5,2 km/h volta ao teto ao ser aliviado, e também ao subir.
   expect(ease(stageAt(5.6, 2), 0.1)).toEqual(stageAt(5.2, 2));
@@ -721,6 +784,18 @@ it('correndo, a rampa nunca passa de 2%', () => {
           const after = correctedStage(stage, kind, mets, at(stage));
           if (after !== stage && after.speed >= 6) expect(after.incline).toBeLessThanOrEqual(2);
         }
+});
+
+it('a carga que a pessoa mantém vira alvo só na mesma modalidade, nos degraus do guia', () => {
+  // Correndo sobre um alvo de corrida: vale a carga medida.
+  expect(adoptedLoad(stageAt(6.6, 1), sample(0, 7.04, 0))).toEqual({ speed: 7, incline: 0 });
+  // Pela equação, correr a 6,5 km/h custa mais que andar a 5,2 km/h com 2,5%, e andar com rampa
+  // pode custar mais que correr devagar; para quem corre devagar as duas contas não se comparam, e
+  // nenhuma troca de modalidade é adotada. Antes a corrida virava alvo de um bloco de caminhada.
+  expect(adoptedLoad(stageAt(5.2, 2.5), sample(0, 6.5, 0))).toBeNull();
+  expect(adoptedLoad(stageAt(6, 0), sample(0, 5.2, 8))).toBeNull();
+  // Entre 5,2 e 6 km/h é caminhada: vale 5,2 com a mesma rampa.
+  expect(adoptedLoad(stageAt(5, 1), sample(0, 5.6, 1.5))).toEqual({ speed: 5.2, incline: 1.5 });
 });
 
 it('o registro do treino diz qual alvo a correção mudou', () => {

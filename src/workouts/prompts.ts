@@ -54,7 +54,7 @@ import {
 } from './physiology';
 import { describe, sessionMinutes, zones, type Session } from './week';
 
-export const PROMPT_VERSION = '10';
+export const PROMPT_VERSION = '11';
 export type Prompt = { system: string; user: object };
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
@@ -291,6 +291,9 @@ export function summarize(w: Workout) {
     plateaus: found.length ? found.slice(0, PLATEAU_LIMIT) : undefined,
     recoveryDrops: drops.slice(0, 6),
     reductions: forcedReductions(w),
+    // A carga que a pessoa manteve acima do alvo e o app adotou ("adotar carga")
+    // não conta: o app não subiu nada, só passou a pedir o que ela já fazia, e
+    // os patamares já mostram essa carga.
     increases: changes.filter((c) => c.decision.startsWith('aumentar')).length,
     restBpm: w.restBpm ?? null,
     restSource: restSource(w),
@@ -508,6 +511,33 @@ export const parsePlan =
 
 // --- Revisão durante o treino ----------------------------------------------
 
+/**
+ * A constante de tempo da FC no caminho para o patamar de uma carga, em
+ * segundos: a cada τ, falta 37% do que faltava. É uma escolha do app, não uma
+ * medida da pessoa: com ela, os 3 bpm em 30 s de um patamar com ruído somam
+ * uns 5 bpm até o fim da etapa, e uma subida de 11 bpm logo depois do
+ * aquecimento, uns 17.
+ */
+const HR_TAU_SECONDS = 60;
+/** Quanto da subida de um trecho de 30 s se repete no seguinte: e^(−30/τ), uns 0,61. */
+const RISE_DECAY = Math.exp(-30 / HR_TAU_SECONDS);
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Quanto o BPM ainda sobe nos `left` segundos que faltam na etapa, se a subida
+ * de cada trecho de 30 s é `RISE_DECAY` da anterior, a partir de `rise`:
+ * rise × (r + r² + … + rⁿ) com n = left ÷ 30, pela soma fechada, que vale
+ * também para o n fracionário do fim de uma etapa. Nunca passa de rise × r ÷
+ * (1 − r), cerca de 1,5 × rise. A reta (rise × n) supunha a subida no mesmo
+ * ritmo até o fim: em 24/11, 3 bpm de ruído da cinta num patamar, com 23
+ * minutos pela frente, viravam a FC máxima no fim da etapa, e a IA cortou a
+ * carga com o BPM no alvo, e até abaixo da faixa.
+ */
+function pendingRise(rise: number, left: number) {
+  const n = Math.max(0, left) / 30;
+  return (rise * RISE_DECAY * (1 - RISE_DECAY ** n)) / (1 - RISE_DECAY);
+}
+
 /** O que a IA pode decidir numa revisão da carga. */
 export const reviewDecisions = ['manter', 'reduzir', 'aumentar'] as const;
 export type ReviewDecision = (typeof reviewDecisions)[number];
@@ -528,28 +558,28 @@ ENTRADA (json)
   - trend: "subindo", "estável" ou "caindo"; compara a segunda metade dessas leituras com a primeira.
   - position: now em relação à faixa: "abaixo", "na faixa" ou "acima".
   - belowTopBpm: quantos bpm now está abaixo de zone.high (negativo = acima do teto).
-  - projectedEndBpm: onde o BPM chega no fim da etapa se continuar subindo no ritmo de risePer30s (now + risePer30s × secondsRemaining ÷ 30, sem passar de maxBpm; com o BPM caindo, fica em now). É uma reta: superestima quando a subida já está perdendo força, o que é comum depois dos primeiros 2 ou 3 minutos de uma carga. null sem a leitura do momento.
-  - projectedOverTopBpm: projectedEndBpm − zone.high. Positivo = a reta passa do teto antes do fim da etapa. null sem a leitura do momento.
+  - projectedEndBpm: onde o BPM chega no fim da etapa se a subida for perdendo força como a da FC que se aproxima do patamar de uma carga (τ = ${HR_TAU_SECONDS} s): cada trecho de 30 s sobe ${br(round2(RISE_DECAY))} do que subiu o anterior, a partir de risePer30s, até o fim da etapa. É now + risePer30s × r × (1 − rⁿ) ÷ (1 − r), com r = ${br(round2(RISE_DECAY))} e n = secondsRemaining ÷ 30. Por mais longa que seja a etapa, a soma não passa de uns ${br(round1(RISE_DECAY / (1 - RISE_DECAY)))} × risePer30s; nunca passa de maxBpm e, com o BPM caindo, fica em now. null sem a leitura do momento.
+  - projectedOverTopBpm: projectedEndBpm − zone.high. Positivo = a projeção passa do teto antes do fim da etapa. null sem a leitura do momento.
   - endsAboveTop: true quando projectedEndBpm passa de zone.high. null sem a leitura do momento.
   - endsBelowAim: true quando o fim da etapa fica abaixo de aim.low: projectedEndBpm, ou now sem a leitura do momento.
-  - reduceToAimBpm: quantos bpm tirar para o fim da etapa voltar ao meio de aim, pela reta (ou por now, se now for maior), de 1 a limits.maxReduceBpm. null quando o fim da etapa não passa de aim.high.
+  - reduceToAimBpm: quantos bpm tirar para o fim da etapa voltar ao meio de aim, pela projeção (ou por now, se now for maior), de 1 a limits.maxReduceBpm. null quando o fim da etapa não passa de aim.high.
 - series: os últimos 120 s em trechos de 10 s, do mais antigo ao mais novo, com secondsAgo (fim do trecho), bpm (mediana do trecho; null sem leitura), kmh e inclinePercent medidos. Um trecho sem amostra da esteira fica de fora.
 - gait: dois números informativos do passo da pessoa, medidos pela cinta; nenhuma regra abaixo depende deles. cadenceSpm = a cadência do momento, em passos por minuto (mediana dos últimos 10 s; null sem cadência medida). cadenceChangePercent = quanto a cadência média dos últimos 30 s mudou em relação à do primeiro minuto do bloco na mesma velocidade, em % (negativo = passos mais lentos); null fora de um bloco de esforço, sem cadência ou com a velocidade diferente da daquele minuto.
 - blocks: os blocos de esforço já feitos hoje, em ordem, com name, kmh e inclinePercent (a carga em que terminaram), endBpm (BPM do fim do bloco; null sem leitura), peakBpm (maior BPM sustentado no bloco; null sem leitura) e aboveReadings (leituras acima de zone.high). Mostram o acúmulo de um bloco para o outro: num treino de tiros o BPM costuma subir mais depressa a cada tiro, na mesma carga.
-- session: goal, plannedMinutes, elapsedSeconds, restBpm e restSource (a FC de repouso de hoje, sem desconto: com restSource "parado" foi medida com a lona parada, antes do treino, e fica perto do repouso real; com "andando" foi lida no primeiro minuto já andando e fica de 10 a 20 bpm acima dele; os dois null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia", "app" ou "bloco"; "bloco" é a carga decidida numa recuperação, pelo fim do bloco anterior, para o bloco de esforço que vem depois dela: o ajuste vale para esse bloco, e bpm é o BPM do fim do anterior; com decision "manter carga", o bloco anterior terminou no alvo e a carga em que terminou passou ao seguinte, o que não é aumento nem redução), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
-- allowed: as decisões que o app aceita agora.
+- session: goal, plannedMinutes, elapsedSeconds, restBpm e restSource (a FC de repouso de hoje, sem desconto: com restSource "parado" foi medida com a lona parada, antes do treino, e fica perto do repouso real; com "andando" foi lida no primeiro minuto já andando e fica de 10 a 20 bpm acima dele; os dois null sem leitura), changes (os ajustes de carga já feitos hoje, do mais antigo ao mais novo, com secondsAgo, decision, bpm = o BPM que o motivou, from e to = [km/h, %] de antes e de depois, e by = quem decidiu: "trava", "ia", "app", "bloco" ou "pessoa"; "bloco" é a carga decidida numa recuperação, pelo fim do bloco anterior, para o bloco de esforço que vem depois dela: o ajuste vale para esse bloco, e bpm é o BPM do fim do anterior; com decision "manter carga", o bloco anterior terminou no alvo e a carga em que terminou passou ao seguinte, o que não é aumento nem redução; "pessoa", com decision "adotar carga", é a carga que a pessoa manteve na esteira acima do alvo por 2 minutos ou mais sem o BPM passar do teto, e que passou a ser o alvo: ela já estava nessa carga, e o app não subiu nada), secondsSinceRelief (segundos desde o último alívio de carga feito nesta etapa com o BPM acima do teto; null sem nenhum, ou se a carga subiu depois dele) e reliefSettling (true nos ${RELIEF_SETTLE_SECONDS} s depois desse alívio, em que a FC ainda está respondendo a ele).
+- allowed: as decisões que o app aceita agora. "reduzir" fica de fora com now abaixo de zone.low, e "aumentar", quando a carga não pode subir.
 - limits: maxReduceBpm e maxRaiseBpm, os maiores ajustes que o app aplica, em bpm. maxRaiseBpm = 0 quando a carga não pode subir.
 
 DECISÕES
 - "manter": a carga fica como está.
-- "reduzir": o app alivia a carga o equivalente a bpm batimentos, pela reta entre carga e frequência cardíaca da pessoa, até o mínimo que a etapa permite.
+- "reduzir": o app alivia a carga o equivalente a bpm batimentos, pela reta entre carga e frequência cardíaca da pessoa, até o mínimo que a etapa permite. O corte parte da carga que a esteira mede: se a pessoa ainda não fez o corte anterior, o alvo pode já ser mais leve que o novo, e aí nada muda. Só aparece em allowed com now na faixa ou acima dela.
 - "aumentar": o app sobe a carga o equivalente a bpm batimentos, nunca mais que limits.maxRaiseBpm. Só aparece em allowed quando a carga pode subir.
 
 COMO DECIDIR
-A frequência cardíaca leva de 2 a 4 minutos para responder a uma mudança de carga e, num bloco longo, continua subindo aos poucos na mesma carga. Leituras do sensor de mão oscilam 1 ou 2 bpm sem que isso seja tendência. Siga a primeira regra que servir:
+A frequência cardíaca leva de 2 a 4 minutos para responder a uma mudança de carga e, num bloco longo, continua subindo aos poucos na mesma carga. Leituras do sensor de mão oscilam 1 ou 2 bpm sem que isso seja tendência. Uma decisão fora de allowed nunca vale: onde a regra pedir uma que não está em allowed, mantenha. Siga a primeira regra que servir:
 - Se session.reliefSettling é true, o último alívio ainda está fazendo efeito: reduza só se stage.targetsReached é true (o corte anterior já está no painel) e endsAboveTop é true; senão, mantenha. Um excesso claro o app e a trava aliviam sozinhos.
 - Numa etapa leve, reduza só se position é "acima" e risePer30s é null ou não é negativo; senão, mantenha.
-- Reduza se position é "acima", ou se endsAboveTop é true e a série não mostra a subida perdendo força. bpm: até reduceToAimBpm, e menos quando a subida está perdendo força.
+- Reduza se position é "acima", ou se position é "na faixa", endsAboveTop é true e a série não mostra a subida perdendo força. bpm: até reduceToAimBpm, e menos quando a subida está perdendo força.
 - Aumente se "aumentar" está em allowed e endsBelowAim é true. bpm: até limits.maxRaiseBpm.
 - Nos demais casos, mantenha.
 
@@ -557,7 +587,7 @@ SAÍDA
 Responda somente com um objeto json, neste formato:
 {"reason": "<motivo>", "decision": "<decisão>", "bpm": <inteiro>}
 - reason: até 12 palavras em português do Brasil, citando o dado decisivo.
-- decision: exatamente uma das opções de allowed: ${list(reviewDecisions)}.
+- decision: exatamente uma das opções que estão em allowed (entre ${list(reviewDecisions)}, só as que aparecem lá).
 - bpm: inteiro, quantos bpm o ajuste deve tirar (em "reduzir") ou pôr (em "aumentar"); 0 em "manter".`;
 
 export type ReviewInput = {
@@ -623,9 +653,9 @@ export function reviewPrompt(i: ReviewInput): Prompt {
   const now = i.live?.bpm ?? f.median;
   const rise = i.live?.rise ?? null;
   const aim = aimBand(zone, zone.objective);
-  // A reta não desce: com o BPM caindo, a projeção fica no momento.
+  // A projeção não desce: com o BPM caindo, ela fica no momento.
   const projected =
-    rise === null ? null : Math.min(maxBpm, Math.round(now + (Math.max(0, rise) * i.left) / 30));
+    rise === null ? null : Math.min(maxBpm, Math.round(now + pendingRise(Math.max(0, rise), i.left)));
   const end = Math.max(now, projected ?? now);
   const reduceToAim =
     end > aim.high
@@ -737,7 +767,7 @@ ENTRADA (json)
   - stages: o mesmo por etapa, quando a lista é curta. Aqui a carga é sempre a média da etapa, bpmEnd é o do fim dela e strideChangePercent fica null.
   - plateaus (só nas sessões gravadas minuto a minuto): os trechos de 2 minutos ou mais na mesma carga dentro dos blocos de esforço, em ordem, com fromMinute (minuto do bloco em que começou), minutes, kmh, inclinePercent, mets e bpm (BPM típico do trecho). Num bloco longo é normal a carga subir no começo e descer mais adiante: a frequência cardíaca sobe aos poucos na mesma carga.
   - recoveryDrops: queda em bpm entre o fim de um bloco de esforço e cerca de 1 minuto de recuperação.
-  - reductions: reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa. Os alívios menores, de rotina para quem treina junto do teto, não contam, nem a carga decidida numa recuperação para o bloco seguinte. increases: aumentos de carga durante a sessão, inclusive os decididos numa recuperação para o bloco seguinte; a carga do fim de um bloco passada ao seguinte ("manter carga") não conta.
+  - reductions: reduções de carga feitas pelo app com o BPM ${FORCED_REDUCTION_BPM} ou mais acima do teto da faixa. Os alívios menores, de rotina para quem treina junto do teto, não contam, nem a carga decidida numa recuperação para o bloco seguinte. increases: aumentos de carga durante a sessão, inclusive os decididos numa recuperação para o bloco seguinte; a carga do fim de um bloco passada ao seguinte ("manter carga") não conta, nem a carga que a pessoa manteve acima do alvo e o app adotou ("adotar carga").
   - restBpm e restSource: a FC de repouso de hoje, sem desconto. Com restSource "parado" ela foi medida com a lona parada, antes do treino, e fica perto do repouso real; com "andando" foi lida no primeiro minuto já andando e fica de 10 a 20 bpm acima dele. null sem leitura.
 - recent: até 6 sessões válidas anteriores, da mais nova para a mais antiga, resumidas: daysAgo (em relação a esta sessão), goal, completionPercent, work (kmh, inclinePercent, mets, bpmEnd, com reference quando é o patamar de referência), plateaus, zone, position (bpmEnd em relação à faixa daquela sessão), recoveryDrops, reductions, increases, restBpm e restSource (como em session) e level. approximate = true marca registros antigos em que work traz médias da sessão inteira.
 - heart: os dois números que decidem a FC máxima, já calculados pelo app. ageEstimateBpm é a estimativa pela idade (média de 220 − idade e 208 − 0,7 × idade). floorBpm é o piso medido: o maior pico validado de todas as sessões, esta incluída, com 5 bpm a mais quando o pico é de um bloco de esforço e a pessoa seguiu depois dele: numa sessão concluída sem reductions, ou, mesmo com reductions, quando depois do pico ela concluiu outro bloco de esforço ou seguiu 4 minutos ou mais no mesmo bloco sem alívio de carga no minuto seguinte a ele (quem seguiu depois do pico não estava no máximo). Essa folga não passa da maior das duas fórmulas pela idade + 10; o pico em si vale mesmo acima disso, até 10 bpm além (um pico mais alto que isso é artefato da cinta e fica de fora). null se não há pico validado.

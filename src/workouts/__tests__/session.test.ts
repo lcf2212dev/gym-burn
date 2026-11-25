@@ -5,7 +5,7 @@ import { cueKey, pendingAction } from '../guidance';
 import { FATIGUE_TIP } from '../gait';
 import { acsm, currentCue, makePlan, metabolicCost, type Plan, type Profile, type Stage } from '../model';
 import { dailyTarget } from '../physiology';
-import { plateaus } from '../prompts';
+import { parseReview, plateaus } from '../prompts';
 import { assess, reviewLoad } from '../ai';
 import {
   clearData,
@@ -526,13 +526,13 @@ it('a IA revê a carga a cada 30 s: aumenta, mantém e reduz com o motivo dela, 
   expect(cut).toBeLessThan(1 + 0.1);
 });
 
-it('sem resposta da IA em 12 s, ou com erro, vale a decisão do app', async () => {
+it('sem resposta da IA em 28 s, ou com erro, vale a decisão do app', async () => {
   const { session, walk } = setup();
-  // A chamada estoura o tempo: a IA desiste depois de 12 s, sem nova tentativa.
+  // A chamada estoura o tempo: a IA desiste depois de 28 s, sem nova tentativa.
   jest.mocked(reviewLoad).mockImplementationOnce(
     () =>
       new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Falha de conexão com a DeepSeek. Tente novamente.')), 12_000);
+        setTimeout(() => reject(new Error('Falha de conexão com a DeepSeek. Tente novamente.')), 28_000);
       }),
   );
   session.start(continuous());
@@ -540,7 +540,7 @@ it('sem resposta da IA em 12 s, ou com erro, vale a decisão do app', async () =
   await walk(100, 5, null, 1);
   await walk(6, 5, 110, 1);
   expect(coach(session)).toBe('IA analisando 110 BPM…');
-  await walk(11, 5, null, 1);
+  await walk(27, 5, null, 1);
   expect(changes(session)).toEqual([]);
   await walk(1, 5, null, 1);
   expect(coach(session)).toBe('Sem IA · 10 bpm abaixo do teto · 110 BPM · carga aumentada');
@@ -574,6 +574,229 @@ it('uma revisão não começa com outra ainda sem resposta, e a de outra etapa �
   expect(session.snapshot().active?.plan?.stages[1]).toMatchObject({ speed: 5, incline: 1 });
 });
 
+it('o treino de 24/11: quem não segue o corte não leva outro por cima, e a carga que mantém na faixa vira o alvo', async () => {
+  // Dois blocos de 6 min a 5,2 km/h e 2,5%. A IA pede 15 bpm a menos em toda revisão de bloco
+  // até a adoção, como em 24/11 (todos os cortes daquele dia foram dela).
+  const run = async (incline: number) => {
+    const t = setup();
+    let adopted = false;
+    jest.mocked(reviewLoad).mockImplementation(async (input) =>
+      input.load.stage.measure || adopted
+        ? { decision: 'manter', bpm: 0, reason: 'no alvo' }
+        : { decision: 'reduzir', bpm: 15, reason: 'vai passar do teto' },
+    );
+    const plan = short(2, 2, 6, 1);
+    plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 5.2, incline: 2.5 }));
+    t.session.start(plan);
+    await t.strap(120, 4, 80);
+    // A pessoa fica no alvo (117 a 120 BPM) e ignora os cortes.
+    for (let i = 0; i < 120 && !changes(t.session)!.length; i++) await t.strap(1, 5.2, 118, 2.5);
+    const [cut] = changes(t.session)!;
+    expect(cut).toMatchObject({ stage: 1, by: 'ia', from: [5.2, 2.5] });
+    const first = cut.to!;
+    // O corte vale também para o 2º bloco, que custava mais.
+    expect(loads(t.session.snapshot().active?.plan)![3]).toEqual(first);
+    // A pessoa segue na carga de antes (ou sobe a rampa): os pedidos seguintes partem da carga
+    // medida, o alvo já é mais leve que eles e nada muda. O alvo nunca desce do primeiro corte.
+    const speeds: number[] = [];
+    const watch = () => {
+      const stage = t.session.snapshot().active!.plan!.stages[1];
+      speeds.push(stage.speed);
+      adopted ||= !!changes(t.session)!.find((c) => c.by === 'pessoa');
+    };
+    const asked = jest.mocked(reviewLoad).mock.calls.length;
+    await t.strap(110, 5.2, 118, incline, watch);
+    expect(jest.mocked(reviewLoad).mock.calls.length).toBeGreaterThan(asked);
+    expect(changes(t.session)).toHaveLength(1);
+    expect(coach(t.session)).toBe('IA · ajuste a esteira aos alvos · vai passar do teto');
+    expect(Math.min(...speeds)).toBe(first[0]);
+    // 120 s seguidos acima do alvo, com o BPM na faixa: a carga dela vira o alvo, sem aviso de ajuste.
+    for (let i = 0; i < 30 && !adopted; i++) await t.strap(1, 5.2, 118, incline, watch);
+    const [, adoption] = changes(t.session)!;
+    expect(adoption).toMatchObject({ stage: 1, decision: 'adotar carga', bpm: 118, from: first, to: [5.2, incline], by: 'pessoa' });
+    expect(adoption.second - cut.second).toBeGreaterThanOrEqual(120);
+    expect(adoption.second - cut.second).toBeLessThanOrEqual(122);
+    const { active, guidance } = t.session.snapshot();
+    expect(guidance).toMatchObject({ speedReached: true, inclineReached: true });
+    expect(pendingAction(guidance)).toBeNull();
+    expect(coach(t.session)).toMatch(/^Alvo ajustado à esteira · 5,2 km\/h e /);
+    // Só a etapa em curso: o 2º bloco segue no corte, como depois de um aumento.
+    expect(loads(active?.plan)).toEqual([[4, 0], [5.2, incline], [4, 0], first, [4, 0], [4, 0]]);
+    return t;
+  };
+  await run(2.5);
+  const t = await run(5);
+  // Nos alvos de novo, as regras voltam a valer: a revisão seguinte já vê a esteira nos alvos, e o
+  // tempo na carga conta desde que a pessoa chegou a ela.
+  await t.strap(40, 5.2, 118, 5);
+  const last = jest.mocked(reviewLoad).mock.calls.at(-1)![0];
+  expect(last.load).toMatchObject({ reached: true, stage: { speed: 5.2, incline: 5 } });
+  expect(last.load.secondsAtLoad).toBeGreaterThanOrEqual(120);
+});
+
+it('a carga só é adotada com o BPM no teto ou abaixo dele os 120 s inteiros, na lona, e fora dos tiros', async () => {
+  const start = async (plan: Plan) => {
+    const t = setup();
+    jest.mocked(reviewLoad).mockImplementation(async () => ({ decision: 'manter', bpm: 0, reason: 'no alvo' }));
+    t.session.start(plan);
+    await t.strap(120, 4, 80);
+    return t;
+  };
+  // Acima do alvo de 5 km/h e 1%, com 4 s acima do teto no meio: a conta recomeça dali.
+  const above = await start(long());
+  await above.strap(100, 5.2, 116, 2);
+  await above.strap(4, 5.2, 126, 2);
+  await above.strap(100, 5.2, 116, 2);
+  expect(changes(above.session)!.filter((c) => c.by === 'pessoa')).toEqual([]);
+  // Numa carga mais leve que o alvo, nada é adotado: é o corte que a pessoa ainda não fez.
+  const lighter = await start(long());
+  await lighter.strap(150, 4.6, 110, 0);
+  expect(changes(lighter.session)).toEqual([]);
+  // Num tiro a carga não sobe no meio, nem pela adoção.
+  const shots = await start(short(2, 2, 4, 1));
+  await shots.strap(150, 5.2, 110, 2);
+  expect(changes(shots.session)).toEqual([]);
+  // Correr num bloco de caminhada não vira alvo: as equações das duas não se comparam.
+  const jog = await start(long());
+  await jog.strap(150, 6.5, 112, 0);
+  expect(changes(jog.session)).toEqual([]);
+  // Sem leitura de BPM não se sabe se ela passou do teto: com o sensor de mão, entre as pegadas, a
+  // conta recomeça, e uma pegada depois de 150 s não basta.
+  const blind = await start(long());
+  await blind.walk(150, 5.2, null, 2);
+  await blind.hold(5.2, [110, 110, 110, 110, 110, 110, 110, 110], 2);
+  expect(changes(blind.session)).toEqual([]);
+  // Entre 5,2 e 6 km/h não há alvo: vale 5,2 km/h com a mesma rampa. A esteira não está nele, mas a
+  // carga foi escolha da pessoa: o aviso de ajuste não abre nem toca. Os aumentos esperam a esteira
+  // num alvo válido.
+  const between = await start(long());
+  for (let i = 0; i < 160 && !changes(between.session)!.length; i++) await between.strap(1, 5.6, 112, 1.5);
+  expect(changes(between.session)).toEqual([expect.objectContaining({ from: [5, 1], to: [5.2, 1.5], by: 'pessoa' })]);
+  const { guidance } = between.session.snapshot();
+  expect(guidance).toMatchObject({ speedReached: false, inclineReached: true });
+  expect(pendingAction(guidance)).toBeNull();
+  await between.strap(60, 5.6, 112, 1.5);
+  expect(changes(between.session)).toHaveLength(1);
+  expect(pendingAction(between.session.snapshot().guidance)).toBeNull();
+});
+
+it('com a esteira já abaixo de 3 km/h a trava não corta, e os blocos seguintes não herdam essa carga', async () => {
+  const { session, strap } = setup();
+  const plan = short(2, 3, 6, 1);
+  session.start(plan);
+  await strap(120, 4, 80);
+  await strap(60, 5, 110, 1);
+  // A pessoa baixa a esteira a 2 km/h por conta própria, e o BPM ainda está acima do teto.
+  await strap(10, 2, 125, 0);
+  expect(changes(session)).toEqual([]);
+  // A carga não está "no mínimo": a esteira é que já está abaixo do piso.
+  expect(coach(session)).toBe('Acima do teto · 125 BPM · carga já abaixo do piso de 3 km/h');
+  expect(loads(session.snapshot().active?.plan)).toEqual(loads(plan));
+});
+
+it('abaixo de 3 km/h e com rampa, a trava corta a rampa, e o corte abaixo do piso fica no bloco', async () => {
+  const { session, strap } = setup();
+  const plan = short(2, 3, 6, 1);
+  plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 5.2, incline: 5 }));
+  session.start(plan);
+  await strap(120, 4, 80);
+  await strap(60, 5.2, 110, 5);
+  // A pessoa baixa a velocidade a 2,8 km/h e deixa a rampa em 5%, com o BPM acima do teto.
+  await strap(10, 2.8, 125, 5);
+  const [cut] = changes(session)!;
+  expect(cut).toMatchObject({ stage: 1, by: 'trava', from: [5.2, 5] });
+  expect(cut.to![0]).toBe(2.8);
+  expect(cut.to![1]).toBeLessThan(5);
+  expect(coach(session)).toBe('Acima do teto · 125 BPM · carga reduzida');
+  // Os blocos seguintes não herdam um alvo abaixo de 3 km/h: ficam como estavam.
+  expect(loads(session.snapshot().active?.plan)!.slice(3)).toEqual(loads(plan)!.slice(3));
+});
+
+it('uma pausa no meio zera a conta da carga mantida', async () => {
+  const { session, strap } = setup();
+  jest.mocked(reviewLoad).mockImplementation(async () => ({ decision: 'manter', bpm: 0, reason: 'no alvo' }));
+  session.start(long());
+  await strap(120, 4, 80);
+  // 100 s acima do alvo, 3 min de lona parada, e a volta na mesma carga.
+  await strap(100, 5.2, 112, 2);
+  await strap(180, 0, 100, 2);
+  await strap(60, 5.2, 112, 2);
+  expect(changes(session)).toEqual([]);
+  // Os 120 s contam de novo desde a volta.
+  for (let i = 0; i < 90 && !changes(session)!.length; i++) await strap(1, 5.2, 112, 2);
+  expect(changes(session)).toEqual([expect.objectContaining({ by: 'pessoa', to: [5.2, 2] })]);
+});
+
+it('uma carga adotada não entra no piso da corrida que os blocos seguintes herdam', async () => {
+  const { session, strap } = setup();
+  let adopted = false;
+  jest.mocked(reviewLoad).mockImplementation(async (input) =>
+    input.load.stage.measure || !adopted
+      ? { decision: 'manter', bpm: 0, reason: 'no alvo' }
+      : { decision: 'reduzir', bpm: 15, reason: 'vai passar do teto' },
+  );
+  // Dois blocos de corrida de 6 min a 6,6 km/h e 1%.
+  const plan = short(2, 2, 6, 1);
+  plan.stages = plan.stages.map((s) => (s.measure ? s : { ...s, speed: 6.6, incline: 1 }));
+  session.start(plan);
+  await strap(120, 4, 80);
+  // A pessoa corre a 7 km/h plano, com o BPM na faixa, e essa carga vira o alvo do 1º bloco.
+  for (let i = 0; i < 200 && !adopted; i++) {
+    await strap(1, 7, 112, 0);
+    adopted = !!changes(session)!.find((c) => c.by === 'pessoa');
+  }
+  expect(changes(session)).toEqual([expect.objectContaining({ by: 'pessoa', from: [6.6, 1], to: [7, 0] })]);
+  // Um corte grande da IA tira a pessoa da corrida. O 2º bloco herda o piso da corrida pelas cargas
+  // que o app decidiu (6 km/h com 1%), e não pela rampa que a pessoa escolheu (0%).
+  for (let i = 0; i < 60 && changes(session)!.length < 2; i++) await strap(1, 7, 112, 0);
+  const [, cut] = changes(session)!;
+  expect(cut).toMatchObject({ by: 'ia', from: [7, 0] });
+  expect(cut.to![0]).toBeLessThan(6);
+  expect(loads(session.snapshot().active?.plan)![3]).toEqual([6, 1]);
+});
+
+it('com o BPM do momento abaixo da faixa a IA não pode reduzir, e uma resposta "reduzir" fica com a regra do app', async () => {
+  const { session, strap } = setup();
+  // A resposta passa pela mesma validação da chamada real: fora de `allowed`, é recusada.
+  jest.mocked(reviewLoad).mockImplementation(async (input) =>
+    parseReview(input.allowed)({ decision: 'reduzir', bpm: 15, reason: 'vai passar do teto' }),
+  );
+  session.start(long());
+  await strap(120, 4, 80);
+  // 95 BPM no bloco, abaixo do piso de 101, nos primeiros 80 s da carga.
+  await strap(80, 5, 95, 1);
+  const block = jest.mocked(reviewLoad).mock.calls.filter(([input]) => !input.load.stage.measure);
+  expect(block.length).toBeGreaterThan(0);
+  for (const [input] of block) expect(input.allowed).toEqual(['manter']);
+  expect(changes(session)).toEqual([]);
+  expect(coach(session)).toMatch(/^Sem IA · /);
+  // Com 90 s nos alvos a regra do app sobe a carga; a IA pode aumentar, mas não reduzir.
+  await strap(40, 5, 95, 1);
+  expect(jest.mocked(reviewLoad).mock.calls.at(-1)![0].allowed).toEqual(['manter', 'aumentar']);
+  expect(changes(session)).toEqual([expect.objectContaining({ decision: expect.stringMatching(/^aumentar/), by: 'app' })]);
+});
+
+it('a resposta da IA que chega depois de a pessoa mexer na esteira não é aplicada', async () => {
+  const { session, strap } = setup();
+  const pending = pendingReviews();
+  session.start(long());
+  await strap(120, 4, 80);
+  for (let i = 0; i < 60 && pending.length < 2; i++) await strap(1, 5, 118, 1);
+  expect(pending).toHaveLength(2);
+  // Em 20 s, ainda dentro dos 28 s da revisão, a pessoa baixa a rampa por conta própria.
+  await strap(20, 5, 118, 0);
+  pending[1]({ decision: 'reduzir', bpm: 10, reason: 'vai passar do teto' });
+  await flush();
+  expect(changes(session)).toEqual([]);
+  expect(coach(session)).toBe('A esteira mudou durante a análise · a próxima revisão decide');
+  // Na mesma carga do pedido, a resposta vale.
+  await strap(15, 5, 118, 0);
+  expect(pending).toHaveLength(3);
+  pending[2]({ decision: 'reduzir', bpm: 5, reason: 'vai passar do teto' });
+  await flush();
+  expect(changes(session)).toEqual([expect.objectContaining({ by: 'ia', from: [5, 1] })]);
+});
+
 it('num tiro curto a carga não sobe no meio, nem pela regra local nem pela IA', async () => {
   const { session, strap } = setup();
   // Tiros de 4 min a 5 km/h e 1%, com 1 min leve entre eles.
@@ -583,11 +806,12 @@ it('num tiro curto a carga não sobe no meio, nem pela regra local nem pela IA',
   await strap(150, 5, 95, 1);
   expect(coach(session)).toBe('Sem IA · 25 bpm abaixo do teto · 95 BPM · tiro curto: a carga não sobe no meio');
   expect(changes(session)).toEqual([]);
-  // A IA também não pode aumentar: a lista do que ela pode decidir não traz o aumento.
+  // A IA também não pode aumentar: a lista do que ela pode decidir não traz o aumento (nem a
+  // redução, com o BPM abaixo da faixa).
   const calls = jest.mocked(reviewLoad).mock.calls;
   expect(calls[calls.length - 1][0]).toMatchObject({
     load: { short: true, secondsAtLoad: expect.any(Number) },
-    allowed: ['manter', 'reduzir'],
+    allowed: ['manter'],
     maxRaiseBpm: 0,
   });
   expect(calls[calls.length - 1][0].load.secondsAtLoad).toBeGreaterThanOrEqual(90);
@@ -1376,8 +1600,8 @@ it('em dia de recuperação a faixa é teto: abaixo dela a carga não sobe', asy
   await walk(8, 5, 100, 1);
   expect(coach(session)).toBe('Sem IA · Na faixa · 100 BPM');
   expect(changes(session)).toEqual([]);
-  // Nem a IA pode aumentar.
-  for (const [input] of jest.mocked(reviewLoad).mock.calls) expect(input.allowed).toEqual(['manter', 'reduzir']);
+  // Nem a IA pode aumentar; abaixo da faixa, nem reduzir.
+  expect(jest.mocked(reviewLoad).mock.calls.map(([input]) => input.allowed)).toEqual([['manter'], ['manter', 'reduzir']]);
 });
 
 it('depois de um alívio, 1 bpm acima do teto espera 3 minutos antes de aliviar de novo', async () => {
@@ -1425,13 +1649,13 @@ it('quanto mais longe do teto, maior a redução, e nenhum alvo exige aumento no
     await walk(6, speed, bpm, incline);
     return session.snapshot().active!.plan!.stages[1];
   };
-  // 8, 13 e 33 bpm acima de 117: 0,53, 0,87 e 2,2 METs a menos.
+  // 8, 13 e 33 bpm acima de 117: 0,53, 0,87 e 2,2 METs a menos. O bloco não desce de 3 km/h.
   const stages = [];
   for (const bpm of [125, 130, 150]) stages.push(await reduced(bpm));
   expect(stages).toEqual([
     expect.objectContaining({ speed: 4.8, incline: 0 }),
     expect.objectContaining({ speed: 4.1, incline: 0 }),
-    expect.objectContaining({ speed: 1.3, incline: 0 }),
+    expect.objectContaining({ speed: 3, incline: 0 }),
   ]);
   // A pessoa já anda abaixo dos alvos (4,5 km/h e 0,5% no lugar de 5 e 1%): a conta parte do
   // medido, 3,34 METs, e tira dali os mesmos 0,53 METs.
@@ -1459,9 +1683,9 @@ it('abaixo do piso sobe a carga num bloco de esforço com 90 s nos alvos', async
     expect.objectContaining({ stage: 1, decision: 'aumentar inclinação', bpm: 95 }),
   ]);
   expect(pendingAction(session.snapshot().guidance)).toBe('adjust');
-  // A IA podia subir até o meio da faixa: os 16 bpm da regra local.
+  // A IA podia subir até o meio da faixa, os 16 bpm da regra local, e não reduzir abaixo dela.
   const calls = jest.mocked(reviewLoad).mock.calls;
-  expect(calls[calls.length - 1][0]).toMatchObject({ allowed: ['manter', 'reduzir', 'aumentar'], maxRaiseBpm: 16 });
+  expect(calls[calls.length - 1][0]).toMatchObject({ allowed: ['manter', 'aumentar'], maxRaiseBpm: 16 });
 });
 
 it('abaixo do piso não sobe a carga fora dos alvos nem com a FC ainda subindo', async () => {
@@ -1485,12 +1709,13 @@ it('abaixo do piso não sobe a carga fora dos alvos nem com a FC ainda subindo',
 });
 
 it('mostra que a carga já está no limite quando não há o que corrigir', async () => {
-  // Lona a 0,5 km/h: não há velocidade para tirar.
+  // Lona a 0,5 km/h, plana e abaixo do piso de 3 km/h: não há velocidade nem rampa para tirar, e a
+  // carga não está "no mínimo" do alvo, está abaixo dele.
   const slow = setup();
   slow.session.start(continuous());
   await slow.walk(3, 0.5);
   await slow.walk(6, 0.5, 130);
-  expect(coach(slow.session)).toBe('Acima da faixa · 130 BPM · carga já no mínimo');
+  expect(coach(slow.session)).toBe('Acima da faixa · 130 BPM · carga já abaixo do piso de 3 km/h');
   expect(changes(slow.session)).toEqual([]);
   // Caminhada a 5,2 km/h e 15%: não há rampa nem velocidade de caminhada para pôr.
   const steep = setup();

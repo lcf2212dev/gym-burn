@@ -10,6 +10,7 @@
 import type { TreadmillSample } from '@/treadmill/types';
 import {
   correctedStage,
+  EASY_FLOOR_KMH,
   MAX_RAISE_METS,
   raiseMargin,
   RELIEF_SETTLE_SECONDS,
@@ -196,7 +197,9 @@ export type NextBlock = {
  * de corrida não desce abaixo do piso da corrida (6 km/h plano): a troca para
  * a caminhada só vale dentro do bloco em que é feita. Depois de um bloco que
  * terminou andando por causa dessa troca, a decisão não reduz de novo: o
- * próximo já começa no piso da corrida. Acima da carga dele, ela vale só para
+ * próximo já começa no piso da corrida. Um bloco que terminou abaixo de 3
+ * km/h, o piso de todo alvo, também não decide a carga do próximo: ele fica no
+ * alvo planejado, e o veredito e a previsão só vão ao painel. Acima da carga dele, ela vale só para
  * o próximo, como todo aumento, até 1 MET acima da carga planejada dele, e só
  * quando a previsão pediu aumento ou, num "manter", com as mesmas condições do
  * aumento (nada acima do teto no bloco nem no começo da recuperação, pela
@@ -287,8 +290,12 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
     decided = correctedStage(current, 'subir', NEXT_BLOCK_MAX_METS, from, true);
   }
   const verdict = kind === 'aliviar' ? 'reduzir' : kind === 'subir' ? 'aumentar' : 'manter';
+  // Quem baixou a esteira abaixo de 3 km/h no fim do bloco não diz qual carga
+  // o próximo aguenta, e nenhum alvo fica abaixo do piso: sem isso o corte, e
+  // até o "manter", levavam essa carga aos blocos seguintes.
+  const belowFloor = end.speed < EASY_FLOOR_KMH;
   let stages: number[] = [];
-  if (cost(decided) < cost(current) - EPSILON) {
+  if (!belowFloor && cost(decided) < cost(current) - EPSILON) {
     if (!walkedOff)
       stages = effortIndexes(plan).filter((i) => i >= next && cost(plan.stages[i]) > cost(decided) + EPSILON);
   }
@@ -296,7 +303,7 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   // aumento ou, num "manter", com as mesmas condições do aumento: sem isso, um
   // aumento do bloco anterior que deu certo (terminou no alvo) voltaria à carga
   // do plano sem aviso no bloco seguinte.
-  else if (cost(decided) > cost(current) + EPSILON && raisable && kind !== 'aliviar') stages = [next];
+  else if (!belowFloor && cost(decided) > cost(current) + EPSILON && raisable && kind !== 'aliviar') stages = [next];
   const to = stages.length ? { ...current, speed: decided.speed, incline: decided.incline } : current;
   return { index: next, predictedBpm: predicted, carryBpm: carry, verdict, from: current, to, stages };
 }

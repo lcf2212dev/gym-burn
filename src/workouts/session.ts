@@ -3,8 +3,10 @@ import type { TreadmillStore } from '@/treadmill/treadmill-context';
 import type { ConsoleEvent, TreadmillSample } from '@/treadmill/types';
 import { formatDecimal, formatDuration } from '@/utils/format';
 import {
+  adoptedLoad,
   changeLabel,
   correctedStage,
+  EASY_FLOOR_KMH,
   correction,
   correctionBpm,
   livePulse,
@@ -148,7 +150,9 @@ const CONTACT_REVIEW_GAP = 20_000;
 /**
  * Intervalo entre revisões com leitura contínua (a cinta no peito, ou o sensor
  * seguro o tempo todo): a IA olha o treino a cada 30 s. A mediana das regras
- * locais continua sendo a do último minuto.
+ * locais continua sendo a do último minuto. A resposta tem até 28 s (`ai.ts`)
+ * e chega antes da revisão seguinte; se não chegar, a seguinte espera por ela
+ * (`reviewing`).
  */
 const CONTINUOUS_REVIEW_GAP = 30_000;
 /**
@@ -178,6 +182,15 @@ const GUARD_WAIT = 30_000;
 const RELIEF_RESPONSE_WAIT = 60_000;
 /** O nome, no registro, da carga do fim de um bloco passada ao seguinte num "manter". */
 const KEEP_LOAD = 'manter carga';
+/** O nome, no registro, da carga que a pessoa manteve acima do alvo e o app adotou (veja `holding`). */
+const ADOPT_LOAD = 'adotar carga';
+/**
+ * Quanto tempo seguido a esteira fica numa carga mais pesada que o alvo, com o
+ * BPM sem passar do teto, até essa carga virar o alvo da etapa: 2 minutos, duas
+ * constantes de tempo da FC (veja `HR_TAU_SECONDS`, em prompts.ts), em que ela
+ * já fez a maior parte da subida que essa carga dá.
+ */
+const ADOPT_HOLD_MS = 120_000;
 /**
  * No começo de um bloco a lona ainda está acelerando e o BPM é o da etapa
  * anterior: até a esteira chegar aos alvos, a trava espera os primeiros 30 s.
@@ -225,12 +238,18 @@ export class WorkoutSession {
   private lastRelief = -Infinity;
   /** A etapa em que foi feito esse alívio; -1 sem nenhum, ou depois de um aumento. */
   private reliefIndex = -1;
-  /** Horário em que a trava achou a carga já no mínimo. */
+  /** Horário em que a trava achou a carga já no mínimo, ou o alvo já mais leve que o corte. */
   private lastFloor = -Infinity;
   /** Horário do último aviso de que a esteira está acima dos alvos com o BPM acima do teto. */
   private lastRealert = -Infinity;
   /** A esteira já chegou aos alvos desta etapa ao menos uma vez. */
   private stageReached = false;
+  /**
+   * A carga mais pesada que o alvo em que a esteira está, já como alvo (veja
+   * `adoptedLoad`), desde quando e a última amostra que a confirmou, com o BPM
+   * sem passar do teto: `null` fora disso. Veja `holding`.
+   */
+  private held: { since: number; last: number; speed: number; incline: number } | null = null;
   private stageSince = 0;
   /** Desde quando a esteira está nos alvos da etapa. */
   private reachedSince: number | null = null;
@@ -662,6 +681,9 @@ export class WorkoutSession {
     if (s.status.stoppedBySafetyKey || !sample || sample === this.previous) return;
     const moving = (sample.speedKmh ?? 0) > 0;
     if (!moving) this.waitForStop = false;
+    // Com a lona parada ou em pausa a carga mantida acima do alvo deixa de
+    // contar: os 120 s têm de ser seguidos, na lona.
+    if (!moving) this.held = null;
     if (!this.state.active && moving && !this.waitForStop && this.state.profile) this.start(null);
     const w = this.state.active;
     if (w) {
@@ -752,6 +774,7 @@ export class WorkoutSession {
         this.lastFloor = -Infinity;
         this.lastRealert = -Infinity;
         this.stageReached = false;
+        this.held = null;
         // O aviso de cadência caindo era do bloco que acabou.
         tip = '';
       }
@@ -1028,8 +1051,8 @@ export class WorkoutSession {
 
   /**
    * Com o BPM acima do teto e a esteira acima dos alvos, um corte já pedido não
-   * chegou ao painel: outro, feito a partir do alvo, somaria os dois sem a FC
-   * ter respondido a nenhum. O app reabre o aviso de ajuste, com bipes, e diz
+   * chegou ao painel: outro por cima dele somaria os dois sem a FC ter
+   * respondido a nenhum. O app reabre o aviso de ajuste, com bipes, e diz
    * no painel até onde reduzir, sem gravar ajuste novo. Devolve `true` quando a
    * esteira está acima dos alvos, avisando agora ou não.
    */
@@ -1070,8 +1093,9 @@ export class WorkoutSession {
   }
 
   /**
-   * Decide o que as leituras pedem. Primeiro a trava (`guard`), a cada amostra.
-   * Depois, a cada 30 s com leitura contínua ou a cada pegada no sensor, a
+   * Decide o que as leituras pedem. Primeiro a trava (`guard`), a cada amostra,
+   * e a carga que a pessoa mantém acima do alvo (`holding`), que vira o alvo da
+   * etapa. Depois, a cada 30 s com leitura contínua ou a cada pegada no sensor, a
    * revisão: acima da faixa o app alivia na hora, em qualquer etapa e sem
    * consultar ninguém; no resto a IA decide entre manter, reduzir e, quando a
    * regra local deixaria, aumentar. Sem resposta dela vale a regra local:
@@ -1095,7 +1119,11 @@ export class WorkoutSession {
     this.reachedSince = reached ? (this.reachedSince ?? sample.at) : null;
     if (reached) this.stageReached = true;
     const zone = dailyTarget(w.plan, w.profile, w.hr);
+    // A conta da carga mantida anda antes da trava: um segundo acima do teto a
+    // recomeça, mesmo quando é a trava que age nele.
+    const kept = this.holding(w.plan, cue, g, sample, samples, zone);
     if (this.guard(w, cue.index, g, sample, samples, zone)) return;
+    if (kept && this.adopt(cue.index, kept, sample)) return;
     const sinceReview = sample.at - this.lastReview;
     const newContact = this.contactStart > this.lastReview && sinceReview >= CONTACT_REVIEW_GAP;
     if (sample.at - this.lastChange < CHANGE_COOLDOWN) return;
@@ -1135,9 +1163,10 @@ export class WorkoutSession {
    * nesta etapa, de quem for, ela espera 30 s para reabrir o aviso de um corte
    * que não chegou ao painel e 1 minuto para cortar de novo, e até 3 minutos
    * depois dele só corta com 3 bpm ou mais de excesso e o BPM sem cair. O corte parte
-   * da carga medida, quando ela está abaixo do alvo, leva o BPM a 3 abaixo do
-   * teto e tira também a subida dos últimos 30 s (até 10 bpm), que ainda vai
-   * chegar. Devolve `true` quando agiu.
+   * da carga medida (veja `correctedStage`), leva o BPM a 3 abaixo do teto e
+   * tira também a subida dos últimos 30 s (até 10 bpm), que ainda vai chegar.
+   * Com a esteira acima dos alvos em custo ela não corta: reabre o aviso
+   * (`realert`). Devolve `true` quando agiu.
    */
   private guard(
     w: Workout,
@@ -1173,13 +1202,107 @@ export class WorkoutSession {
     const revised = correctedStage(stage, 'aliviar', want / slope, sample);
     if (revised === stage) {
       this.lastFloor = sample.at;
-      this.update({ coach: text + ' · carga já no mínimo' });
+      this.update({ coach: text + ' · ' + unchangedRelief(sample, stage) });
       return true;
     }
     if (!this.commit(index, revised, 'aliviar', live.bpm, sample, sample.at, 'trava')) return false;
     // A revisão recomeça a contar daqui; a resposta da IA que ainda não voltou era para a carga antiga.
     this.lastReview = sample.at;
     this.update({ coach: text + ' · carga reduzida' });
+    return true;
+  }
+
+  /**
+   * A carga que a pessoa mantém acima do alvo. Num bloco de esforço que não
+   * seja um tiro, com ela na lona, a carga medida em que a esteira fica 2
+   * minutos seguidos, estável e mais pesada que o alvo (veja `adoptedLoad`),
+   * sem o BPM do momento nem a mediana do último minuto passarem do teto, é
+   * uma carga que ela aguenta: devolve essa carga, com o BPM de agora, para
+   * virar o alvo.
+   * Sem isso, quem não segue um corte fica com a esteira fora dos alvos até o
+   * fim da etapa, e a carga não sobe mais (em 24/11, o alvo ficou em 1 km/h
+   * com a pessoa no alvo da FC a 5,2 km/h e 4%). Uma leitura acima do teto,
+   * outra carga, a esteira nos alvos ou a velocidade e a inclinação sem leitura
+   * recente recomeçam a conta, e também a lona parada ou em pausa (`receive`)
+   * e uma falta de amostras por mais de 5 s. Sem leitura de BPM (a cinta sem
+   * mandar nada por mais de 12 s; o sensor de mão entre as pegadas) também: sem
+   * saber se o BPM passou do teto, uma carga mais pesada não é adotada. Na
+   * prática a adoção é só com a cinta.
+   */
+  private holding(
+    plan: Plan,
+    cue: Cue,
+    g: Guidance,
+    sample: TreadmillSample,
+    samples: TreadmillSample[],
+    zone: Zone,
+  ) {
+    const load = this.load(plan, cue, g, sample.at);
+    const eligible = !load.easy && !load.short && !load.offBelt && this.fresh(sample);
+    const target = eligible ? adoptedLoad(load.stage, sample) : null;
+    const live = target && livePulse(samples, sample.at);
+    const features = target && pulseFeatures(pulseWindow(samples, this.stageSince, sample.at), zone);
+    const bpm = live?.bpm ?? features?.median;
+    const over = (live?.bpm ?? 0) > zone.high || (features?.median ?? 0) > zone.high;
+    if (!target || bpm === undefined || over) {
+      this.held = null;
+      return null;
+    }
+    const same =
+      !!this.held &&
+      this.held.speed === target.speed &&
+      this.held.incline === target.incline &&
+      sample.at - this.held.last <= TELEMETRY_MAX_AGE;
+    this.held = same ? { ...this.held!, last: sample.at } : { since: sample.at, last: sample.at, ...target };
+    return sample.at - this.held.since < ADOPT_HOLD_MS ? null : { ...target, bpm };
+  }
+
+  /**
+   * Passa o alvo da etapa para a carga que a pessoa manteve acima dele (veja
+   * `holding`), no registro como ajuste dela (`by: 'pessoa'`). A carga foi
+   * escolha dela: o aviso de ajuste não abre nem toca, e o tempo na carga conta
+   * de quando ela chegou a ela, para as regras de sempre (inclusive o aumento)
+   * voltarem a valer. Quando a carga medida não é um alvo válido (5,6 km/h, que
+   * vira 5,2; correndo com 3% de rampa, que vira 2%), a esteira fica fora do
+   * alvo novo, e os aumentos esperam a pessoa ir até ele; o painel diz isso sem
+   * bipe. Como um aumento, vale só para a etapa em curso e acaba com a espera
+   * pelo efeito de um alívio. Devolve `false` se o treino já saiu da etapa.
+   */
+  private adopt(index: number, to: { speed: number; incline: number; bpm: number }, sample: TreadmillSample) {
+    const active = this.state.active;
+    const plan = active?.plan;
+    const g = this.state.guidance;
+    const stage = plan?.stages[index];
+    if (!active || !plan || !g || !stage || !this.held) return false;
+    const elapsed = Math.floor(active.totals.movingMs / 1000);
+    const change: Change = {
+      second: elapsed,
+      stage: index,
+      decision: ADOPT_LOAD,
+      bpm: to.bpm,
+      from: [stage.speed, stage.incline],
+      to: [to.speed, to.incline],
+      by: 'pessoa',
+    };
+    const stages = plan.stages.map((s, i) => (i === index ? { ...s, speed: to.speed, incline: to.incline } : s));
+    const next = { ...active, plan: { ...plan, stages }, changes: [...(active.changes ?? []), change] };
+    const cue = currentCue(next.plan, elapsed);
+    if (!cue || cue.index !== index) return false;
+    saveWorkout(next);
+    // A resposta da IA que ainda não voltou era para o alvo antigo.
+    this.cancelReview();
+    this.reliefIndex = -1;
+    this.reachedSince = this.held.since;
+    this.held = null;
+    const incline = formatDecimal(to.incline, Number.isInteger(to.incline) ? 0 : 1) + '%';
+    const guidance = advanceGuidance(g, cue, sample, sample.at);
+    this.update({
+      active: next,
+      // O ajuste já está feito: sem isso, o alvo novo mudaria a chave do aviso
+      // (`cueKey`), e um aviso aberto ou minimizado voltaria a tocar.
+      guidance: guidance && { ...guidance, adjusted: true },
+      coach: 'Alvo ajustado à esteira · ' + formatDecimal(to.speed, 1) + ' km/h e ' + incline + ' · ' + to.bpm + ' BPM',
+    });
     return true;
   }
 
@@ -1220,7 +1343,7 @@ export class WorkoutSession {
       const limit = !fix
         ? ' · o próximo degrau passaria do teto'
         : fix === 'aliviar'
-          ? ' · carga já no mínimo'
+          ? ' · ' + unchangedRelief(sample, stage)
           : ' · carga já no máximo';
       this.update({ coach: side + bpm + limit });
       return;
@@ -1231,10 +1354,12 @@ export class WorkoutSession {
 
   /**
    * Pede à IA a revisão da carga e aplica a resposta, se ela ainda valer. A IA
-   * escolhe entre o que o app aceita agora: manter e reduzir sempre; aumentar
-   * só quando a regra local deixaria subir, e até onde ela subiria. Sem
-   * resposta (erro, sem chave, mais de 12 s ou resposta fora do formato) vale
-   * a regra local, `fix` e `room`.
+   * escolhe entre o que o app aceita agora: manter sempre; reduzir com o BPM do
+   * momento (o `now` do prompt) na faixa ou acima dela; aumentar só quando a
+   * regra local deixaria subir, e até onde ela subiria. Sem resposta (erro, sem
+   * chave, mais de 28 s ou resposta fora do formato, como uma decisão fora das
+   * aceitas) vale a regra local, `fix` e `room`, que abaixo da faixa nunca
+   * corta a carga.
    */
   private async review(
     w: Workout,
@@ -1252,12 +1377,16 @@ export class WorkoutSession {
     this.reviewAbort = abort;
     this.reviewing = true;
     const live = livePulse(samples, sample.at);
+    const seen = live?.bpm ?? features.median;
     const maxRaiseBpm = fix === 'subir' ? correctionBpm(fix, features, zone) : room;
     const since = this.sinceRelief(cue.index, sample.at);
     const sinceRelief = Number.isFinite(since) ? since / 1000 : null;
-    const allowed: ReviewDecision[] =
-      maxRaiseBpm > 0 ? ['manter', 'reduzir', 'aumentar'] : ['manter', 'reduzir'];
-    this.update({ coach: 'IA analisando ' + (live?.bpm ?? features.median) + ' BPM…' });
+    // Abaixo da faixa não há o que reduzir: em 24/11 a projeção pela reta pedia
+    // 15 bpm a menos com o BPM 11 abaixo do piso.
+    const allowed: ReviewDecision[] = ['manter'];
+    if (seen >= zone.low) allowed.push('reduzir');
+    if (maxRaiseBpm > 0) allowed.push('aumentar');
+    this.update({ coach: 'IA analisando ' + seen + ' BPM…' });
     let reply: ReviewReply | null = null;
     try {
       reply = await reviewLoad(
@@ -1287,7 +1416,7 @@ export class WorkoutSession {
     try {
       const last = this.current(w.id, cue.index, load.stage);
       // Um aumento só sai com a esteira ainda nos alvos, e com a pessoa na lona:
-      // a resposta pode chegar 12 s depois do pedido.
+      // a resposta pode chegar 28 s depois do pedido.
       const g = this.state.guidance;
       const now = {
         ...load,
@@ -1295,6 +1424,11 @@ export class WorkoutSession {
         offBelt: !!load.offBelt || (!!last && this.offBeltRecently(last.at)),
       };
       if (!last) this.update({ coach: 'Aguardando nova leitura' });
+      // A pessoa mexeu na esteira enquanto a IA pensava: a resposta (e a regra
+      // local) era para a carga de antes, e um corte feito a partir da nova
+      // somaria o dela ao da IA.
+      else if (!sameMeasuredLoad(last, sample))
+        this.update({ coach: 'A esteira mudou durante a análise · a próxima revisão decide' });
       else if (reply) this.apply(w, cue.index, reply, features, zone, now, maxRaiseBpm, live, last);
       else if (!(fix || room) || !now.reached || !this.fresh(last, Date.now()))
         this.update({ coach: OFFLINE + localVerdict(features, now) });
@@ -1313,7 +1447,8 @@ export class WorkoutSession {
    * A amostra mais recente, se uma resposta pedida para esta etapa e esta carga
    * ainda vale: mesmo treino, mesma etapa, os mesmos alvos e a lona andando.
    * Senão, `null`. A velocidade e a inclinação recentes só são exigidas para
-   * mudar a carga: sem elas o painel ainda mostra o veredito.
+   * mudar a carga: sem elas o painel ainda mostra o veredito. A carga medida
+   * do pedido é conferida à parte (`sameMeasuredLoad`).
    */
   private current(id: string, index: number, sent: Stage) {
     const active = this.state.active;
@@ -1374,7 +1509,7 @@ export class WorkoutSession {
     const revised = correctedStage(stage, raise ? 'subir' : 'aliviar', bpm / slope, sample, exact);
     if (revised === stage) {
       const limit = !raise
-        ? 'carga já no mínimo'
+        ? unchangedRelief(sample, stage)
         : exact
           ? 'o próximo degrau passaria do teto'
           : 'carga já no máximo';
@@ -1403,6 +1538,7 @@ export class WorkoutSession {
     this.lastFloor = -Infinity;
     this.lastRealert = -Infinity;
     this.stageReached = false;
+    this.held = null;
     this.lastPulse = -Infinity;
     this.contactStart = 0;
     this.reachedSince = null;
@@ -1422,7 +1558,8 @@ export class WorkoutSession {
 
   /**
    * Grava os alvos novos da etapa, com quem decidiu (`by`), e reabre o aviso de
-   * ajuste. Cancela a revisão da IA em curso, pedida para a carga antiga.
+   * ajuste. Cancela a revisão da IA em curso, pedida para a carga antiga, e
+   * recomeça a conta da carga mantida acima do alvo (`holding`).
    * Devolve `false` se o treino já saiu dessa etapa. `kind` diz se o ajuste é
    * um alívio: o nome no registro não basta, porque o aumento de uma corrida
    * com rampa antiga acima de 2% baixa a rampa.
@@ -1454,20 +1591,25 @@ export class WorkoutSession {
     // seguintes herdam no máximo o piso da corrida, 6 km/h com a menor rampa de
     // corrida que este bloco já teve. Sem isso um corte a 6 km/h derrubava o
     // resto do treino de tiros para a caminhada, e nada a trazia de volta.
-    const history = (active.changes ?? []).filter((c) => c.stage === index && c.by !== 'bloco');
-    const floor =
-      relief && revised.speed < RUN_FROM_KMH
-        ? runFloor([
-            stage,
-            ...history.flatMap((c) => [c.from, c.to].flatMap((l) => (l ? [{ speed: l[0], incline: l[1] }] : []))),
-          ])
-        : null;
+    // Valem as cargas que o app decidiu para o bloco (a de antes do primeiro
+    // ajuste e a de depois de cada um), e não as que a pessoa escolheu e o app
+    // adotou (`by: 'pessoa'`): a escolha dela não vira piso de ninguém.
+    const own = (active.changes ?? []).filter((c) => c.stage === index && c.by !== 'bloco');
+    const planned = own[0]?.from;
+    const decided = [
+      planned ? { speed: planned[0], incline: planned[1] } : stage,
+      ...own.filter((c) => c.by !== 'pessoa').flatMap((c) => (c.to ? [{ speed: c.to[0], incline: c.to[1] }] : [])),
+    ];
+    const floor = relief && revised.speed < RUN_FROM_KMH ? runFloor(decided) : null;
     const heir = floor ?? revised;
     const cost = metabolicCost(heir.speed, heir.incline);
+    // Um alvo abaixo de 3 km/h, o piso, vale só para este bloco: sai de quem já
+    // baixou a esteira até ali, e não diz nada da carga dos seguintes.
+    const spread = relief && !stage.measure && heir.speed >= EASY_FLOOR_KMH;
     const stages = plan.stages.map((s, i) =>
       i === index
         ? { ...s, speed: revised.speed, incline: revised.incline }
-        : relief && i > index && !stage.measure && !s.measure && metabolicCost(s.speed, s.incline) > cost
+        : spread && i > index && !s.measure && metabolicCost(s.speed, s.incline) > cost
           ? { ...s, speed: heir.speed, incline: heir.incline }
           : s,
     );
@@ -1490,6 +1632,7 @@ export class WorkoutSession {
     saveWorkout(next);
     this.cancelReview();
     this.lastChange = now;
+    this.held = null;
     // A espera pelo efeito de um alívio só vale para o feito com o BPM acima do
     // teto; um aumento acaba com ela.
     if (relief && bpm > zone.high) {
@@ -1588,6 +1731,34 @@ function trackSpan(w: Workout, lastSecond: number) {
   const wall = ((w.ended ?? w.started) - w.started) / 1000;
   if (w.reason !== 'App interrompido') return Math.max(wall, lastSecond + 1);
   return Math.max(wall, lastSecond + 1, w.plan ? w.plan.minutes * 60 + 900 : 0);
+}
+
+/** As duas amostras têm a mesma carga medida, dentro da tolerância com que o guia dá um alvo por atingido. */
+function sameMeasuredLoad(a: TreadmillSample, b: TreadmillSample) {
+  const near = (x: number | null, y: number | null, tolerance: number) =>
+    x === null || y === null ? x === y : Math.abs(x - y) < tolerance;
+  return (
+    near(a.speedKmh, b.speedKmh, SPEED_TOLERANCE_KMH) &&
+    near(a.inclinationPercent, b.inclinationPercent, INCLINE_TOLERANCE_PERCENT)
+  );
+}
+
+/**
+ * O que o painel diz de um alívio que não mudou nada. Com a esteira acima de
+ * algum alvo, o corte pedido a partir da carga medida não chega abaixo do alvo
+ * em vigor: a pessoa ainda não fez o corte anterior, e a carga não está no
+ * mínimo. Com ela plana e abaixo de 3 km/h, a carga está além do piso.
+ */
+function unchangedRelief(sample: TreadmillSample, stage: Stage) {
+  const speed = sample.speedKmh ?? 0;
+  const above =
+    speed > stage.speed + SPEED_TOLERANCE_KMH ||
+    (sample.inclinationPercent ?? 0) > stage.incline + INCLINE_TOLERANCE_PERCENT;
+  if (above) return 'ajuste a esteira aos alvos';
+  // Plana e abaixo de 3 km/h, mais leve que o alvo: a pessoa já foi além do piso.
+  if (speed < EASY_FLOOR_KMH && speed < stage.speed - SPEED_TOLERANCE_KMH)
+    return 'carga já abaixo do piso de ' + formatDecimal(EASY_FLOOR_KMH, 0) + ' km/h';
+  return 'carga já no mínimo';
 }
 
 /** O que o painel mostra quando a revisão não muda a carga. */

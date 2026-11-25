@@ -34,10 +34,13 @@ export type Kind = 'plan' | 'review' | 'assess';
 // treino e `max` na avaliação, que roda depois do treino e pode demorar.
 //
 // A revisão acontece a cada 30 s e a resposta só vale enquanto as leituras
-// enviadas ainda dizem o que está acontecendo: ela tem 12 s e nenhuma nova
-// tentativa. Sem resposta, o app segue com a própria conta, e a revisão
-// seguinte já vem com leituras novas. A trava que alivia a carga acima do teto
-// não depende da IA.
+// enviadas ainda dizem o que está acontecendo: ela tem 28 s, o que ainda cabe
+// antes da revisão seguinte, e nenhuma nova tentativa. Sem resposta, o app
+// segue com a própria conta, e a revisão seguinte já vem com leituras novas. A
+// sessão só aplica uma resposta com a etapa e os alvos ainda os do pedido
+// (`current`, em session.ts) e a esteira ainda na carga medida dele
+// (`sameMeasuredLoad`). A trava que alivia a carga acima do teto não depende da
+// IA.
 //
 // Não vai `temperature`: a API da DeepSeek ignora esse parâmetro com raciocínio
 // ligado. O único controle de amostragem que vale nesse modo é `top_p`, aceito
@@ -49,7 +52,7 @@ const settings: Record<
   { effort: 'low' | 'high' | 'max'; timeoutMs: number; retries: number }
 > = {
   plan: { effort: 'high', timeoutMs: 300_000, retries: 3 },
-  review: { effort: 'low', timeoutMs: 12_000, retries: 0 },
+  review: { effort: 'low', timeoutMs: 28_000, retries: 0 },
   assess: { effort: 'max', timeoutMs: 2_400_000, retries: 3 },
 };
 
@@ -198,7 +201,7 @@ export async function callModel<T>(
   parse: (json: unknown) => T,
   { signal, onAttempt, journal = true }: CallOptions = {},
 ): Promise<T> {
-  // A leitura da chave conta no prazo da primeira tentativa: na revisão são 12 s ao todo.
+  // A leitura da chave conta no prazo da primeira tentativa: na revisão são 28 s ao todo.
   const { retries, timeoutMs } = settings[kind];
   const begun = Date.now();
   const key = await keyWithin(timeoutMs, signal);

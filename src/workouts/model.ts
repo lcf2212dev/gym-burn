@@ -178,10 +178,12 @@ export type MinuteLoad = [kmhMs: number, inclineMs: number, ms: number];
  * Ajuste de carga aplicado durante o treino. `from` e `to` são os alvos de
  * antes e de depois, como [km/h, %]; não existem nos registros mais antigos.
  * `by` diz quem decidiu: a trava do aparelho (BPM do momento acima do teto), a
- * IA, a regra local do app ou, com `'bloco'`, a decisão tomada na recuperação
- * para o bloco seguinte (veja `intervals.ts`): aí `stage` é o bloco que ainda
- * vai começar e `bpm`, o BPM do fim do bloco anterior. Também não existe nos
- * registros mais antigos.
+ * IA, a regra local do app, com `'bloco'`, a decisão tomada na recuperação
+ * para o bloco seguinte (veja `intervals.ts`), em que `stage` é o bloco que
+ * ainda vai começar e `bpm`, o BPM do fim do bloco anterior, ou, com
+ * `'pessoa'`, a carga que ela manteve acima do alvo, com o BPM sem passar do
+ * teto, e que o app adotou como alvo (`decision` "adotar carga"; veja
+ * `holding`, em session.ts). Também não existe nos registros mais antigos.
  */
 export type Change = {
   second: number;
@@ -190,7 +192,7 @@ export type Change = {
   bpm: number;
   from?: [number, number];
   to?: [number, number];
-  by?: 'trava' | 'ia' | 'app' | 'bloco';
+  by?: 'trava' | 'ia' | 'app' | 'bloco' | 'pessoa';
 };
 export type Workout = {
   id: string;

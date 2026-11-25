@@ -66,18 +66,18 @@ it('sem chave a revisão falha na hora, sem rede e sem encher o diário', async 
   expect(saveCall).not.toHaveBeenCalled();
 });
 
-it('a leitura da chave conta nos 12 s da revisão: uma que não volta não prende a chamada', async () => {
+it('a leitura da chave conta nos 28 s da revisão: uma que não volta não prende a chamada', async () => {
   jest.useFakeTimers();
   jest.mocked(SecureStore.getItemAsync).mockReturnValue(new Promise(() => {}));
   const call = reviewLoad(input);
   const failed = expect(call).rejects.toThrow('A chave DeepSeek não pôde ser lida a tempo.');
-  await jest.advanceTimersByTimeAsync(12_000);
+  await jest.advanceTimersByTimeAsync(28_000);
   await failed;
   expect(fetchMock).not.toHaveBeenCalled();
   expect(saveCall).not.toHaveBeenCalled();
 });
 
-it('a revisão vai com esforço baixo e desiste em 12 s, sem nova tentativa', async () => {
+it('a revisão vai com esforço baixo e desiste em 28 s, sem nova tentativa', async () => {
   jest.useFakeTimers();
   fetchMock.mockImplementation(
     (_: string, init: RequestInit) =>
@@ -87,7 +87,7 @@ it('a revisão vai com esforço baixo e desiste em 12 s, sem nova tentativa', as
   );
   const call = reviewLoad(input);
   const failed = expect(call).rejects.toThrow('Falha de conexão com a DeepSeek. Tente novamente.');
-  await jest.advanceTimersByTimeAsync(11_999);
+  await jest.advanceTimersByTimeAsync(27_999);
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(saveCall).not.toHaveBeenCalled();
   await jest.advanceTimersByTimeAsync(1);
@@ -97,7 +97,7 @@ it('a revisão vai com esforço baixo e desiste em 12 s, sem nova tentativa', as
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ reasoning_effort: 'low' });
   expect(saveCall).toHaveBeenCalledTimes(1);
-  expect(saveCall).toHaveBeenCalledWith('review', expect.objectContaining({ ok: false, attempt: 1, effort: 'low', version: '10' }));
+  expect(saveCall).toHaveBeenCalledWith('review', expect.objectContaining({ ok: false, attempt: 1, effort: 'low', version: '11' }));
 });
 
 it('uma revisão cancelada fica no diário como cancelada, e não como falha de conexão', async () => {
