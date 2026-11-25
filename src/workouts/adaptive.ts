@@ -5,6 +5,7 @@ import {
   MAX_INCLINE_PERCENT,
   MAX_SPEED_KMH,
   median,
+  metabolicCost,
   RUN_FROM_KMH,
   RUN_MAX_INCLINE_PERCENT,
   validBpm,
@@ -367,8 +368,18 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
  * seguinte.
  */
 export const MAX_RAISE_METS = 1;
-/** Uma etapa leve não é aliviada abaixo disto: é a linha mais leve da escada do plano. */
-const EASY_FLOOR_KMH = 3;
+/**
+ * Nenhuma etapa é aliviada abaixo disto, nem a leve nem o bloco de esforço: é
+ * a linha mais leve da escada do plano. O bloco descia até 1 km/h, e em 24/11
+ * cortes empilhados deixaram o resto da etapa principal nesse ritmo. Com a
+ * esteira já abaixo daqui a velocidade não desce mais: só a rampa (veja
+ * `correctedStage`). Um alvo abaixo daqui não passa aos blocos seguintes
+ * (`commit`, em session.ts, e `nextBlockLoad`).
+ */
+export const EASY_FLOOR_KMH = 3;
+/** A tolerância com que o guia dá um alvo por atingido (veja `advanceGuidance`). */
+const SPEED_TOLERANCE_KMH = 0.051;
+const INCLINE_TOLERANCE_PERCENT = 0.251;
 /**
  * Meio ponto de rampa vale uns 5 bpm, mais que os 3 do alvo. O ajuste fino é
  * a velocidade: com rampa, a caminhada usa de 4,9 a 5,2 km/h, e cada 0,1 km/h
@@ -388,11 +399,14 @@ const EPSILON = 1e-9;
 type Point = { speed: number; incline: number };
 const walkCost = (p: Point) => acsm(p.speed, p.incline, false);
 
+/** O valor medido; dentro da tolerância do guia, o alvo: a esteira informa 4,995% quando está em 5%. */
+const held = (measured: number, target: number, tolerance: number) =>
+  Math.abs(measured - target) < tolerance ? target : measured;
+
 /**
- * De onde parte um alívio: o alvo da etapa, ou a carga medida quando a esteira
- * está abaixo dele, para o alvo novo não exigir um aumento no painel. Dentro
- * da tolerância com que o guia dá o alvo por atingido vale o alvo: a esteira
- * informa 4,995% quando está em 5%.
+ * O degrau mais alto de onde um alívio desce, em cada um dos dois alvos: o da
+ * etapa, ou o medido quando a esteira está abaixo dele, para o alvo novo não
+ * exigir um aumento no painel. Dentro da tolerância vale o alvo.
  */
 function relief(measured: number, target: number, steps: number, tolerance: number) {
   if (Math.abs(measured - target) < tolerance) return target;
@@ -424,6 +438,13 @@ function walkSteps(from: Point, direction: -1 | 1, floor: number) {
   return points;
 }
 
+/** As rampas abaixo de `incline`, de meio em meio ponto até 0, na mesma velocidade. */
+function rampSteps(speed: number, incline: number) {
+  const points: Point[] = [];
+  for (let grade = incline - 0.5; grade > -EPSILON; grade -= 0.5) points.push({ speed, incline: Math.max(0, grade) });
+  return points;
+}
+
 /**
  * A carga de custo mais perto de `target` sem passar dele por mais que
  * `tolerance`; entre quase iguais, a mais rápida.
@@ -451,9 +472,18 @@ const cheapest = (points: Point[]) =>
  * degraus de 0,1 km/h e 0,5%, e nenhum alvo fica entre o teto da caminhada
  * (5,2 km/h) e o começo da corrida (6 km/h).
  *
- * Ao aliviar, o custo cai `mets`, ou 0,03 MET a menos que isso, com o corte
- * que chegar mais perto, e nem a velocidade nem a rampa sobem, sem exceção. A
- * caminhada combina rampa e velocidade (veja `walkSteps`). A corrida perde
+ * Ao aliviar, o custo da carga medida, a que o BPM mostra, cai `mets`, ou
+ * 0,03 MET a menos que isso, com o corte que chegar mais perto, e nem a
+ * velocidade nem a rampa sobem, sem exceção: nenhum dos dois passa do alvo nem
+ * do que a esteira mede. Quem não seguiu um corte e segue acima do alvo não
+ * leva outro por cima dele: se o alvo já custa menos que o corte pedido a
+ * partir da carga medida, ele fica como está, mesmo quando um dos dois
+ * componentes medidos está abaixo dele. Partir do alvo já cortado somava
+ * os cortes, e em 24/11 o alvo desceu de 4,4 km/h plano a 1 km/h com a pessoa
+ * firme a 5,2 km/h e 2,5%, no alvo. A caminhada combina rampa e velocidade
+ * (veja `walkSteps`) e não desce de 3 km/h, nem no bloco de esforço; com a
+ * esteira já abaixo disso, só a rampa desce, na velocidade medida, e sem rampa
+ * o alvo fica como está. A corrida perde
  * velocidade até 6 km/h, depois rampa, de meio em meio ponto até 0, e, se nem
  * 6 km/h plano bastar, passa a andar a 5,2 km/h com a rampa de antes (a do
  * alvo, ou a medida, se menor). Essa troca já é o alívio: a carga não desce
@@ -481,12 +511,19 @@ export function correctedStage(
   let { speed, incline } = stage;
   if (kind === 'aliviar') {
     if (measured.speedKmh < 1) return stage;
-    speed = relief(measured.speedKmh, speed, 10, 0.051);
-    incline = Math.max(0, relief(measured.inclinationPercent, incline, 2, 0.251));
+    // O custo a tirar sai da carga em que a pessoa está, e não do alvo: acima
+    // dele, o corte anterior ainda não chegou ao painel.
+    const kmh = held(measured.speedKmh, speed, SPEED_TOLERANCE_KMH);
+    const grade = Math.max(0, held(measured.inclinationPercent, incline, INCLINE_TOLERANCE_PERCENT));
+    speed = relief(measured.speedKmh, speed, 10, SPEED_TOLERANCE_KMH);
+    incline = Math.max(0, relief(measured.inclinationPercent, incline, 2, INCLINE_TOLERANCE_PERCENT));
     // Quem já baixou a esteira para andar num bloco de corrida está caminhando:
     // a conta parte dessa carga, pela equação de caminhada.
     const running = speed >= RUN_FROM_KMH;
-    const target = acsm(speed, incline, running) - mets;
+    const target = metabolicCost(kmh, grade) - mets;
+    // O alvo em vigor já basta: descer a escada a partir de um degrau mais
+    // baixo que ele num dos componentes cortaria além do pedido.
+    if (metabolicCost(stage.speed, stage.incline) <= target + RELIEF_TOLERANCE_METS + EPSILON) return stage;
     if (running) {
       const ramp = incline;
       // Correndo a rampa não passa de 2%: um alvo antigo acima disso volta a ele.
@@ -512,8 +549,13 @@ export function correctedStage(
     } else {
       // Um alvo antigo acima do teto da caminhada volta a ele.
       speed = Math.min(speed, WALK_TOP_KMH);
-      const floor = Math.min(speed, stage.measure ? EASY_FLOOR_KMH : 1);
-      const points = walkSteps({ speed, incline }, -1, floor);
+      // Com a esteira já abaixo do piso a velocidade fica onde a pessoa a pôs:
+      // descer mais passaria do piso, e subir pediria um aumento no painel. O
+      // corte é na rampa, pelo menos meio ponto (um alvo que só descesse até a
+      // esteira não aliviaria nada), e sem rampa não há o que cortar.
+      const slow = speed < EASY_FLOOR_KMH - EPSILON;
+      if (slow && incline <= 0) return stage;
+      const points = slow ? rampSteps(speed, incline) : walkSteps({ speed, incline }, -1, EASY_FLOOR_KMH);
       const cut = closest(points, target, RELIEF_TOLERANCE_METS);
       ({ speed, incline } = cut ?? cheapest(points) ?? { speed, incline });
     }
@@ -555,6 +597,35 @@ export function runFloor(loads: Load2[]): Load2 | null {
   return inclines.length
     ? { speed: RUN_FROM_KMH, incline: Math.min(RUN_MAX_INCLINE_PERCENT, ...inclines) }
     : null;
+}
+
+/**
+ * O alvo em que vira a carga medida que a pessoa mantém acima do alvo da etapa
+ * (veja `holding`, em session.ts): ela nos degraus do guia (0,1 km/h e 0,5%),
+ * com 5,2 km/h e a mesma rampa se a velocidade cai entre a caminhada e a
+ * corrida, e a rampa até 2% correndo. `null` com a esteira nos alvos, quando
+ * essa carga não custa mais que o alvo e quando ela troca a modalidade do
+ * alvo, de caminhada para corrida ou o contrário: as duas equações não se
+ * comparam para quem corre devagar (pelas equações, andar a 5,2 km/h com 7,5%
+ * custa menos que correr a 6 km/h com 1%, e nos dados é o contrário; veja
+ * `correctedStage`). Uma corrida adotada num bloco de caminhada viraria piso da
+ * corrida para os blocos seguintes no primeiro alívio (`runFloor`).
+ */
+export function adoptedLoad(stage: Stage, measured: TreadmillSample): Load2 | null {
+  const { speedKmh, inclinationPercent } = measured;
+  if (speedKmh === null || inclinationPercent === null) return null;
+  const reached =
+    Math.abs(speedKmh - stage.speed) < SPEED_TOLERANCE_KMH &&
+    Math.abs(inclinationPercent - stage.incline) < INCLINE_TOLERANCE_PERCENT;
+  if (reached) return null;
+  let speed = Math.min(MAX_SPEED_KMH, Math.max(1, round1(speedKmh)));
+  let incline = Math.min(MAX_INCLINE_PERCENT, Math.max(0, Math.round(inclinationPercent * 2) / 2));
+  if (speed > WALK_TOP_KMH && speed < RUN_FROM_KMH) speed = WALK_TOP_KMH;
+  const running = speed >= RUN_FROM_KMH;
+  if (running !== stage.speed >= RUN_FROM_KMH) return null;
+  if (running) incline = Math.min(incline, RUN_MAX_INCLINE_PERCENT);
+  if (speed === stage.speed && incline === stage.incline) return null;
+  return metabolicCost(speed, incline) > metabolicCost(stage.speed, stage.incline) ? { speed, incline } : null;
 }
 
 /** O nome do ajuste que levou a etapa de `before` a `after`, como fica no registro do treino. */

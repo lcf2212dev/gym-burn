@@ -188,7 +188,7 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   );
   // O prompt já não fala em leitura só de 3 em 3 minutos: com a cinta ela é contínua.
   expect(system).toContain('o tempo todo com a cinta no peito');
-  expect(PROMPT_VERSION).toBe('10');
+  expect(PROMPT_VERSION).toBe('11');
   // Vão até 6 sessões válidas, e não mais 5.
   const seven = [1, 2, 3, 4, 5, 6, 7].map((days) => done(days));
   expect(data(base, seven).recent.map((r) => r.daysAgo)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -497,8 +497,8 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
       shortBlock: true,
       laterBlocks: 2,
     },
-    // 162 agora, 3 acima de 30 s atrás: a reta chega a 162 + 3 × 140 ÷ 30 = 176, 5 acima do teto.
-    // Para voltar ao meio do alvo (169,5) seriam 7 bpm a menos.
+    // 162 agora, 3 acima de 30 s atrás, com 140 s pela frente: a subida perde força (0,61 por trecho
+    // de 30 s) e soma 4 bpm, 166, 5 abaixo do teto e do alvo. A reta chegava a 176, acima do teto.
     bpm: {
       now: 162,
       risePer30s: 3,
@@ -506,11 +506,11 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
       trend: 'subindo',
       position: 'na faixa',
       belowTopBpm: 9,
-      projectedEndBpm: 176,
-      projectedOverTopBpm: 5,
-      endsAboveTop: true,
-      endsBelowAim: false,
-      reduceToAimBpm: 7,
+      projectedEndBpm: 166,
+      projectedOverTopBpm: -5,
+      endsAboveTop: false,
+      endsBelowAim: true,
+      reduceToAimBpm: null,
     },
     allowed: ['manter', 'reduzir'],
     limits: { maxReduceBpm: 15, maxRaiseBpm: 0 },
@@ -542,7 +542,7 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
   expect(first.zone[2]).toBeGreaterThan(0);
   const at = (moment: typeof live | null, sinceRelief: number | null = null) =>
     reviewPrompt({ workout: w, index: 3, left: 140, load, features, live: moment, samples: strap, now, allowed: ['manter', 'reduzir'], maxRaiseBpm: 0, sinceRelief }).user;
-  // A reta não passa da FC máxima e, com o BPM caindo, fica no momento.
+  // A projeção não passa da FC máxima e, com o BPM caindo, fica no momento.
   expect(at({ bpm: 175, rise: 10 })).toMatchObject({
     bpm: { projectedEndBpm: 180, projectedOverTopBpm: 9, position: 'acima', belowTopBpm: -4, endsAboveTop: true, reduceToAimBpm: 11 },
   });
@@ -564,15 +564,58 @@ it('a revisão recebe o momento, a subida, a projeção até o fim da etapa, a s
   expect(system).toContain('folga negativa');
   for (const decision of reviewDecisions) expect(system).toContain('- "' + decision + '"');
   expect(system).toContain('{"reason": "<motivo>", "decision": "<decisão>", "bpm": <inteiro>}');
-  expect(system).toContain('superestima');
+  expect(system).toContain('cada trecho de 30 s sobe 0,61 do que subiu o anterior');
   // O BPM do momento pode vir dos batimentos (RR): o texto diz como, e que vale o maior.
   expect(system).toContain('o maior entre ela e a mediana dos batimentos');
   expect(system).not.toContain('now: o BPM do momento: a mediana dos últimos 5 s da cinta.');
-  // Logo depois de um alívio a IA só reduz com o corte anterior já no painel e a reta acima do teto.
+  // Logo depois de um alívio a IA só reduz com o corte anterior já no painel e a projeção acima do teto.
   expect(system).toContain(
     'Se session.reliefSettling é true, o último alívio ainda está fazendo efeito: reduza só se stage.targetsReached é true (o corte anterior já está no painel) e endsAboveTop é true; senão, mantenha.',
   );
   expect(system).toContain('json');
+});
+
+it('o treino de 24/11: a projeção tem horizonte curto, e com o BPM abaixo da faixa a regra não pede corte', () => {
+  // Base aeróbica de 45 min com a FC máxima de 179: faixa de 116 a 134, alvo de 131 a 134.
+  const plan: Plan = {
+    ...makePlan('Base aeróbica', { warmup: 5, reps: 1, work: 35, recovery: 0, cooldown: 5 }, 5.2, 2.5),
+    objective: 'Base aeróbica',
+    zone: zones['Base aeróbica'],
+  };
+  const w = newWorkout(profile, 'ble', plan, { rest: null, max: 179, maxSource: 'IA' });
+  const zone = dailyTarget(plan, profile, w.hr);
+  expect(zone).toMatchObject({ low: 116, high: 134 });
+  const features = pulseFeatures([{ bpm: 104, at: 0, kmh: 5.2, incline: 2.5 }], zone)!;
+  const load = { stage: plan.stages[1], easy: false, reached: true, secondsAtLoad: 40, closing: false, short: false };
+  const at = (bpm: number, rise: number, left: number) =>
+    (
+      reviewPrompt({ workout: w, index: 1, left, load, features, live: { bpm, rise }, samples: [], now: 0, allowed: ['manter', 'reduzir'], maxRaiseBpm: 0, sinceRelief: null })
+        .user as { bpm: Record<string, unknown> }
+    ).bpm;
+  // 40 s depois do aquecimento: 105 e subindo 11 em 30 s, com 2060 s de etapa pela frente. A reta
+  // chegava à FC máxima (179) e pedia 15 bpm a menos com o BPM abaixo da faixa. A subida que perde
+  // força soma uns 17 bpm: 122, abaixo do teto.
+  expect(at(105, 11, 2060)).toMatchObject({
+    position: 'abaixo',
+    projectedEndBpm: 122,
+    projectedOverTopBpm: -12,
+    endsAboveTop: false,
+    reduceToAimBpm: null,
+  });
+  // No teto, subindo 3 (o ruído da cinta num patamar), com 1368 s pela frente: a reta dava 179; agora 5 bpm a mais.
+  expect(at(134, 3, 1368)).toMatchObject({ position: 'na faixa', projectedEndBpm: 139, endsAboveTop: true, reduceToAimBpm: 7 });
+  // Perto do fim da etapa as duas contas quase coincidem: 136 pela reta, 135 agora.
+  expect(at(134, 2, 35)).toMatchObject({ projectedEndBpm: 135 });
+  // Caindo, a projeção fica no momento; subindo muito, não passa da FC máxima.
+  expect(at(120, -3, 600)).toMatchObject({ projectedEndBpm: 120, endsBelowAim: true });
+  expect(at(170, 20, 600)).toMatchObject({ projectedEndBpm: 179 });
+  // A conta nova está no texto, e o corte pela projeção exige o BPM na faixa.
+  const { system } = reviewPrompt({ workout: w, index: 1, left: 2060, load, features, live: { bpm: 105, rise: 11 }, samples: [], now: 0, allowed: ['manter'], maxRaiseBpm: 0, sinceRelief: null });
+  expect(system).not.toContain('É uma reta');
+  expect(system).toContain('τ = 60 s');
+  expect(system).toContain('Reduza se position é "acima", ou se position é "na faixa", endsAboveTop é true e a série não mostra a subida perdendo força.');
+  expect(system).toContain('Uma decisão fora de allowed nunca vale');
+  expect(PROMPT_VERSION).toBe('11');
 });
 
 it('a origem do repouso vai nos três prompts, para a IA não descontar duas vezes', () => {
@@ -677,7 +720,7 @@ it('com a cadência da cinta, a avaliação recebe a cadência média e a varia�
   expect(review.user).toMatchObject({ gait: { cadenceSpm: null, cadenceChangePercent: null } });
   expect(review.system).toContain('nenhuma regra abaixo depende deles');
   expect(review.system).toContain('secondsRemaining pode mudar de uma revisão para outra');
-  expect(review.system).toContain('"trava", "ia", "app" ou "bloco"');
+  expect(review.system).toContain('"trava", "ia", "app", "bloco" ou "pessoa"');
 });
 
 it('a resposta da revisão só vale com uma decisão aceita e bpm em número', () => {

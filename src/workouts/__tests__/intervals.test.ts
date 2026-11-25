@@ -226,6 +226,18 @@ it('um tiro de corrida não herda caminhada da decisão, e depois de um tiro que
   expect(decide({ plan, index: 2, ends: [end(1, 5.2, 172)], changes: [{ ...walkOff, second: 610 }] })).toMatchObject({ stages: [] });
 });
 
+it('um tiro que terminou abaixo de 3 km/h não passa essa carga aos seguintes', () => {
+  // A pessoa baixou a esteira a 2,5 km/h no fim do 1º tiro. Antes o corte (175 BPM) e até o "manter"
+  // (160) levavam os tiros seguintes a 2,5 km/h; agora eles ficam no alvo planejado, e a trava cuida
+  // do que vier dentro deles. O veredito e a previsão continuam no painel.
+  const plan = vo2(6.6);
+  for (const bpm of [175, 160]) {
+    const slow = decide({ plan, index: 2, ends: [end(1, 2.5, bpm, 0)] })!;
+    expect(slow).toMatchObject({ stages: [], to: plan.stages[3] });
+  }
+  expect(decide({ plan, index: 2, ends: [end(1, 2.5, 175, 0)] })).toMatchObject({ verdict: 'reduzir' });
+});
+
 it('sem a cinta, sem o fim medido ou com ele fora das cargas do guia, não há decisão', () => {
   const plan = vo2(6.6);
   expect(decide({ plan, index: 2, ends: [end(1, 6.6, 160)], strapReadings: 9 })).toBeNull();
