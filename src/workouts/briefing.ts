@@ -230,12 +230,17 @@ export function stageNote({
     const load = formatDecimal(nextBlock.speed, 1) + ' km/h e ' + formatTrimmed(nextBlock.incline, 1) + '%';
     const verdict = !nextBlock.changed
       ? 'mesma carga'
-      : nextBlock.verdict === 'reduzir'
-        ? 'carga reduzida'
-        : nextBlock.verdict === 'aumentar'
-          ? 'carga aumentada'
-          : // Um "manter" que muda a carga leva adiante a do fim do tiro anterior.
-            'carga do anterior mantida';
+      : nextBlock.carried
+        ? // A carga do fim do bloco anterior, mais pesada que a do plano: como
+          // estava ou, se a previsão pediu corte, já aliviada.
+          nextBlock.verdict === 'reduzir'
+          ? 'carga do anterior, aliviada'
+          : 'carga do anterior mantida'
+        : nextBlock.verdict === 'reduzir'
+          ? 'carga reduzida'
+          : nextBlock.verdict === 'aumentar'
+            ? 'carga aumentada'
+            : 'carga do anterior mantida';
     return { text: name + ' · ' + load + ' · ' + verdict, tone: 'info' };
   }
   if (recovery && recovery.index === index - 1 && recovery.reason !== 'plano' && into < ENDED_NOTE_SECONDS) {

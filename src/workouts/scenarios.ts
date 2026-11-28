@@ -240,7 +240,7 @@ const planCases: PlanCase[] = [
     exact: true,
   },
   // Primeiro VO₂máx, com pontos de base (4,8 METs, 126) e de recuperação (3,1 METs, 100): alvo de 7,7 METs.
-  // A caminhada a 5,2 km/h para em 6,8 METs (rampa de 7,5%): entra a corrida, a 6,5 km/h.
+  // A pessoa prefere a rampa à corrida: a caminhada a 5,2 km/h sobe a rampa até 15%, e 9,5% custa 7,7.
   {
     name: 'vo2-primeira-vez',
     session: vo2,
@@ -248,29 +248,68 @@ const planCases: PlanCase[] = [
       ...steady(now, [1], { pace: 5.2, grade: 3, bpmWork: 126, bpmEasy: 104, drop: 16 }),
       ...steady(now, [2], { session: recovery, pace: 4.5, grade: 0, bpmWork: 100, bpmEasy: 92 }),
     ],
-    expect: { pace: 6.5, grade: 1 },
+    expect: { pace: 5.2, grade: 9.5 },
   },
+  // O último VO₂máx foi corrido a 6 km/h e 1% (7,0 METs) com 169 BPM, junto do teto de 171. A rampa da
+  // caminhada alcança esse custo, e a corrida não se repete: com a base (4,8 METs, 126), 19,5 bpm por
+  // MET, e o alvo vai a 7,1 METs: 5,2 km/h a 8% (7,0).
+  {
+    name: 'vo2-corrida-leve-vira-rampa',
+    session: vo2,
+    history: (now) => [
+      ...steady(now, [2], { pace: 5.2, grade: 3, bpmWork: 126, bpmEasy: 104, drop: 16 }),
+      ...steady(now, [5], { session: vo2, pace: 6, grade: 1, bpmWork: 169, bpmEasy: 125, drop: 22 }),
+    ],
+    expect: { pace: 5.2, grade: 8 },
+  },
+  // Um limiar correndo a 10 km/h e 1% (11,0 METs) deu 160 BPM, junto do teto de 162: mais pesado que a
+  // rampa toda da caminhada (10,2 METs), ele se repete.
   {
     name: 'limiar-correndo-junto-do-teto',
     session: threshold,
     history: (now) => [
       ...steady(now, [1], { pace: 5.2, grade: 3, bpmWork: 126, bpmEasy: 104, drop: 16 }),
-      ...steady(now, [7], { session: threshold, pace: 8.5, grade: 1, bpmWork: 160, bpmEasy: 120, drop: 24 }),
+      ...steady(now, [7], { session: threshold, pace: 10, grade: 1, bpmWork: 160, bpmEasy: 120, drop: 24 }),
     ],
-    expect: { pace: 8.5, grade: 1 },
+    expect: { pace: 10, grade: 1 },
     exact: true,
   },
-  // Um limiar antigo correndo a 8,5 km/h e 3% deu 160 BPM, junto do teto de 162. Correndo a
-  // rampa não passa de 2%, então a carga não se repete: de 10,2 METs o alvo vai a 10,3, e na
-  // escada, que só tem corrida a 1%, isso é 9 km/h.
+  // Um limiar antigo correndo a 10 km/h e 3% deu 160 BPM, junto do teto de 162. Correndo a
+  // rampa não passa de 2%, então a carga não se repete: de 11,8 METs o alvo vai a 11,9, e na
+  // escada, que só tem corrida a 1%, isso é 11 km/h (11,9).
   {
     name: 'limiar-correndo-rampa-alta-recalcula',
     session: threshold,
     history: (now) => [
       ...steady(now, [1], { pace: 5.2, grade: 3, bpmWork: 126, bpmEasy: 104, drop: 16 }),
-      ...steady(now, [7], { session: threshold, pace: 8.5, grade: 3, bpmWork: 160, bpmEasy: 120, drop: 24 }),
+      ...steady(now, [7], { session: threshold, pace: 10, grade: 3, bpmWork: 160, bpmEasy: 120, drop: 24 }),
     ],
-    expect: { pace: 9, grade: 1 },
+    expect: { pace: 11, grade: 1 },
+  },
+  // O caso de 27/11. O último limiar foi a 5,6 km/h e 3,5% (5,3 METs pela equação de caminhada) com
+  // 161 BPM: numa velocidade que o guia não pede, ele vem marcado como aproximado e não entra na
+  // conta, porque há outra sessão. A referência é a base de 2 dias atrás: 133 BPM no patamar de
+  // 5,2 km/h e 4% (5,3 METs), com repouso de 61: 16,7 bpm por MET. Para 162, 7,0 METs: 5,2 km/h a 8%.
+  // Partindo do limiar a conta daria 4% de rampa.
+  {
+    name: 'limiar-referencia-fora-da-escada',
+    session: threshold,
+    history: (now) => [
+      ...steady(now, [2], {
+        pace: 5.2,
+        grade: 4,
+        bpmWork: 133,
+        bpmEasy: 105,
+        drop: 14,
+        rest: 76,
+        ramp: [
+          { minutes: 10, grade: 4.5, bpm: 130 },
+          { minutes: 25, grade: 4, bpm: 133 },
+        ],
+      }),
+      ...steady(now, [6], { session: threshold, pace: 5.6, grade: 3.5, bpmWork: 161, bpmEasy: 120, drop: 25 }),
+    ],
+    expect: { pace: 5.2, grade: 8 },
   },
   // Em recuperação a faixa é teto e o alvo fica no terço de baixo (96 BPM). 4,8 METs deram
   // 150 BPM, com repouso de 70: 21 bpm por MET. O alvo pede 2,2 METs, abaixo da carga mais

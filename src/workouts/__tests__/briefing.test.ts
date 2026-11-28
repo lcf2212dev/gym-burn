@@ -247,7 +247,7 @@ describe('painel com a cadência, a recuperação e o próximo tiro', () => {
       spoken: FATIGUE_TIP,
     });
     // Na recuperação, a carga do próximo tiro e se mudou.
-    const next = { index: 5, speed: 9.1, incline: 1, predictedBpm: 168, verdict: 'reduzir' as const, changed: true };
+    const next = { index: 5, speed: 9.1, incline: 1, predictedBpm: 168, verdict: 'reduzir' as const, changed: true, carried: false };
     expect(stageNote({ ...base, index: 4, into: 20, nextBlock: next })).toEqual({
       text: 'Próximo tiro · 9,1 km/h e 1% · carga reduzida',
       tone: 'info',
@@ -265,6 +265,14 @@ describe('painel com a cadência, a recuperação e o próximo tiro', () => {
     // Um bloco longo é "bloco", não "tiro".
     const long = makePlan('Limiar', { warmup: 10, reps: 3, work: 8, recovery: 2, cooldown: 5 }, 8, 1);
     expect(stageNote({ ...base, plan: long, index: 2, into: 20, nextBlock: { ...next, index: 3 } })?.text).toMatch(/^Próximo bloco/);
+    // A carga do fim do bloco anterior, mais pesada que a do plano, já com o corte que a previsão pediu:
+    // "carga reduzida" diria o contrário do que o painel pede.
+    expect(
+      stageNote({ ...base, plan: long, index: 2, into: 20, nextBlock: { ...next, index: 3, speed: 5.2, incline: 7, carried: true } })?.text,
+    ).toBe('Próximo bloco · 5,2 km/h e 7% · carga do anterior, aliviada');
+    expect(
+      stageNote({ ...base, plan: long, index: 2, into: 20, nextBlock: { ...next, index: 3, speed: 5.2, incline: 7.5, verdict: 'manter', carried: true } })?.text,
+    ).toBe('Próximo bloco · 5,2 km/h e 7,5% · carga do anterior mantida');
     // Nos primeiros 30 s do tiro seguinte, como o coração encerrou a recuperação.
     const early = { index: 4, planned: 180, seconds: 135, reason: 'cedo' as const };
     expect(stageNote({ ...base, index: 5, into: 10, recovery: early })).toEqual({

@@ -14,6 +14,8 @@ import {
   MAX_RAISE_METS,
   raiseMargin,
   RELIEF_SETTLE_SECONDS,
+  SETTLED_SECONDS,
+  SHORT_BLOCK_SECONDS,
   type Correction,
 } from './adaptive';
 import {
@@ -167,6 +169,12 @@ export type NextBlock = {
   /** A carga do próximo bloco antes e depois da decisão (iguais quando nada muda). */
   from: Stage;
   to: Stage;
+  /**
+   * A carga do fim do bloco anterior passou ao próximo, mais pesada que a que
+   * ele tinha no plano, sem a previsão pedir aumento: como estava (`manter`) ou
+   * já com o corte que a previsão pediu (`reduzir`).
+   */
+  carried: boolean;
   /** As etapas cuja carga muda: o próximo bloco e, num corte, os seguintes que custam mais. */
   stages: number[];
 };
@@ -209,6 +217,23 @@ export type NextBlock = {
  * plano. Um bloco de menos de 1 min não decide
  * nada: nos últimos 20 s dele a lona ainda pode estar acelerando, e a
  * referência ficaria abaixo do que a pessoa fez.
+ *
+ * Num bloco longo (mais de 5 min, que não é um tiro) a carga é acertada dentro
+ * dele: as revisões sobem, a trava corta, e a carga que a pessoa mantém vira o
+ * alvo. Se ele termina, com a pessoa na lona, numa carga que não passa do
+ * alvo dele, essa carga é a que o app pediu e mediu, e o próximo bloco parte
+ * dela, já com o corte que a previsão pedir, mesmo com leitura acima do teto
+ * no bloco, com corte da trava na sessão e sem o limite de 1 MET acima do
+ * plano. Em 27/11, num limiar planejado a 4% de rampa, o 1º bloco foi levado a
+ * 7% e terminou no teto; como a trava tinha agido, o 2º e o 3º voltaram aos 4%
+ * do plano, e a pessoa passou metade de cada um abaixo da faixa (ou subiu a
+ * rampa por conta própria). Nesse caminho, com leitura acima do teto no bloco
+ * ou no começo da recuperação, a previsão usa pelo menos o acúmulo padrão: o
+ * acúmulo medido sai de fins de bloco em cargas diferentes, e um bloco que
+ * encostou no teto não deixa folga para o erro dele. E a decisão não sobe a
+ * carga pelo fim de um bloco em que o app ou a IA a subiram a menos de 4 min
+ * do fim: o BPM ainda subia para o patamar dela, e a carga do fim passa como
+ * está.
  */
 export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   const { plan, index, zone, rest, ends } = input;
@@ -222,7 +247,23 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   const slope = bpmPerMet(end.bpm, cost(reference), rest);
   // Com a pausa planejada curta, o acúmulo esperado sem medida ainda é maior.
   const shortRest = plan.stages[index].seconds < RECOVERY_MIN_SECONDS;
-  const carry = carryBpm(plan, ends, rest, shortRest ? SHORT_RECOVERY_CARRY_BPM : DEFAULT_CARRY_BPM);
+  const fallback = shortRest ? SHORT_RECOVERY_CARRY_BPM : DEFAULT_CARRY_BPM;
+  const block = input.log[index - 1];
+  // Acima do teto: uma leitura da cinta ou o BPM do momento, o que a trava usa
+  // (com os RR ele pode passar do teto sem nenhuma leitura da cinta passar).
+  const above = (l: StageLog | undefined) => !!l && (l.zone[2] > 0 || (l.liveTop ?? 0) > zone.high);
+  // Num tiro a FC ainda sobe depois do fim: acima do teto nos primeiros
+  // segundos da recuperação também diz que a carga não pode subir.
+  const recovery = input.log[index];
+  const onBelt = !block?.offBeltMs && !input.offBelt;
+  // Num bloco longo a carga é acertada dentro dele (revisões, trava, carga
+  // adotada): se ele termina numa carga que não passa do alvo dele, com a
+  // pessoa na lona, é a carga que o app pediu e mediu, e o próximo parte dela.
+  const finished = plan.stages[index - 1];
+  const proven = finished.seconds > SHORT_BLOCK_SECONDS && onBelt && cost(reference) <= cost(finished) + EPSILON;
+  const measured = carryBpm(plan, ends, rest, fallback);
+  // O bloco encostou no teto: a previsão não conta com um acúmulo menor que o padrão.
+  const carry = proven && (above(block) || above(recovery)) ? Math.max(measured, fallback) : measured;
   const predicted = Math.round(end.bpm + carry);
   // Para subir a carga vale o fim do ÚLTIMO bloco, e não só o do próximo: o
   // acúmulo se repete a cada bloco que falta, e uma carga que cabe no próximo
@@ -230,22 +271,25 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   // força perto do teto), o que só deixa o aumento mais raro.
   const blocksLeft = effortIndexes(plan).filter((i) => i > index).length;
   const predictedLast = Math.round(end.bpm + carry * blocksLeft);
-  const block = input.log[index - 1];
   const since = startOf(plan, index) - RELIEF_SETTLE_SECONDS;
   const settling = input.changes.some(
     (c) => c.stage === index - 1 && c.by !== 'bloco' && eased(c) && c.second >= since,
   );
   const trava = input.changes.some((c) => c.by === 'trava');
-  // Acima do teto: uma leitura da cinta ou o BPM do momento, o que a trava usa
-  // (com os RR ele pode passar do teto sem nenhuma leitura da cinta passar).
-  const above = (l: StageLog | undefined) => !!l && (l.zone[2] > 0 || (l.liveTop ?? 0) > zone.high);
-  // Num tiro a FC ainda sobe depois do fim: acima do teto nos primeiros
-  // segundos da recuperação também diz que a carga não pode subir.
-  const recovery = input.log[index];
-  // As condições de todo caminho que sobe a carga do próximo bloco: o aumento e
-  // o "manter" que passa a carga do fim adiante.
-  const raisable =
-    !above(block) && !above(recovery) && !block?.offBeltMs && !input.offBelt && !settling && !trava;
+  // Um aumento do app ou da IA a menos de 4 min do fim do bloco: o BPM do fim
+  // ainda subia para o patamar dessa carga, e não serve para subir mais. A
+  // carga adotada não conta: a pessoa já estava nela 2 min antes.
+  const climbing = input.changes.some(
+    (c) =>
+      c.stage === index - 1 &&
+      c.by !== 'bloco' &&
+      c.by !== 'pessoa' &&
+      !eased(c) &&
+      c.second >= startOf(plan, index) - SETTLED_SECONDS,
+  );
+  // As condições do aumento e, num tiro, do "manter" que passa a carga do fim
+  // adiante.
+  const raisable = !above(block) && !above(recovery) && onBelt && !settling && !trava;
   // O tiro terminou andando porque um alívio nele tirou a pessoa da corrida: o
   // próximo já começa no piso da corrida (a troca vale só para a etapa em que
   // foi feita), e a decisão não reduz de novo a partir da caminhada.
@@ -262,7 +306,7 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   } else if (predicted > zone.high - CUT_ABOVE_BPM) {
     kind = 'aliviar';
     mets = Math.min(NEXT_BLOCK_MAX_METS, (predicted - (zone.high - AIM_SPAN_BPM)) / slope);
-  } else if (predictedLast < zone.high - AIM_SPAN_BPM && raisable) {
+  } else if (predictedLast < zone.high - AIM_SPAN_BPM && raisable && !climbing) {
     const room = raiseMargin(zone.high - predictedLast);
     if (room > 0) [kind, mets] = ['subir', Math.min(MAX_RAISE_METS, room / slope)];
   }
@@ -282,10 +326,11 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   // dentro dele.
   if (current.speed >= RUN_FROM_KMH && decided.speed < RUN_FROM_KMH)
     decided = { ...decided, speed: RUN_FROM_KMH, incline: 0 };
-  // Para cima, no máximo 1 MET acima da carga planejada do próximo bloco, por
-  // qualquer caminho: quem terminou a 7,6 km/h num alvo de 6,0 não leva o
-  // próximo tiro a 7,6.
-  if (cost(decided) > cost(current) + NEXT_BLOCK_MAX_METS) {
+  // Para cima, no máximo 1 MET acima da carga planejada do próximo bloco: quem
+  // terminou a 7,6 km/h num alvo de 6,0 não leva o próximo tiro a 7,6. A carga
+  // de um bloco longo que o app pediu e mediu (`proven`) passa inteira: cada
+  // aumento dentro dele já teve esse limite, e o fim dele foi medido nela.
+  if (!proven && cost(decided) > cost(current) + NEXT_BLOCK_MAX_METS) {
     const from = { ...at, speedKmh: current.speed, inclinationPercent: current.incline };
     decided = correctedStage(current, 'subir', NEXT_BLOCK_MAX_METS, from, true);
   }
@@ -302,10 +347,13 @@ export function nextBlockLoad(input: NextBlockInput): NextBlock | null {
   // Acima da carga do próximo bloco, ela só vai a ele quando a previsão pediu
   // aumento ou, num "manter", com as mesmas condições do aumento: sem isso, um
   // aumento do bloco anterior que deu certo (terminou no alvo) voltaria à carga
-  // do plano sem aviso no bloco seguinte.
-  else if (!belowFloor && cost(decided) > cost(current) + EPSILON && raisable && kind !== 'aliviar') stages = [next];
+  // do plano sem aviso no bloco seguinte. A carga de um bloco longo que o app
+  // pediu e mediu vai sempre, já com o corte que a previsão pediu.
+  else if (!belowFloor && cost(decided) > cost(current) + EPSILON && (proven || (raisable && kind !== 'aliviar')))
+    stages = [next];
   const to = stages.length ? { ...current, speed: decided.speed, incline: decided.incline } : current;
-  return { index: next, predictedBpm: predicted, carryBpm: carry, verdict, from: current, to, stages };
+  const carried = stages.length > 0 && kind !== 'subir' && cost(to) > cost(current) + EPSILON;
+  return { index: next, predictedBpm: predicted, carryBpm: carry, verdict, from: current, to, carried, stages };
 }
 
 /** A recuperação entre blocos termina quando o BPM do momento cai a este tanto da FC máxima em uso. */

@@ -12,12 +12,15 @@ export type Profile = { age: number; weightKg: number; heightCm: number };
  */
 export const MAX_SPEED_KMH = 22;
 export const MAX_INCLINE_PERCENT = 15;
-// A escada de carga: a caminhada sobe pela velocidade até 5,2 km/h, depois pela
-// inclinação até 7,5%, e a partir de 6 km/h a pessoa corre. De 5,3 a 5,9 km/h
-// não existe alvo: é rápido demais para andar e lento demais para correr. A
-// rampa da escada para em 7,5% porque dali a corrida a 6 km/h já custa mais.
+// A escada de carga: a caminhada sobe pela velocidade até 5,2 km/h e depois
+// pela inclinação, até o máximo da esteira; a corrida, de 6 km/h em diante, só
+// entra quando nem a rampa toda basta. De 5,3 a 5,9 km/h não existe alvo: é
+// rápido demais para andar e lento demais para correr. A rampa da escada
+// parava em 7,5%, de onde a corrida a 6 km/h já custa mais pela equação; em
+// 27/11 a pessoa pediu rampa em vez de corrida, e a escada passou a subir a
+// rampa inteira.
 export const WALK_TOP_KMH = 5.2;
-export const HILL_TOP_PERCENT = 7.5;
+export const HILL_TOP_PERCENT = MAX_INCLINE_PERCENT;
 export const RUN_FROM_KMH = 6;
 /** Correndo, a rampa não passa disto: a carga da corrida muda pela velocidade. */
 export const RUN_MAX_INCLINE_PERCENT = 2;

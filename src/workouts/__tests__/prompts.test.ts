@@ -181,14 +181,19 @@ it('o plano recebe a sessão do dia, a faixa, as sessões válidas e a escada de
   expect(user.loads.filter((r) => r.pace >= 6).every((r) => r.grade === 1)).toBe(true);
   expect(system).toContain('Correndo, a rampa não passa de 2%.');
   expect(system).toContain(
-    'work.targetKmh é de até 5,2 (caminhada, com qualquer rampa), ou quando work.targetKmh é de 6 em diante e work.targetInclinePercent é de até 2 (corrida)',
+    'work.targetKmh é de até 5,2 (caminhada, com qualquer rampa), ou quando work.targetKmh é de 6 em diante, work.targetInclinePercent é de até 2 e work.mets é maior que 10,2 (corrida mais pesada que a rampa toda da caminhada)',
   );
   expect(system).toContain(
-    'Com work.targetKmh acima de 5,2 e abaixo de 6, ou de 6 em diante com work.targetInclinePercent acima de 2, a carga da referência não pode ser repetida',
+    'Com work.targetKmh acima de 5,2 e abaixo de 6, ou de 6 em diante com work.targetInclinePercent acima de 2 ou com work.mets de até 10,2 (uma corrida que a rampa da caminhada substitui), a carga da referência não pode ser repetida',
   );
+  // A pessoa prefere a rampa à corrida: a escada sobe a rampa da caminhada até os 15% da esteira, e a
+  // corrida só começa onde custa mais que isso.
+  expect(system).toContain('Ela prefere subir a rampa a correr: a caminhada a 5,2 km/h sobe a rampa até 15% (10,2 METs)');
+  expect(user.loads.filter((r) => r.pace === 5.2).at(-1)).toEqual({ pace: 5.2, grade: 15, mets: 10.2 });
+  expect(user.loads.find((r) => r.pace >= 6)).toEqual({ pace: 9.5, grade: 1, mets: 10.5 });
   // O prompt já não fala em leitura só de 3 em 3 minutos: com a cinta ela é contínua.
   expect(system).toContain('o tempo todo com a cinta no peito');
-  expect(PROMPT_VERSION).toBe('11');
+  expect(PROMPT_VERSION).toBe('13');
   // Vão até 6 sessões válidas, e não mais 5.
   const seven = [1, 2, 3, 4, 5, 6, 7].map((days) => done(days));
   expect(data(base, seven).recent.map((r) => r.daysAgo)).toEqual([1, 2, 3, 4, 5, 6]);
@@ -208,16 +213,16 @@ it('a conta do plano repete a carga que ficou junto do teto da faixa e recalcula
   // 106 BPM a 4,8 METs, sem repouso: 15 bpm por MET, alvo de 6,7 METs.
   expect(planProcedure(data(base, [done(2, 106, 95)]))).toEqual({ pace: 5.2, grade: 7, repeat: false });
   // Com repouso de 70 a reta é da própria pessoa: 9,5 bpm por MET, alvo de 7,9 METs. A rampa a
-  // 5,2 km/h para em 6,8 METs e não há carga até a corrida: a escolha é correr a 6,5 km/h.
+  // 5,2 km/h segue além dos 7,5% (a pessoa prefere a rampa à corrida): 9,5%, 7,7 METs.
   const rested = (restBpm: number) => [{ ...done(2, 106, 95), restBpm }];
-  expect(planProcedure(data(base, rested(85)))).toEqual({ pace: 6.5, grade: 1, repeat: false });
+  expect(planProcedure(data(base, rested(85)))).toEqual({ pace: 5.2, grade: 9.5, repeat: false });
   // Uma reta fora de 8 a 25 bpm por MET é leitura ruim: vale 15.
   expect(planProcedure(data(base, rested(115)))).toMatchObject({ pace: 5.2, grade: 7 });
   // Acima da faixa (151 BPM): alvo de 3,7 METs, e a carga recua para 5,2 km/h a 0,5%.
   expect(planProcedure(data(base, [done(2, 151, 130)]))).toMatchObject({ pace: 5.2, grade: 0.5 });
   // Primeiro VO₂máx, com pontos de 4,8 METs (126) e 3,1 METs (100): 15 bpm por MET, alvo de 7,7 METs.
   const two = [done(1), done(2, 100, 92, planAt(4.5, 0))];
-  expect(planProcedure(data(vo2, two))).toEqual({ pace: 6.5, grade: 1, repeat: false });
+  expect(planProcedure(data(vo2, two))).toEqual({ pace: 5.2, grade: 9.5, repeat: false });
   // Registro antigo só conta quando não há outro.
   const old = { ...done(1, 150, 130), log: undefined, changes: undefined, hr: undefined };
   expect(planProcedure(data(base, [old, done(2, 133)]))).toEqual({ pace: 5.2, grade: 3, repeat: true });
@@ -238,18 +243,24 @@ it('uma referência que terminou entre 5,2 e 6 km/h não é repetida: a carga sa
     grade: 3,
     repeat: false,
   });
-  // Nas duas pontas do vão a repetição continua: 5,2 km/h e 6 km/h.
+  // Na ponta de baixo do vão a repetição continua: 5,2 km/h.
   expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.2, 3))]))).toEqual({
     pace: 5.2,
     grade: 3,
     repeat: true,
   });
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 1))]))).toEqual({ pace: 6, grade: 1, repeat: true });
+  // Na de cima, não mais: a pessoa prefere a rampa à corrida, e uma corrida que custa menos que a
+  // rampa toda da caminhada (10,2 METs) não se repete. Os 7,0 METs de 6 km/h e 1%, mais 2 ÷ 15, dão
+  // 7,1: 5,2 km/h a 8% (7,0).
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 1))]))).toEqual({ pace: 5.2, grade: 8, repeat: false });
+  expect(() => parsePlan(data(base, [done(2, 133, 110, planAt(6, 1))]))({ pace: 6, grade: 1 })).toThrow();
+  // Uma corrida mais pesada que a rampa toda se repete: 10 km/h e 1%, 11,0 METs.
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(10, 1))]))).toEqual({ pace: 10, grade: 1, repeat: true });
   // Correndo, a rampa não passa de 2%: uma corrida a 2% se repete, e uma a 2,5% é recalculada
-  // (7,4 METs + 2 ÷ 15 = 7,5 METs: corrida a 6,5 km/h e 1%).
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 2))]))).toEqual({ pace: 6, grade: 2, repeat: true });
-  expect(planProcedure(data(base, [done(2, 133, 110, planAt(6, 2.5))]))).toEqual({ pace: 6.5, grade: 1, repeat: false });
-  expect(() => parsePlan(data(base, [done(2, 133, 110, planAt(6, 2.5))]))({ pace: 6, grade: 2.5 })).toThrow();
+  // (11,6 METs + 2 ÷ 15 = 11,7 METs: corrida a 10,5 km/h e 1%, 11,5).
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(10, 2))]))).toEqual({ pace: 10, grade: 2, repeat: true });
+  expect(planProcedure(data(base, [done(2, 133, 110, planAt(10, 2.5))]))).toEqual({ pace: 10.5, grade: 1, repeat: false });
+  expect(() => parsePlan(data(base, [done(2, 133, 110, planAt(10, 2.5))]))({ pace: 10, grade: 2.5 })).toThrow();
   // Caminhando, a rampa continua livre.
   expect(planProcedure(data(base, [done(2, 133, 110, planAt(5.2, 9))]))).toEqual({ pace: 5.2, grade: 9, repeat: true });
   // Logo acima de 5,2 e logo abaixo de 6 também recalculam.
@@ -389,6 +400,141 @@ it('numa sessão contínua a carga de referência é o primeiro patamar no alvo,
   expect((user as { session: { plateaus: unknown[] } }).session.plateaus).toHaveLength(4);
   expect(system).toContain('plateaus');
   expect(system).not.toMatch(/leituras válidas do sensor de mão/);
+});
+
+// Um limiar (10 min de aquecimento, 3 × 8 min com 2 min leves, 5 min de volta à calma) gravado minuto a
+// minuto. De cada bloco: o alvo em que terminou, a carga medida no último minuto e o BPM do fim.
+type BlockEnd = { target: [number, number]; measured: [number, number]; bpm: number };
+function threshold(blocks: BlockEnd[], daysAgo = 2, start: [number, number] = [5.2, 4]): Workout {
+  const planned = sessionPlan(sessions.threshold, ...start);
+  const efforts = planned.stages.flatMap((s, i) => (s.measure ? [] : [i]));
+  const w = simulate(
+    planned,
+    (stage, index, into) =>
+      !stage ? null : !stage.measure ? (into >= stage.seconds - 30 ? blocks[efforts.indexOf(index)].bpm : null) : null,
+    2800,
+    NOW - daysAgo * DAY,
+  );
+  const stages = planned.stages.map((s, i) => {
+    const block = blocks[efforts.indexOf(i)];
+    return block ? { ...s, speed: block.target[0], incline: block.target[1] } : s;
+  });
+  // Todo minuto na carga de partida, menos o último de cada bloco: blocos de 10 a 18, de 20 a 28 e de 30 a 38 min.
+  const loads: MinuteLoad[] = Array.from({ length: 45 }, (): MinuteLoad => [start[0] * 60000, start[1] * 60000, 60000]);
+  blocks.forEach((b, k) => {
+    loads[17 + 10 * k] = [b.measured[0] * 60000, b.measured[1] * 60000, 60000];
+  });
+  return { ...w, plan: { ...planned, stages }, loads, beats: loads.map((): MinuteBeats => [130 * 60, 60]) };
+}
+
+it('numa sessão de blocos a carga de referência é a medida no fim dos blocos, e não o alvo do último', () => {
+  // O limiar de 27/11: os blocos terminaram a 7% (o último minuto do 1º ainda pegou os 8% de antes do
+  // corte), 7,5% e 7%, com 161, 159 e 156 bpm. O alvo do 3º ficou em 6%: um corte da trava a 1 minuto
+  // do fim, que a pessoa não seguiu.
+  const w = threshold([
+    { target: [5.2, 7], measured: [5.2, 7.29], bpm: 161 },
+    { target: [5.2, 7.5], measured: [5.2, 7.5], bpm: 159 },
+    { target: [5.2, 6], measured: [5.2, 7], bpm: 156 },
+  ]);
+  // A até um degrau do alvo do bloco vale o alvo (7,29% vira 7%); mais longe, a carga medida (7%, e não
+  // os 6% do alvo). Das três, a do meio pelo custo: 5,2 km/h e 7%, 6,6 METs, com a mediana dos fins.
+  expect(summarize(w).work).toMatchObject({
+    kmh: 5.2,
+    inclinePercent: 7,
+    mets: 6.6,
+    targetKmh: 5.2,
+    targetInclinePercent: 7,
+    bpmEnd: 159,
+    blockEnds: 3,
+  });
+  expect(historyItem(w, NOW).work).toMatchObject({ targetInclinePercent: 7, bpmEnd: 159, blockEnds: 3 });
+  expect(historyItem(w, NOW)).not.toHaveProperty('approximate');
+  // O limiar seguinte, com 159 no alvo (159 a 162): repete os 7%, e não os 6% do último alvo.
+  expect(planProcedure(data(sessions.threshold, [w]))).toEqual({ pace: 5.2, grade: 7, repeat: true });
+  // Com número par de blocos, a mais leve das duas do meio.
+  const even = threshold([
+    { target: [5.2, 7], measured: [5.2, 7], bpm: 160 },
+    { target: [5.2, 6], measured: [5.2, 6], bpm: 160 },
+    { target: [5.2, 6.5], measured: [5.2, 6.5], bpm: 160 },
+  ]);
+  const two = { ...even, log: even.log!.map((l, i) => (i === 5 ? { ...l, tail: [] } : l)) };
+  expect(summarize(two).work).toMatchObject({ targetInclinePercent: 6, blockEnds: 2 });
+  // Sem a carga por minuto (registros antigos) continuam valendo a carga média e o alvo do último bloco.
+  const old = { ...w, loads: undefined, beats: undefined };
+  expect(summarize(old).work).toMatchObject({ targetInclinePercent: 6, bpmEnd: 159 });
+  expect(summarize(old).work).not.toHaveProperty('blockEnds');
+  // A avaliação recebe a mesma carga, e o prompt diz de onde ela vem.
+  const { system, user } = assessPrompt({ workout: w, history: [] });
+  expect(user).toMatchObject({ session: { work: { targetInclinePercent: 7, blockEnds: 3 } } });
+  expect(system).toContain('blockEnds');
+  expect(planPrompt({ profile, session: base, history: [w], now: NOW }).system).toContain('blockEnds');
+});
+
+it('o VO₂máx de 22/11: os tiros corridos contam como corrida, mesmo com o último alvo numa caminhada', () => {
+  // Tiros a 6,0, 6,6 e 6,1 km/h com 1% de rampa; no 4º um corte levou o alvo a 5,1 km/h e 7,5%, e a
+  // pessoa terminou correndo a 6 km/h. Antes a sessão valia 4,5 METs (6,1 km/h de média pela equação de
+  // caminhada) com 172 bpm, e o VO₂máx seguinte repetia a caminhada do último alvo.
+  const planned = sessionPlan(vo2, 6, 1);
+  const efforts = planned.stages.flatMap((s, i) => (s.measure ? [] : [i]));
+  const ends: BlockEnd[] = [
+    { target: [6, 1], measured: [6, 1], bpm: 161 },
+    { target: [6.6, 1], measured: [6.6, 1], bpm: 170 },
+    { target: [6.1, 1], measured: [6.1, 1], bpm: 178 },
+    { target: [5.1, 7.5], measured: [6, 1], bpm: 174 },
+  ];
+  const run = simulate(
+    planned,
+    (stage, index, into) =>
+      stage && !stage.measure && into >= stage.seconds - 30 ? ends[efforts.indexOf(index)].bpm : null,
+    2800,
+    NOW - 5 * DAY,
+  );
+  // Tiros de 4 min com 3 min leves depois de 10 min de aquecimento: o último minuto de cada um.
+  const loads: MinuteLoad[] = Array.from({ length: 45 }, (): MinuteLoad => [6 * 60000, 60000, 60000]);
+  ends.forEach((b, k) => {
+    loads[13 + 7 * k] = [b.measured[0] * 60000, b.measured[1] * 60000, 60000];
+  });
+  const w = {
+    ...run,
+    plan: { ...planned, stages: planned.stages.map((s, i) => (s.measure ? s : { ...s, speed: ends[efforts.indexOf(i)].target[0], incline: ends[efforts.indexOf(i)].target[1] })) },
+    loads,
+    beats: loads.map((): MinuteBeats => [150 * 60, 60]),
+  };
+  // As quatro cargas de fim, pelo custo: 6,0 (duas vezes), 6,1 e 6,6 km/h. Vale a segunda: 6 km/h e 1%.
+  expect(historyItem(w, NOW).work).toMatchObject({ kmh: 6, inclinePercent: 1, mets: 7, targetKmh: 6, targetInclinePercent: 1, blockEnds: 4 });
+  expect(historyItem(w, NOW)).not.toHaveProperty('approximate');
+});
+
+it('uma sessão feita entre 5,2 e 6 km/h só entra na conta do plano se não houver outra', () => {
+  // 27/11: o limiar de 6 dias antes tinha sido a 5,6 km/h e 3,6% (5,4 METs pela equação de caminhada)
+  // com 161 bpm, e a base de 2 dias antes, a 5,2 km/h e 4% (5,3 METs), deu 133. A conta partiu do limiar,
+  // deu 5,4 METs para buscar 162, e o plano saiu a 4% de rampa, a carga que tinha dado 133.
+  const brisk = { ...done(6, 161, 130, { ...planAt(5.6, 3.5), goal: 'Limiar', objective: 'Limiar', zone: zones.Limiar }), restBpm: 76 };
+  const steady = { ...recorded([[10, 4.5, 130], [25, 4, 133]], 2, 133), restBpm: 76 };
+  expect(historyItem(brisk, NOW)).toMatchObject({ goal: 'Limiar', approximate: true, work: { kmh: 5.6, mets: 5.3, bpmEnd: 161 } });
+  expect(historyItem(steady, NOW)).not.toHaveProperty('approximate');
+  // A referência passa a ser a base: 133 bpm a 5,3 METs, com repouso de 61 (76 lido andando, menos 15):
+  // 16,7 bpm por MET. Para 162: 5,3 + 29 ÷ 16,7 = 7,0 METs, 5,2 km/h a 8% (a rampa que levou aos 161
+  // em 27/11 foi de 7 a 7,5%).
+  const input = data(sessions.threshold, [steady, brisk]);
+  expect(input.hr.restBpm).toBe(61);
+  expect(planProcedure(input)).toEqual({ pace: 5.2, grade: 8, repeat: false });
+  // Sozinha, a sessão a 5,6 km/h ainda serve de partida, como antes.
+  expect(planProcedure(data(sessions.threshold, [brisk]))).toMatchObject({ repeat: false });
+  // Correr com alvo de caminhada também não mede o esforço: o custo sai da equação de caminhada.
+  const jog = simulate(planAt(5.7, 1), grip(139, 110), 2000, NOW - 2 * DAY);
+  const fast = {
+    ...jog,
+    log: jog.log!.map((l, i) => (planAt(5.7, 1).stages[i].measure ? l : { ...l, distanceM: (6 * l.ms) / 3600 })),
+  };
+  expect(historyItem(fast, NOW)).toMatchObject({ approximate: true, work: { kmh: 6, mets: 4.4 } });
+  // Nas duas pontas do vão a sessão conta: 5,2 km/h andando e 6 km/h correndo.
+  expect(historyItem(done(2, 133, 110, planAt(5.2, 3)), NOW)).not.toHaveProperty('approximate');
+  expect(historyItem(done(2, 150, 120, planAt(6, 1)), NOW)).not.toHaveProperty('approximate');
+  // Os dois prompts que recebem as sessões dizem o que a marca quer dizer.
+  const mark = 'as sessões feitas numa velocidade que o guia não pede (acima de 5,2 e abaixo de 6 km/h, ou correndo num bloco cujo alvo era de caminhada)';
+  expect(planPrompt({ profile, session: base, history: [brisk], now: NOW }).system).toContain(mark);
+  expect(assessPrompt({ workout: steady, history: [brisk] }).system).toContain(mark);
 });
 
 it('a avaliação recebe só os dois números que decidem a FC máxima e prende a previsão aos limites', () => {
@@ -615,7 +761,7 @@ it('o treino de 24/11: a projeção tem horizonte curto, e com o BPM abaixo da f
   expect(system).toContain('τ = 60 s');
   expect(system).toContain('Reduza se position é "acima", ou se position é "na faixa", endsAboveTop é true e a série não mostra a subida perdendo força.');
   expect(system).toContain('Uma decisão fora de allowed nunca vale');
-  expect(PROMPT_VERSION).toBe('11');
+  expect(PROMPT_VERSION).toBe('13');
 });
 
 it('a origem do repouso vai nos três prompts, para a IA não descontar duas vezes', () => {

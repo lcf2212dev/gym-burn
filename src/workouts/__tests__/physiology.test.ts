@@ -19,6 +19,7 @@ import {
   forcedReductions,
   heartProfile,
   loadLadder,
+  rampTopMets,
   maxBounds,
   maxFloor,
   mets,
@@ -126,16 +127,17 @@ it('calcula o custo metabólico da carga e monta a escada de cargas', () => {
   expect(ladder.slice(0, 6).map((r) => [r.pace, r.grade])).toEqual([
     [3, 0], [3.5, 0], [4, 0], [4.5, 0], [5, 0], [5.2, 0],
   ]);
-  // A rampa sobe a 5,2 km/h, de 0 a 7,5%: dali a corrida a 6 km/h já custa mais.
+  // A rampa sobe a 5,2 km/h, de 0 até os 15% da esteira (10,2 METs): a pessoa prefere a rampa à corrida.
   expect(ladder.filter((r) => r.pace === 5.2).map((r) => r.grade)).toEqual(
-    Array.from({ length: 16 }, (_, i) => i / 2),
+    Array.from({ length: 31 }, (_, i) => i / 2),
   );
+  expect([mets(5.2, 15), rampTopMets()]).toEqual([10.2, 10.2]);
   // Nenhuma linha entre o teto da caminhada e o começo da corrida: de 5,3 a 5,9 km/h não há alvo.
   expect(ladder.filter((r) => r.pace > 5.2 && r.pace < 6)).toEqual([]);
   expect(ladder.some((r) => r.pace === 5.6)).toBe(false);
-  // Corrida a 1% de 6 km/h até o máximo da esteira.
+  // A corrida, a 1%, só entra onde custa mais que a rampa toda: de 9,5 km/h até o máximo da esteira.
   const running = ladder.filter((r) => r.pace >= 6);
-  expect(running[0]).toEqual({ pace: 6, grade: 1, mets: 7 });
+  expect(running[0]).toEqual({ pace: 9.5, grade: 1, mets: 10.5 });
   expect(running.every((r) => r.grade === 1)).toBe(true);
   expect(ladder[ladder.length - 1]).toMatchObject({ pace: 22, grade: 1 });
   // Toda linha é uma carga que o guia pode pedir: caminhada até 5,2 km/h, ou corrida com até 2% de rampa.
