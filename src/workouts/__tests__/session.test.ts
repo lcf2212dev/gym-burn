@@ -334,7 +334,7 @@ it('com a cinta no peito o treino corre sem pedido de batimentos, mede o repouso
   // A FC de repouso sai das primeiras leituras, sem ninguém segurar o sensor.
   expect(session.snapshot().active?.restBpm).toBe(80);
   // Sem a IA, a revisão de 30 em 30 s segue com a conta do app e avisa no painel.
-  expect(coach(session)).toBe('Sem IA · Etapa leve · 80 BPM');
+  expect(coach(session)).toBe('Etapa leve · 80 BPM');
   // No bloco de esforço, 10 bpm abaixo do teto. As revisões ainda pegam menos de 90 s na carga.
   await strap(70, 5, 110, 1, count);
   expect(coach(session)).toBe('Sem IA · 10 bpm abaixo do teto · 110 BPM · menos de 90 s nesta carga');
@@ -375,6 +375,40 @@ it('com a cinta, a trava alivia o bloco de esforço nos primeiros segundos acima
   const cut = metabolicCost(5, 1) - metabolicCost(...eased.to!);
   expect(cut).toBeGreaterThanOrEqual(10 / 20.6 - 0.03);
   expect(cut).toBeLessThan(10 / 20.6 + 0.1);
+});
+
+it('junto do teto a trava tem folga: 1 ou 2 bpm de excesso só contam depois de 15 s seguidos', async () => {
+  const { session, strap } = setup();
+  session.start(continuous());
+  await strap(120, 4, 80);
+  await strap(100, 5, 119, 1);
+  // Em 27/11 o BPM do momento foi a 162 por 5 s, num teto de 161, e voltou sozinho a 158 na mesma
+  // carga; a trava cortou a carga do bloco, que terminou abaixo do alvo. Aqui, 9 s em 121 (teto + 1)
+  // e de volta: nada muda.
+  await strap(9, 5, 121, 1);
+  await strap(20, 5, 119, 1);
+  expect(changes(session)).toEqual([]);
+  // 2 bpm acima: a leitura do momento passa do teto no 3º segundo, e a trava espera 15 s seguidos dali.
+  await strap(17, 5, 122, 1);
+  expect(changes(session)).toEqual([]);
+  await strap(1, 5, 122, 1);
+  expect(changes(session)).toEqual([expect.objectContaining({ stage: 1, bpm: 122, from: [5, 1], by: 'trava' })]);
+  expect(coach(session)).toBe('Acima do teto · 122 BPM · carga reduzida');
+});
+
+it('a folga da trava recomeça quando o BPM volta ao teto, e 3 bpm de excesso não esperam', async () => {
+  const { session, strap } = setup();
+  session.start(continuous());
+  await strap(120, 4, 80);
+  await strap(100, 5, 119, 1);
+  // 14 s acima do teto, 6 s nele, mais 8 s acima: nenhum trecho chegou aos 15 s seguidos.
+  await strap(14, 5, 122, 1);
+  await strap(6, 5, 120, 1);
+  await strap(8, 5, 122, 1);
+  expect(changes(session)).toEqual([]);
+  // A FC dispara: com 3 bpm de excesso a trava age nos primeiros segundos, como antes.
+  await strap(3, 5, 124, 1);
+  expect(changes(session)).toEqual([expect.objectContaining({ stage: 1, bpm: 124, by: 'trava' })]);
 });
 
 it('nas etapas leves a trava não age, e segundos acima do teto não mudam a mediana do minuto', async () => {
@@ -465,9 +499,9 @@ it('a trava cancela a revisão da IA que ainda não voltou', async () => {
   const { session, strap } = setup();
   const pending = pendingReviews();
   session.start(continuous());
+  // No aquecimento, abaixo da faixa, a IA nem é consultada; a revisão do bloco fica esperando.
   await strap(120, 4, 80);
-  // A revisão do aquecimento volta com "manter"; a do bloco fica esperando.
-  pending[pending.length - 1]({ decision: 'manter', bpm: 0, reason: 'etapa leve' });
+  expect(pending).toHaveLength(0);
   await strap(41, 5, 110, 1);
   const asked = jest.mocked(reviewLoad).mock.calls.length;
   expect(coach(session)).toBe('IA analisando 110 BPM…');
@@ -526,6 +560,26 @@ it('a IA revê a carga a cada 30 s: aumenta, mantém e reduz com o motivo dela, 
   expect(cut).toBeLessThan(1 + 0.1);
 });
 
+it('a IA não é consultada quando só poderia manter: etapa leve ou bloco abaixo da faixa sem aumento possível', async () => {
+  const { session, strap } = setup();
+  jest.mocked(reviewLoad).mockClear();
+  jest.mocked(reviewLoad).mockResolvedValue({ decision: 'manter', bpm: 0, reason: 'nada a fazer' });
+  session.start(continuous());
+  // Aquecimento de 120 s com o BPM abaixo da faixa (101 a 120): reduzir não é aceito, aumentar também
+  // não. Em 27/11 foram 59 consultas assim, de 71, e todas voltaram "manter".
+  await strap(120, 4, 90);
+  expect(reviewLoad).not.toHaveBeenCalled();
+  expect(coach(session)).toBe('Etapa leve · 90 BPM');
+  // No bloco, abaixo da faixa e com menos de 90 s na carga: ainda não há o que decidir.
+  await strap(60, 5, 95, 1);
+  expect(reviewLoad).not.toHaveBeenCalled();
+  expect(coach(session)).toBe('25 bpm abaixo do teto · 95 BPM · menos de 90 s nesta carga');
+  // Com a carga podendo subir, a IA volta a ser consultada.
+  await strap(60, 5, 95, 1);
+  expect(reviewLoad).toHaveBeenCalledTimes(1);
+  expect(jest.mocked(reviewLoad).mock.calls[0][0]).toMatchObject({ allowed: ['manter', 'aumentar'] });
+});
+
 it('sem resposta da IA em 28 s, ou com erro, vale a decisão do app', async () => {
   const { session, walk } = setup();
   // A chamada estoura o tempo: a IA desiste depois de 28 s, sem nova tentativa.
@@ -552,16 +606,17 @@ it('uma revisão não começa com outra ainda sem resposta, e a de outra etapa �
   const { session, strap } = setup();
   const pending = pendingReviews();
   session.start(continuous());
-  await strap(60, 4, 80);
+  // 110 BPM no aquecimento, dentro da faixa (101 a 120): a IA pode reduzir, e é consultada.
+  await strap(60, 4, 110);
   expect(reviewLoad).toHaveBeenCalledTimes(1);
   // 40 s depois a primeira ainda não voltou: nenhuma outra é pedida.
-  await strap(40, 4, 80);
+  await strap(40, 4, 110);
   expect(reviewLoad).toHaveBeenCalledTimes(1);
   // Com a resposta, a revisão seguinte sai na amostra seguinte.
   pending[0]({ decision: 'manter', bpm: 0, reason: 'etapa leve' });
   await flush();
   expect(coach(session)).toBe('IA · etapa leve');
-  await strap(1, 4, 80);
+  await strap(1, 4, 110);
   expect(reviewLoad).toHaveBeenCalledTimes(2);
   // A etapa muda antes da resposta: a chamada é cancelada e a resposta, ignorada.
   await strap(20, 5, 110, 1);
@@ -763,13 +818,12 @@ it('com o BPM do momento abaixo da faixa a IA não pode reduzir, e uma resposta 
   );
   session.start(long());
   await strap(120, 4, 80);
-  // 95 BPM no bloco, abaixo do piso de 101, nos primeiros 80 s da carga.
+  // 95 BPM no bloco, abaixo do piso de 101, nos primeiros 80 s da carga: nem reduzir nem aumentar são
+  // aceitos, e a IA não é consultada.
   await strap(80, 5, 95, 1);
-  const block = jest.mocked(reviewLoad).mock.calls.filter(([input]) => !input.load.stage.measure);
-  expect(block.length).toBeGreaterThan(0);
-  for (const [input] of block) expect(input.allowed).toEqual(['manter']);
+  expect(jest.mocked(reviewLoad).mock.calls.filter(([input]) => !input.load.stage.measure)).toEqual([]);
   expect(changes(session)).toEqual([]);
-  expect(coach(session)).toMatch(/^Sem IA · /);
+  expect(coach(session)).toBe('25 bpm abaixo do teto · 95 BPM · menos de 90 s nesta carga');
   // Com 90 s nos alvos a regra do app sobe a carga; a IA pode aumentar, mas não reduzir.
   await strap(40, 5, 95, 1);
   expect(jest.mocked(reviewLoad).mock.calls.at(-1)![0].allowed).toEqual(['manter', 'aumentar']);
@@ -781,18 +835,19 @@ it('a resposta da IA que chega depois de a pessoa mexer na esteira não é aplic
   const pending = pendingReviews();
   session.start(long());
   await strap(120, 4, 80);
-  for (let i = 0; i < 60 && pending.length < 2; i++) await strap(1, 5, 118, 1);
-  expect(pending).toHaveLength(2);
+  // O aquecimento, abaixo da faixa, não tem consulta: a primeira é a do bloco.
+  for (let i = 0; i < 60 && pending.length < 1; i++) await strap(1, 5, 118, 1);
+  expect(pending).toHaveLength(1);
   // Em 20 s, ainda dentro dos 28 s da revisão, a pessoa baixa a rampa por conta própria.
   await strap(20, 5, 118, 0);
-  pending[1]({ decision: 'reduzir', bpm: 10, reason: 'vai passar do teto' });
+  pending[0]({ decision: 'reduzir', bpm: 10, reason: 'vai passar do teto' });
   await flush();
   expect(changes(session)).toEqual([]);
   expect(coach(session)).toBe('A esteira mudou durante a análise · a próxima revisão decide');
   // Na mesma carga do pedido, a resposta vale.
   await strap(15, 5, 118, 0);
-  expect(pending).toHaveLength(3);
-  pending[2]({ decision: 'reduzir', bpm: 5, reason: 'vai passar do teto' });
+  expect(pending).toHaveLength(2);
+  pending[1]({ decision: 'reduzir', bpm: 5, reason: 'vai passar do teto' });
   await flush();
   expect(changes(session)).toEqual([expect.objectContaining({ by: 'ia', from: [5, 1] })]);
 });
@@ -804,14 +859,17 @@ it('num tiro curto a carga não sobe no meio, nem pela regra local nem pela IA',
   await strap(120, 4, 80);
   // Abaixo do piso, nos alvos há mais de 90 s: num bloco longo a carga subiria.
   await strap(150, 5, 95, 1);
-  expect(coach(session)).toBe('Sem IA · 25 bpm abaixo do teto · 95 BPM · tiro curto: a carga não sobe no meio');
+  expect(coach(session)).toBe('25 bpm abaixo do teto · 95 BPM · tiro curto: a carga não sobe no meio');
   expect(changes(session)).toEqual([]);
-  // A IA também não pode aumentar: a lista do que ela pode decidir não traz o aumento (nem a
-  // redução, com o BPM abaixo da faixa).
+  // A IA também não pode aumentar, nem reduzir com o BPM abaixo da faixa: sem nada a decidir, ela nem
+  // é consultada no tiro.
+  expect(jest.mocked(reviewLoad).mock.calls.filter(([input]) => input.index === 1)).toEqual([]);
+  // Com o BPM na faixa ela é consultada, e a lista do que pode decidir não traz o aumento.
+  await strap(40, 5, 105, 1);
   const calls = jest.mocked(reviewLoad).mock.calls;
   expect(calls[calls.length - 1][0]).toMatchObject({
     load: { short: true, secondsAtLoad: expect.any(Number) },
-    allowed: ['manter'],
+    allowed: ['manter', 'reduzir'],
     maxRaiseBpm: 0,
   });
   expect(calls[calls.length - 1][0].load.secondsAtLoad).toBeGreaterThanOrEqual(90);
@@ -1054,7 +1112,8 @@ it('fora da lona: liga com 10 s de cadência em zero, segura só os aumentos e t
   expect(coach(session)).toMatch(/· fora da lona: a carga não sobe$/);
   // As revisões com 90 s ou mais na carga, em que o aumento já seria possível, saíram todas sem ele.
   const calls = jest.mocked(reviewLoad).mock.calls.filter(([input]) => input.index === 1 && input.load.secondsAtLoad >= 90);
-  expect(calls.length).toBeGreaterThanOrEqual(2);
+  // (com o BPM de quem estava parado, abaixo da faixa, a IA nem é consultada).
+  expect(calls.length).toBeGreaterThanOrEqual(1);
   expect(calls.every(([input]) => input.load.offBelt && input.maxRaiseBpm === 0 && !input.allowed.includes('aumentar'))).toBe(true);
   // Um minuto depois de voltar, a carga sobe como sempre.
   for (let i = 0; i < 60 && !changes(session)!.length; i++) await strap(1, 5, 110, 1, () => {}, steps(130));
@@ -1181,6 +1240,7 @@ it('o tiro que termina 2 acima do teto depois de um corte da trava reduz o segui
     predictedBpm: 174,
     verdict: 'reduzir',
     changed: true,
+    carried: false,
   });
   expect(coach(t.session)).toBe('Próximo tiro: ' + String(ahead.to![0]).replace('.', ',') + (ahead.to![0] % 1 ? '' : ',0') + ' km/h');
   // O registro da decisão não conta como redução forçada nem reabre o aviso da recuperação.
@@ -1218,6 +1278,43 @@ it('a decisão do próximo tiro sobe a carga só dele quando o anterior termina 
   expect(loads(cut.session.snapshot().active?.plan)![3]).toEqual([6, 1]);
   expect(loads(cut.session.snapshot().active?.plan)![5]).toEqual([6, 1]);
   expect(cut.session.snapshot().nextBlock).toMatchObject({ index: 5, verdict: 'manter', changed: false });
+});
+
+it('num bloco longo, a carga acertada dentro dele passa ao bloco seguinte, mesmo depois de um corte da trava', async () => {
+  const t = setup();
+  // Três blocos de 6 min a 5 km/h e 1%, com 2 min leves; faixa de 101 a 120. Como em 27/11, o plano
+  // saiu leve: no 1º bloco o BPM fica em 95 até o app subir a carga, fica 1 bpm acima do teto por
+  // mais de 15 s (a trava corta) e termina em 116, na faixa, com a pessoa seguindo os alvos.
+  t.session.start(short(2, 3, 6, 2));
+  const bpm = (stage: Stage, into: number, index: number) => {
+    if (stage.measure) return 90;
+    if (index !== 1) return 112;
+    const raised = (t.session.snapshot().active?.changes ?? []).some((c) => c.decision.startsWith('aumentar'));
+    const cut = (t.session.snapshot().active?.changes ?? []).some((c) => c.by === 'trava');
+    return !raised ? 95 : !cut && into > 200 ? 121 : 116;
+  };
+  await follow(t, 120 + 360 + 16, bpm);
+  const [raise, cut, ahead, ...rest] = changes(t.session)!;
+  expect(raise).toMatchObject({ stage: 1, by: 'app', from: [5, 1], decision: expect.stringMatching(/^aumentar/) });
+  expect(cut).toMatchObject({ stage: 1, by: 'trava', bpm: 121, decision: expect.stringMatching(/^reduzir/) });
+  expect(rest).toEqual([]);
+  // A carga em que o 1º bloco terminou, depois do aumento e do corte, ainda é mais pesada que a do plano.
+  const ended = metabolicCost(...cut.to!);
+  expect(ended).toBeGreaterThan(metabolicCost(5, 1));
+  // Aos 15 s da recuperação o 2º bloco recebe essa carga (ou ela já aliviada, se a previsão pedir), e
+  // não volta aos 5 km/h e 1% do plano. Antes, com um corte da trava na sessão, ele voltava.
+  expect(ahead).toMatchObject({ stage: 3, by: 'bloco', decision: 'manter carga', from: [5, 1], bpm: 116 });
+  const carried = metabolicCost(...ahead.to!);
+  expect(carried).toBeGreaterThan(metabolicCost(5, 1));
+  expect(carried).toBeLessThanOrEqual(ended + 1e-9);
+  const plan = loads(t.session.snapshot().active?.plan)!;
+  expect(plan[3]).toEqual(ahead.to);
+  // Só o próximo bloco muda, como num aumento.
+  expect(plan[5]).toEqual([5, 1]);
+  expect(t.session.snapshot().nextBlock).toMatchObject({ index: 3, carried: true, changed: true });
+  expect(coach(t.session)).toMatch(/^Próximo bloco: /);
+  // A carga levada adiante não conta como aumento nem como redução forçada.
+  expect(changes(t.session)!.filter((c) => c.decision.startsWith('aumentar'))).toHaveLength(1);
 });
 
 it('um corte a 6 km/h não derruba o resto do treino de tiros para a caminhada', async () => {
@@ -1575,7 +1672,7 @@ it('não mexe na carga onde não há o que ajustar: etapa leve abaixo da faixa e
   session.start(continuous());
   await walk(3, 4);
   await walk(8, 4, 90);
-  expect(coach(session)).toBe('Sem IA · Etapa leve · 90 BPM');
+  expect(coach(session)).toBe('Etapa leve · 90 BPM');
   await walk(25, 4);
   await walk(8, 4, 112);
   expect(coach(session)).toBe('Sem IA · Na faixa · 112 BPM');
@@ -1595,13 +1692,13 @@ it('em dia de recuperação a faixa é teto: abaixo dela a carga não sobe', asy
   await walk(121, 4);
   await walk(120, 5, null, 1);
   await walk(8, 5, 85, 1);
-  expect(coach(session)).toBe('Sem IA · Abaixo do teto · 85 BPM');
+  expect(coach(session)).toBe('Abaixo do teto · 85 BPM');
   await walk(30, 5, null, 1);
   await walk(8, 5, 100, 1);
   expect(coach(session)).toBe('Sem IA · Na faixa · 100 BPM');
   expect(changes(session)).toEqual([]);
-  // Nem a IA pode aumentar; abaixo da faixa, nem reduzir.
-  expect(jest.mocked(reviewLoad).mock.calls.map(([input]) => input.allowed)).toEqual([['manter'], ['manter', 'reduzir']]);
+  // Nem a IA pode aumentar; abaixo da faixa, nem reduzir, e ela não é consultada.
+  expect(jest.mocked(reviewLoad).mock.calls.map(([input]) => input.allowed)).toEqual([['manter', 'reduzir']]);
 });
 
 it('depois de um alívio, 1 bpm acima do teto espera 3 minutos antes de aliviar de novo', async () => {
@@ -1672,7 +1769,7 @@ it('abaixo do piso sobe a carga num bloco de esforço com 90 s nos alvos', async
   // Com menos de 90 s na carga o BPM ainda é o da carga anterior: nada muda.
   await walk(60, 5, null, 1);
   await walk(6, 5, 95, 1);
-  expect(coach(session)).toBe('Sem IA · 25 bpm abaixo do teto · 95 BPM · menos de 90 s nesta carga');
+  expect(coach(session)).toBe('25 bpm abaixo do teto · 95 BPM · menos de 90 s nesta carga');
   expect(changes(session)).toEqual([]);
   await walk(30, 5, null, 1);
   await walk(6, 5, 95, 1);
@@ -1695,7 +1792,7 @@ it('abaixo do piso não sobe a carga fora dos alvos nem com a FC ainda subindo',
   await off.walk(121, 4);
   await off.walk(100, 4.5, null, 1);
   await off.walk(6, 4.5, 95, 1);
-  expect(coach(off.session)).toBe('Sem IA · 25 bpm abaixo do teto · 95 BPM · ajuste a esteira aos alvos');
+  expect(coach(off.session)).toBe('25 bpm abaixo do teto · 95 BPM · ajuste a esteira aos alvos');
   expect(changes(off.session)).toEqual([]);
   // Nos alvos há tempo, mas a FC ainda subindo: subir a carga agora a levaria acima do teto.
   const rising = setup();

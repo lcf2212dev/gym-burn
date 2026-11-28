@@ -49,7 +49,7 @@ export const FORCED_REDUCTION_BPM = 5;
 
 /**
  * Reduções de carga que pesam na avaliação da sessão: as feitas com o BPM 5 ou
- * mais acima do teto da faixa. O app alivia a carga já com 1 bpm de excesso, e
+ * mais acima do teto da faixa. O app alivia a carga já com 1 a 3 bpm de excesso, e
  * para quem treina junto do teto esse alívio pequeno é rotina, não sinal de
  * carga errada. A decisão tomada na recuperação para o bloco seguinte (`by:
  * 'bloco'`) também não conta: ela não alivia ninguém no meio do esforço.
@@ -329,19 +329,23 @@ export function energyKcal(w: Workout) {
 
 /**
  * As cargas entre as quais a IA escolhe, da mais leve à mais pesada:
- * caminhada plana até 5,2 km/h, depois rampa a 5,2 km/h até 7,5%, depois
- * corrida a 1%, de 6 km/h em diante. É o caminho que não pede corrida de quem
- * ainda chega à faixa andando: nenhuma linha fica entre o teto da caminhada e
- * o começo da corrida.
+ * caminhada plana até 5,2 km/h, depois rampa a 5,2 km/h até o máximo da
+ * esteira (15%, 10,2 METs), e só então corrida a 1%, a partir da primeira
+ * velocidade que custa mais que a rampa toda (9,5 km/h). A pessoa prefere
+ * subir a rampa a correr: a corrida só aparece quando a caminhada já não tem
+ * como pesar mais, e nenhuma linha fica entre o teto da caminhada e o começo
+ * da corrida.
  *
- * Limitação conhecida: essa ordem (rampa até 7,5%, depois corrida) vem das
- * equações do ACSM, e a de corrida superestima a corrida lenta. Para quem
- * corre devagar, correr a 6 km/h custa menos do que a escada supõe: nos dados
- * desta pessoa, 5,6 km/h com 3,6% andando e 6 km/h com 1% correndo terminam no
- * mesmo BPM, e 5,2 km/h com 7,5% pesa mais. Por isso um alívio nunca troca a
- * corrida pela rampa (`correctedStage`). Calibrar a troca entre caminhada e
- * corrida pelos dados da pessoa (agora há cadência) fica para depois.
+ * As duas equações do ACSM não se comparam bem para quem corre devagar (a de
+ * corrida superestima a corrida lenta, e a de caminhada subestima a caminhada
+ * acima de 5,2 km/h). Por isso um alívio nunca troca a corrida pela rampa
+ * (`correctedStage`), e uma sessão corrida mais leve que a rampa toda não tem
+ * a carga repetida no plano (`rampTopMets`): a conta leva o custo dela para a
+ * rampa.
  */
+/** O custo da caminhada mais pesada da escada: 5,2 km/h com a rampa toda. */
+export const rampTopMets = () => mets(WALK_TOP_KMH, HILL_TOP_PERCENT);
+
 export function loadLadder() {
   const rows: { pace: number; grade: number; mets: number }[] = [];
   // Só entra a carga que custa mais que a anterior: assim cada METs tem uma linha só.

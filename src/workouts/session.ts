@@ -128,7 +128,8 @@ export type GaitView = {
 /**
  * A carga decidida na recuperação para o próximo bloco de esforço (`index`):
  * os alvos dele, o BPM previsto para o fim dele na carga em que o anterior
- * terminou, o que a previsão pediu e se a carga mudou.
+ * terminou, o que a previsão pediu, se a carga mudou e se ela é a do fim do
+ * bloco anterior, mais pesada que a do plano (`carried`; veja `NextBlock`).
  */
 export type NextBlockView = {
   index: number;
@@ -137,6 +138,7 @@ export type NextBlockView = {
   predictedBpm: number;
   verdict: NextBlock['verdict'];
   changed: boolean;
+  carried: boolean;
 };
 
 /**
@@ -203,6 +205,19 @@ const SPEED_TOLERANCE_KMH = 0.051;
 const INCLINE_TOLERANCE_PERCENT = 0.251;
 /** Quanto da subida dos últimos 30 s a trava tira a mais, no máximo. */
 const GUARD_RISE_CAP_BPM = 10;
+/**
+ * A folga da trava junto do teto, num bloco longo (mais de 5 min): 1 ou 2 bpm
+ * de excesso só a acionam depois de 15 s seguidos com o BPM do momento acima
+ * do teto; com 3 bpm ou mais (`URGENT_EXCESS_BPM`) ela age na hora. O alvo da
+ * sessão é o próprio teto, e a FC de quem está nele oscila 1 ou 2 bpm sem a
+ * carga mudar: em 27/11, num limiar com teto de 161, o BPM do momento foi a
+ * 162 por 5 s em dois blocos e voltou sozinho a 158; a trava cortou a carga
+ * nas duas vezes, e a pessoa (com razão) não seguiu nenhum dos cortes. Na base
+ * de 24/11, com 30 min junto do teto, foram 35 passagens assim, e só 8 delas
+ * passam desta folga. Num tiro (até 5 min) não há folga: a FC sobe até o fim
+ * dele, e toda passagem pelo teto é subida de verdade.
+ */
+const GUARD_HOLD_MS = 15_000;
 /** O começo do texto do painel quando a IA não respondeu e o app seguiu com a própria conta. */
 const OFFLINE = 'Sem IA · ';
 const SAVE_ERROR = 'Falha ao gravar o treino no aparelho. Confira o espaço disponível.';
@@ -242,6 +257,12 @@ export class WorkoutSession {
   private lastFloor = -Infinity;
   /** Horário do último aviso de que a esteira está acima dos alvos com o BPM acima do teto. */
   private lastRealert = -Infinity;
+  /**
+   * Desde quando o BPM do momento está acima do teto, sem voltar a ele, no
+   * bloco de esforço em curso; `null` com ele no teto ou abaixo, ou sem
+   * leitura do momento. Veja `GUARD_HOLD_MS`.
+   */
+  private overSince: number | null = null;
   /** A esteira já chegou aos alvos desta etapa ao menos uma vez. */
   private stageReached = false;
   /**
@@ -773,6 +794,7 @@ export class WorkoutSession {
         this.cancelReview();
         this.lastFloor = -Infinity;
         this.lastRealert = -Infinity;
+        this.overSince = null;
         this.stageReached = false;
         this.held = null;
         // O aviso de cadência caindo era do bloco que acabou.
@@ -841,6 +863,7 @@ export class WorkoutSession {
       predictedBpm: decision.predictedBpm,
       verdict: decision.verdict,
       changed,
+      carried: decision.carried,
     };
     if (!changed) {
       this.update({ nextBlock });
@@ -850,14 +873,13 @@ export class WorkoutSession {
     // e aqui a carga é de um bloco que ainda vai começar.
     const elapsed = Math.floor(active.totals.movingMs / 1000);
     const { from, to } = decision;
-    // O "manter" que leva ao próximo bloco a carga em que o anterior terminou no
-    // alvo tem nome próprio: não é aumento nem redução, e não conta como nenhum
-    // dos dois na avaliação.
-    const carried = decision.verdict === 'manter' && metabolicCost(to.speed, to.incline) > metabolicCost(from.speed, from.incline);
+    // A carga do fim do bloco anterior levada ao próximo (como estava, ou já
+    // com o corte que a previsão pediu) tem nome próprio: não é aumento nem
+    // redução, e não conta como nenhum dos dois na avaliação.
     const change: Change = {
       second: elapsed,
       stage: decision.index,
-      decision: carried ? KEEP_LOAD : changeLabel(from, to),
+      decision: decision.carried ? KEEP_LOAD : changeLabel(from, to),
       bpm: this.ends[this.ends.length - 1].bpm,
       from: [from.speed, from.incline],
       to: [to.speed, to.incline],
@@ -1152,11 +1174,14 @@ export class WorkoutSession {
   }
 
   /**
-   * A trava: com a cinta, num bloco de esforço, alivia a carga assim que o BPM
+   * A trava: com a cinta, num bloco de esforço, alivia a carga quando o BPM
    * do momento passa do teto, sem esperar a mediana do minuto nem a IA. A
    * mediana demora: no tiro de 4 minutos de 22/11 ela só acusou o excesso a
-   * 25 s do fim, depois de 89 s acima do teto. BPM acima do teto num bloco de
-   * esforço nunca fica sem reação: um corte novo ou, com um corte que ainda não
+   * 25 s do fim, depois de 89 s acima do teto. Num tiro ela age no primeiro
+   * segundo acima do teto. Num bloco longo, com 3 bpm ou mais de excesso ela
+   * age na hora; com 1 ou 2, só depois de 15 s seguidos acima do teto (veja
+   * `GUARD_HOLD_MS`): é a oscilação de quem está no alvo, que é o próprio teto.
+   * Acionada, ela nunca fica sem reação: um corte novo ou, com um corte que ainda não
    * chegou ao painel, o aviso reaberto. Nas etapas leves a trava não age: nelas
    * o BPM vem caindo sozinho do bloco anterior. No começo do bloco ela espera a
    * esteira chegar aos alvos, por até 30 s. Depois de um alívio de excesso
@@ -1177,9 +1202,17 @@ export class WorkoutSession {
     zone: Zone,
   ) {
     const stage = w.plan?.stages[index];
-    if (!stage || stage.measure || !this.fresh(sample)) return false;
+    if (!stage || stage.measure) return false;
     const live = livePulse(samples, sample.at);
-    if (!live || live.bpm <= zone.high || sample.at - this.lastFloor < GUARD_WAIT) return false;
+    const excess = live ? live.bpm - zone.high : 0;
+    // A conta dos segundos seguidos acima do teto anda em toda amostra do bloco.
+    this.overSince = excess > 0 ? (this.overSince ?? sample.at) : null;
+    if (!live || !this.fresh(sample)) return false;
+    const tripped =
+      stage.seconds <= SHORT_BLOCK_SECONDS ||
+      excess >= URGENT_EXCESS_BPM ||
+      (this.overSince !== null && sample.at - this.overSince >= GUARD_HOLD_MS);
+    if (excess <= 0 || !tripped || sample.at - this.lastFloor < GUARD_WAIT) return false;
     // No começo do bloco a lona ainda acelera desde a etapa leve, e o BPM é o do
     // bloco anterior: um corte feito dali iria para todos os blocos seguintes.
     if (!this.stageReached && sample.at - this.stageSince < BLOCK_START_GRACE) return false;
@@ -1356,7 +1389,11 @@ export class WorkoutSession {
    * Pede à IA a revisão da carga e aplica a resposta, se ela ainda valer. A IA
    * escolhe entre o que o app aceita agora: manter sempre; reduzir com o BPM do
    * momento (o `now` do prompt) na faixa ou acima dela; aumentar só quando a
-   * regra local deixaria subir, e até onde ela subiria. Sem resposta (erro, sem
+   * regra local deixaria subir, e até onde ela subiria. Quando só "manter" é
+   * aceito (etapa leve ou bloco com o BPM abaixo da faixa e a carga sem poder
+   * subir) não há o que ela decidir: a chamada não é feita, e o painel mostra
+   * o veredito do app. Em 27/11 foram 59 das 71 consultas do treino, todas de
+   * volta com "manter". Sem resposta (erro, sem
    * chave, mais de 28 s ou resposta fora do formato, como uma decisão fora das
    * aceitas) vale a regra local, `fix` e `room`, que abaixo da faixa nunca
    * corta a carga.
@@ -1372,20 +1409,25 @@ export class WorkoutSession {
     sample: TreadmillSample,
     samples: TreadmillSample[],
   ) {
-    const token = ++this.reviewToken;
-    const abort = new AbortController();
-    this.reviewAbort = abort;
-    this.reviewing = true;
     const live = livePulse(samples, sample.at);
     const seen = live?.bpm ?? features.median;
     const maxRaiseBpm = fix === 'subir' ? correctionBpm(fix, features, zone) : room;
-    const since = this.sinceRelief(cue.index, sample.at);
-    const sinceRelief = Number.isFinite(since) ? since / 1000 : null;
     // Abaixo da faixa não há o que reduzir: em 24/11 a projeção pela reta pedia
     // 15 bpm a menos com o BPM 11 abaixo do piso.
     const allowed: ReviewDecision[] = ['manter'];
     if (seen >= zone.low) allowed.push('reduzir');
     if (maxRaiseBpm > 0) allowed.push('aumentar');
+    // Só "manter": não há decisão a pedir, e o veredito do app diz o porquê.
+    if (allowed.length === 1) {
+      this.update({ coach: localVerdict(features, load) });
+      return;
+    }
+    const token = ++this.reviewToken;
+    const abort = new AbortController();
+    this.reviewAbort = abort;
+    this.reviewing = true;
+    const since = this.sinceRelief(cue.index, sample.at);
+    const sinceRelief = Number.isFinite(since) ? since / 1000 : null;
     this.update({ coach: 'IA analisando ' + seen + ' BPM…' });
     let reply: ReviewReply | null = null;
     try {
@@ -1537,6 +1579,7 @@ export class WorkoutSession {
     this.reliefIndex = -1;
     this.lastFloor = -Infinity;
     this.lastRealert = -Infinity;
+    this.overSince = null;
     this.stageReached = false;
     this.held = null;
     this.lastPulse = -Infinity;

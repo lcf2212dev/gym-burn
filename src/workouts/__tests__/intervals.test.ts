@@ -254,6 +254,130 @@ it('sem a cinta, sem o fim medido ou com ele fora das cargas do guia, não há d
   expect(decide({ plan: { ...sprint, stages: sprint.stages.map((s, i) => (i === 1 ? { ...s, seconds: 60 } : s)) }, index: 2, ends: [end(1, 6.6, 150)] })).not.toBeNull();
 });
 
+describe('blocos longos: a carga acertada dentro do bloco passa ao seguinte', () => {
+  // O limiar do plano: 600 s aquecendo, 3 blocos de 480 s com 120 s leves. Blocos nas etapas 1, 3 e 5.
+  // 41 anos, FC máxima de 179: faixa de 152 a 161. O plano saiu a 5,2 km/h e 4%.
+  const limiar = { low: 152, high: 161 };
+  const planned = sessionPlan(sessions.threshold, 5.2, 4);
+  const decideLong = (input: Partial<NextBlockInput> & Pick<NextBlockInput, 'plan' | 'index' | 'ends'>) =>
+    decide({ zone: limiar, rest: 61, ...input });
+  const logs = (plan: Plan, over: Record<number, Partial<StageLog>>) =>
+    plan.stages.map((_, i) => ({ ...emptyLog(), ...over[i] }));
+  // Em 27/11 a IA subiu o 1º bloco de 4% a 6% e a 8%, e a trava o baixou a 7% a 1 min do fim.
+  const raises: Change[] = [
+    { second: 740, stage: 1, decision: 'aumentar inclinação', bpm: 133, from: [5.2, 4], to: [5.2, 6], by: 'ia' },
+    { second: 861, stage: 1, decision: 'aumentar inclinação', bpm: 142, from: [5.2, 6], to: [5.2, 8], by: 'ia' },
+  ];
+  const trava: Change = { second: 1019, stage: 1, decision: 'reduzir inclinação', bpm: 163, from: [5.2, 8], to: [5.2, 7], by: 'trava' };
+
+  it('o treino de 27/11: o 2º bloco parte da carga em que o 1º terminou no teto, e não dos 4% do plano', () => {
+    const plan = withLoads(planned, { 1: [5.2, 7] });
+    const first = decideLong({
+      plan,
+      index: 2,
+      ends: [end(1, 5.2, 161, 7)],
+      changes: [...raises, trava],
+      log: logs(plan, { 1: { zone: [354, 69, 57], liveTop: 164 } }),
+    })!;
+    // O corte da trava foi a 1 min do fim: o fim ainda responde a ele, e sai só o excesso sobre o teto
+    // (nenhum). A carga é 1,3 MET mais pesada que a do plano, e passa inteira: foi o app que a pediu.
+    expect(first).toMatchObject({ index: 3, verdict: 'manter', carried: true, stages: [3] });
+    expect([first.to.speed, first.to.incline]).toEqual([5.2, 7]);
+    expect(metabolicCost(5.2, 7) - metabolicCost(5.2, 4)).toBeGreaterThan(1);
+    // Só o próximo bloco muda, como num aumento.
+    expect(first.from).toEqual(plan.stages[3]);
+  });
+
+  it('o 3º bloco de 27/11 parte dos 7,5% em que o 2º terminou na faixa', () => {
+    // A pessoa manteve 7,5% e o app adotou essa carga; a trava tinha cortado a 2 min do fim.
+    const plan = withLoads(planned, { 1: [5.2, 7], 3: [5.2, 7.5] });
+    const late: Change = { second: 1547, stage: 3, decision: 'reduzir velocidade', bpm: 162, from: [5.2, 7.5], to: [5.1, 7], by: 'trava' };
+    const adopted: Change = { second: 1673, stage: 3, decision: 'adotar carga', bpm: 159, from: [5.1, 7], to: [5.2, 7.5], by: 'pessoa' };
+    const third = decideLong({
+      plan,
+      index: 4,
+      ends: [end(1, 5.2, 161, 7), end(3, 5.2, 159, 7.5)],
+      changes: [...raises, trava, late, adopted],
+      log: logs(plan, { 3: { zone: [184, 296, 0], liveTop: 162 } }),
+    })!;
+    expect(third).toMatchObject({ index: 5, verdict: 'manter', carried: true, stages: [5] });
+    expect([third.to.speed, third.to.incline]).toEqual([5.2, 7.5]);
+  });
+
+  it('com o bloco encostando no teto, o acúmulo não fica abaixo do padrão, e a carga passa já aliviada', () => {
+    // O 2º bloco terminou em 159 a 7,5%, com o BPM do momento em 162 no meio dele e sem corte da trava.
+    // O par medido dá acúmulo 0 (o 1º bloco terminou mais alto); com os 2 bpm do padrão a previsão é 161,
+    // acima de teto − 1: saem 3 bpm, e o 3º bloco parte de 7%, ainda bem acima dos 4% do plano.
+    const plan = withLoads(planned, { 1: [5.2, 7], 3: [5.2, 7.5] });
+    const ends = [end(1, 5.2, 161, 7), end(3, 5.2, 159, 7.5)];
+    const touched = decideLong({ plan, index: 4, ends, changes: raises, log: logs(plan, { 3: { liveTop: 162 } }) })!;
+    expect(touched).toMatchObject({ verdict: 'reduzir', carryBpm: 2, predictedBpm: 161, carried: true, stages: [5] });
+    expect([touched.to.speed, touched.to.incline]).toEqual([5.2, 7]);
+    // Sem nada acima do teto vale o acúmulo medido, e a carga do fim passa como está.
+    const clean = decideLong({ plan, index: 4, ends, changes: raises })!;
+    expect(clean).toMatchObject({ verdict: 'manter', carryBpm: 0, carried: true, stages: [5] });
+    expect([clean.to.speed, clean.to.incline]).toEqual([5.2, 7.5]);
+  });
+
+  it('um corte pedido pela previsão desce a partir da carga do fim, e não volta à do plano', () => {
+    // O 1º bloco, levado a 7% pela IA, terminou em 161 sem passar do teto: previsão de 163, corte de 5 bpm.
+    const plan = withLoads(planned, { 1: [5.2, 7] });
+    const cut = decideLong({ plan, index: 2, ends: [end(1, 5.2, 161, 7)], changes: raises })!;
+    expect(cut).toMatchObject({ verdict: 'reduzir', predictedBpm: 163, carried: true, stages: [3] });
+    // Meio MET a menos que os 7% do fim, no máximo, e ainda bem acima dos 4% do plano.
+    const cost = metabolicCost(cut.to.speed, cut.to.incline);
+    expect(cost).toBeLessThan(metabolicCost(5.2, 7));
+    expect(cost).toBeGreaterThan(metabolicCost(5.2, 7) - 0.5);
+    expect(cost).toBeGreaterThan(metabolicCost(5.2, 4) + 0.5);
+  });
+
+  it('a carga que a pessoa manteve acima do alvo, sem o app adotar, não passa ao bloco seguinte', () => {
+    // O alvo do 1º bloco ficou em 6%, e ela terminou a 8%: acima do teto no bloco, não há como subir.
+    const plan = withLoads(planned, { 1: [5.2, 6] });
+    const own = decideLong({
+      plan,
+      index: 2,
+      ends: [end(1, 5.2, 158, 8)],
+      log: logs(plan, { 1: { liveTop: 163 } }),
+    })!;
+    expect(own).toMatchObject({ carried: false, stages: [], to: plan.stages[3] });
+    // Com a pessoa fora da lona no bloco, a carga do fim também não passa: o BPM dele não vale.
+    const off = decideLong({
+      plan: withLoads(planned, { 1: [5.2, 7] }),
+      index: 2,
+      ends: [end(1, 5.2, 150, 7)],
+      changes: [trava],
+      log: logs(planned, { 1: { offBeltMs: 20000 } }),
+    })!;
+    expect(off).toMatchObject({ carried: false, stages: [] });
+  });
+
+  it('com um aumento a menos de 4 min do fim, o BPM do fim ainda subia: a carga passa como está, sem subir mais', () => {
+    // O 1º bloco vai de 600 a 1080 s. A IA o levou a 6% aos 740 s e a 7% aos 900 s, 3 min antes do
+    // fim, e ele terminou em 150, bem abaixo do alvo. Pelo BPM a carga subiria; o 2º parte dos 7%.
+    const plan = withLoads(planned, { 1: [5.2, 7] });
+    const late: Change = { second: 900, stage: 1, decision: 'aumentar inclinação', bpm: 140, from: [5.2, 6], to: [5.2, 7], by: 'ia' };
+    const kept = decideLong({ plan, index: 2, ends: [end(1, 5.2, 150, 7)], changes: [raises[0], late] })!;
+    expect(kept).toMatchObject({ verdict: 'manter', carried: true, stages: [3] });
+    expect([kept.to.speed, kept.to.incline]).toEqual([5.2, 7]);
+    // Com o último aumento a mais de 4 min do fim (aos 800 s), o BPM do fim já é o da carga: a decisão
+    // sobe a partir dos 7%, sem o limite de 1 MET acima dos 4% do plano.
+    const early = decideLong({ plan, index: 2, ends: [end(1, 5.2, 150, 7)], changes: [raises[0], { ...late, second: 800 }] })!;
+    expect(early).toMatchObject({ verdict: 'aumentar', carried: false, stages: [3] });
+    expect(metabolicCost(early.to.speed, early.to.incline)).toBeGreaterThan(metabolicCost(5.2, 7));
+    expect(metabolicCost(early.to.speed, early.to.incline) - metabolicCost(5.2, 7)).toBeLessThanOrEqual(1);
+    // A carga que a pessoa manteve e o app adotou não conta como aumento recente.
+    const adopted: Change = { second: 1000, stage: 1, decision: 'adotar carga', bpm: 148, from: [5.2, 6], to: [5.2, 7], by: 'pessoa' };
+    expect(decideLong({ plan, index: 2, ends: [end(1, 5.2, 150, 7)], changes: [raises[0], adopted] })).toMatchObject({ verdict: 'aumentar' });
+  });
+
+  it('num tiro nada muda: com leitura acima do teto ou corte da trava, a carga mais pesada não passa', () => {
+    const plan = withLoads(vo2(6.6), { 3: [6.0, 1], 5: [6.0, 1] });
+    const log = plan.stages.map((_, i) => (i === 1 ? { ...emptyLog(), liveTop: 172 } : emptyLog()));
+    expect(decide({ plan, index: 2, ends: [end(1, 6.6, 166)], log })).toMatchObject({ verdict: 'manter', carried: false, stages: [] });
+  });
+});
+
 describe('a recuperação pelo coração', () => {
   // Máxima de 179: a recuperação termina com o BPM do momento em 116 (65%).
   const pace = (plan: Plan, index: number, into: number, bpm: number | null, planned = 180) =>
